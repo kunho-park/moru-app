@@ -10,8 +10,20 @@
 
 import { moru } from "./bridge";
 
-export const WEB_URL: string =
-  window.localStorage.getItem("moru:web-url") ?? "https://moru.gg";
+/**
+ * Keep authenticated requests on the canonical host. Fetch intentionally
+ * strips Authorization when an apex → www redirect crosses origins.
+ */
+export function resolveWebUrl(configuredWebUrl: string | null): string {
+  const webUrl = configuredWebUrl ?? "https://www.moru.gg";
+  return webUrl
+    .replace(/^https:\/\/moru\.gg\/?$/, "https://www.moru.gg")
+    .replace(/\/$/, "");
+}
+
+export const WEB_URL = resolveWebUrl(
+  window.localStorage.getItem("moru:web-url"),
+);
 
 export class WebApiError extends Error {
   constructor(

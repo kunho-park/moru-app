@@ -12,6 +12,7 @@
     "dev:web": "vite --config vite.web.config.ts",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "bun test",
     "start": "electron-vite preview",
     "dist": "electron-vite build && electron-builder"
   },

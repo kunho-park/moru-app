@@ -66,12 +66,13 @@ def replace_locale_in_path(
     path: str,
     source_locale: str,
     target_locale: str,
+    *,
+    preserve_case: bool = True,
 ) -> str:
-    """Replace ``source_locale`` with ``target_locale`` inside a path string,
-    preserving the case style of every match.
+    """Replace a standalone locale token inside a path.
 
-    Locale codes appearing as substrings of unrelated words are NOT replaced,
-    because the surrounding characters must be path/extension separators.
+    ``preserve_case`` exists for legacy override files. Resource-pack format
+    3 and newer require lowercase asset names, so their callers disable it.
 
     Examples:
         >>> replace_locale_in_path("assets/foo/lang/en_us.json", "en_us", "ko_kr")
@@ -80,16 +81,22 @@ def replace_locale_in_path(
         >>> replace_locale_in_path("assets/foo/lang/en_US.lang", "en_us", "ko_kr")
         'assets/foo/lang/ko_KR.lang'
 
-        >>> replace_locale_in_path("config/EN_US/foo.cfg", "en_us", "ko_kr")
-        'config/KO_KR/foo.cfg'
+        >>> replace_locale_in_path(
+        ...     "assets/foo/lang/en_US.lang",
+        ...     "en_us",
+        ...     "ko_kr",
+        ...     preserve_case=False,
+        ... )
+        'assets/foo/lang/ko_kr.lang'
 
     Args:
         path: Original path string (forward or backslash separators allowed).
         source_locale: Source locale code in any case (e.g. ``en_us``).
         target_locale: Target locale code in any case (e.g. ``ko_kr``).
+        preserve_case: Mirror the source token's case style when true.
 
     Returns:
-        Path string with locale tokens replaced, case style preserved.
+        Path string with standalone locale tokens replaced.
     """
     src_lower = source_locale.lower()
     if not src_lower:
@@ -105,8 +112,9 @@ def replace_locale_in_path(
     )
 
     def _replace(match: re.Match[str]) -> str:
-        matched = match.group(0)
-        style = _detect_locale_case_style(matched)
+        if not preserve_case:
+            return target_locale.lower()
+        style = _detect_locale_case_style(match.group(0))
         return _apply_locale_case_style(target_locale, style)
 
     return pattern.sub(_replace, path)

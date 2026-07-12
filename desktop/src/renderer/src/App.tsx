@@ -91,9 +91,9 @@ export default function App() {
   // talks to the engine (/providers).
   const showOnboarding = !onboarded || screen === "onboarding";
   return (
-    <div className="flex h-screen min-h-[760px] min-w-[1200px] flex-col bg-bg">
+    <div className="flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden bg-bg">
       <Titlebar />
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <EngineGate>
           <StartupCommunitySync />
           {showOnboarding ? (
@@ -101,7 +101,7 @@ export default function App() {
           ) : (
             <>
               <Sidebar />
-              <main className="relative flex-1 overflow-x-hidden overflow-y-auto bg-bg">
+              <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-bg">
                 <MainContent />
               </main>
             </>

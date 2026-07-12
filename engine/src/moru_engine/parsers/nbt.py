@@ -37,6 +37,40 @@ TAG_INT_ARRAY = 11
 TAG_LONG_ARRAY = 12
 
 
+class _NBTInt(int):
+    """Integer value retaining its exact NBT numeric tag."""
+
+    def __new__(cls, value: int, tag_type: int) -> _NBTInt:
+        instance = int.__new__(cls, value)
+        instance.tag_type = tag_type
+        return instance
+
+
+class _NBTFloat(float):
+    """Floating-point value retaining float vs double."""
+
+    def __new__(cls, value: float, tag_type: int) -> _NBTFloat:
+        instance = float.__new__(cls, value)
+        instance.tag_type = tag_type
+        return instance
+
+
+class _NBTList(list[NBTValue]):
+    """Homogeneous NBT list retaining its declared element tag."""
+
+    def __init__(self, values: list[NBTValue], element_type: int) -> None:
+        super().__init__(values)
+        self.element_type = element_type
+
+
+class _NBTArray(list[int]):
+    """NBT byte/int/long array retaining the distinct array tag."""
+
+    def __init__(self, values: list[int], tag_type: int) -> None:
+        super().__init__(values)
+        self.tag_type = tag_type
+
+
 class NBTParser(BaseParser):
     """Parser for binary NBT format files.
 
@@ -210,70 +244,66 @@ class NBTParser(BaseParser):
         offset: int,
         tag_type: int,
     ) -> tuple[NBTValue, int]:
-        """Parse a tag value based on its type.
-
-        Args:
-            data: Raw bytes.
-            offset: Current position.
-            tag_type: NBT tag type.
-
-        Returns:
-            Tuple of (parsed value, new offset).
-        """
+        """Parse one payload while retaining its exact NBT type."""
         if tag_type == TAG_BYTE:
-            return struct.unpack(">b", data[offset : offset + 1])[0], offset + 1
+            value = struct.unpack(">b", data[offset : offset + 1])[0]
+            return _NBTInt(value, TAG_BYTE), offset + 1
         if tag_type == TAG_SHORT:
-            return struct.unpack(">h", data[offset : offset + 2])[0], offset + 2
+            value = struct.unpack(">h", data[offset : offset + 2])[0]
+            return _NBTInt(value, TAG_SHORT), offset + 2
         if tag_type == TAG_INT:
-            return struct.unpack(">i", data[offset : offset + 4])[0], offset + 4
+            value = struct.unpack(">i", data[offset : offset + 4])[0]
+            return _NBTInt(value, TAG_INT), offset + 4
         if tag_type == TAG_LONG:
-            return struct.unpack(">q", data[offset : offset + 8])[0], offset + 8
+            value = struct.unpack(">q", data[offset : offset + 8])[0]
+            return _NBTInt(value, TAG_LONG), offset + 8
         if tag_type == TAG_FLOAT:
-            return struct.unpack(">f", data[offset : offset + 4])[0], offset + 4
+            value = struct.unpack(">f", data[offset : offset + 4])[0]
+            return _NBTFloat(value, TAG_FLOAT), offset + 4
         if tag_type == TAG_DOUBLE:
-            return struct.unpack(">d", data[offset : offset + 8])[0], offset + 8
+            value = struct.unpack(">d", data[offset : offset + 8])[0]
+            return _NBTFloat(value, TAG_DOUBLE), offset + 8
         if tag_type == TAG_BYTE_ARRAY:
             length = struct.unpack(">i", data[offset : offset + 4])[0]
             offset += 4
-            return list(data[offset : offset + length]), offset + length
+            values = list(data[offset : offset + length])
+            return _NBTArray(values, TAG_BYTE_ARRAY), offset + length
         if tag_type == TAG_STRING:
             length = struct.unpack(">H", data[offset : offset + 2])[0]
             offset += 2
-            return data[offset : offset + length].decode(
+            value = data[offset : offset + length].decode(
                 "utf-8", errors="replace"
-            ), offset + length
+            )
+            return value, offset + length
         if tag_type == TAG_LIST:
             list_type = data[offset]
             offset += 1
             length = struct.unpack(">i", data[offset : offset + 4])[0]
             offset += 4
-            result: list[NBTValue] = []
+            values: list[NBTValue] = []
             for _ in range(length):
                 value, offset = self._parse_tag(data, offset, list_type)
-                result.append(value)
-            return result, offset
+                values.append(value)
+            return _NBTList(values, list_type), offset
         if tag_type == TAG_COMPOUND:
             return self._parse_compound(data, offset)
         if tag_type == TAG_INT_ARRAY:
             length = struct.unpack(">i", data[offset : offset + 4])[0]
             offset += 4
-            result_ints: list[int] = []
+            values = []
             for _ in range(length):
-                value_int = struct.unpack(">i", data[offset : offset + 4])[0]
-                result_ints.append(value_int)
+                values.append(struct.unpack(">i", data[offset : offset + 4])[0])
                 offset += 4
-            return result_ints, offset
+            return _NBTArray(values, TAG_INT_ARRAY), offset
         if tag_type == TAG_LONG_ARRAY:
             length = struct.unpack(">i", data[offset : offset + 4])[0]
             offset += 4
-            result_longs: list[int] = []
+            values = []
             for _ in range(length):
-                value_long = struct.unpack(">q", data[offset : offset + 8])[0]
-                result_longs.append(value_long)
+                values.append(struct.unpack(">q", data[offset : offset + 8])[0])
                 offset += 8
-            return result_longs, offset
+            return _NBTArray(values, TAG_LONG_ARRAY), offset
 
-        # Unknown tag type
         logger.warning("Unknown NBT tag type: %d", tag_type)
         return None, offset
 
@@ -352,6 +382,9 @@ class NBTParser(BaseParser):
                     result[key] = value
             return result
 
+        if isinstance(obj, _NBTArray):
+            return obj
+
         if isinstance(obj, list):
             result_list: list[NBTValue] = []
             for i, item in enumerate(obj):
@@ -364,6 +397,8 @@ class NBTParser(BaseParser):
                     )
                 else:
                     result_list.append(item)
+            if isinstance(obj, _NBTList):
+                return _NBTList(result_list, obj.element_type)
             return result_list
 
         if isinstance(obj, str) and prefix in flat_data:
@@ -417,14 +452,11 @@ class NBTParser(BaseParser):
         return result
 
     def _get_tag_type(self, value: NBTValue) -> int:
-        """Determine NBT tag type for a value.
-
-        Args:
-            value: Value to check.
-
-        Returns:
-            NBT tag type constant.
-        """
+        """Determine a value's NBT tag without narrowing parsed types."""
+        if isinstance(value, _NBTInt | _NBTFloat | _NBTArray):
+            return value.tag_type
+        if isinstance(value, _NBTList):
+            return TAG_LIST
         if isinstance(value, bool):
             return TAG_BYTE
         if isinstance(value, int):
@@ -443,18 +475,10 @@ class NBTParser(BaseParser):
             return TAG_LIST
         if isinstance(value, dict):
             return TAG_COMPOUND
-        return TAG_STRING  # Default to string
+        return TAG_STRING
 
     def _serialize_value(self, value: NBTValue, tag_type: int) -> bytes:
-        """Serialize a value to NBT binary.
-
-        Args:
-            value: Value to serialize.
-            tag_type: NBT tag type.
-
-        Returns:
-            Binary data.
-        """
+        """Serialize a payload using its preserved or declared tag type."""
         if tag_type == TAG_BYTE:
             byte_value = (
                 int(value)
@@ -473,13 +497,21 @@ class NBTParser(BaseParser):
             return struct.pack(">f", value if isinstance(value, float | int) else 0.0)
         if tag_type == TAG_DOUBLE:
             return struct.pack(">d", value if isinstance(value, float | int) else 0.0)
+        if tag_type == TAG_BYTE_ARRAY:
+            values = value if isinstance(value, list) else []
+            payload = bytes(int(item) & 0xFF for item in values)
+            return struct.pack(">i", len(values)) + payload
         if tag_type == TAG_STRING:
             encoded = str(value).encode("utf-8")
             return struct.pack(">H", len(encoded)) + encoded
         if tag_type == TAG_LIST:
-            if not isinstance(value, list) or not value:
-                return struct.pack("B", 0) + struct.pack(">i", 0)
-            list_type = self._get_tag_type(value[0])
+            if not isinstance(value, list):
+                return struct.pack("B", TAG_END) + struct.pack(">i", 0)
+            list_type = (
+                value.element_type
+                if isinstance(value, _NBTList)
+                else (self._get_tag_type(value[0]) if value else TAG_END)
+            )
             result = struct.pack("B", list_type)
             result += struct.pack(">i", len(value))
             for item in value:
@@ -489,7 +521,16 @@ class NBTParser(BaseParser):
             if isinstance(value, dict):
                 return self._serialize_compound(value)
             return struct.pack("B", TAG_END)
+        if tag_type == TAG_INT_ARRAY:
+            values = value if isinstance(value, list) else []
+            return struct.pack(">i", len(values)) + b"".join(
+                struct.pack(">i", int(item)) for item in values
+            )
+        if tag_type == TAG_LONG_ARRAY:
+            values = value if isinstance(value, list) else []
+            return struct.pack(">i", len(values)) + b"".join(
+                struct.pack(">q", int(item)) for item in values
+            )
 
-        # Default to string
         encoded = str(value).encode("utf-8")
         return struct.pack(">H", len(encoded)) + encoded

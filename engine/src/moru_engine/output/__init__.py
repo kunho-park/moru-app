@@ -11,6 +11,7 @@ from .generator import (
     Route,
     create_zip_from_directory,
     route_for,
+    pack_format_for_minecraft_version,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "Route",
     "create_zip_from_directory",
     "route_for",
+    "pack_format_for_minecraft_version",
 ]

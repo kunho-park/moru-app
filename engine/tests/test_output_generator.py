@@ -12,6 +12,7 @@ from moru_engine.output import (
     OutputConfig,
     OutputGenerator,
     Route,
+    pack_format_for_minecraft_version,
     route_for,
 )
 
@@ -64,6 +65,22 @@ def _generator(tmp_path: Path) -> OutputGenerator:
 )
 def test_route_for(path: str, expected: Route) -> None:
     assert route_for(Path(path)) == expected
+
+
+@pytest.mark.parametrize(
+    ("mc_version", "expected"),
+    [
+        ("1.12.2", 3),
+        ("Minecraft 1.11.2 Forge", 3),
+        ("1.20.1", 15),
+        (None, 15),
+    ],
+)
+def test_pack_format_for_minecraft_version(
+    mc_version: str | None,
+    expected: int,
+) -> None:
+    assert pack_format_for_minecraft_version(mc_version) == expected
 
 
 # -- resource pack -------------------------------------------------------------
@@ -134,18 +151,29 @@ async def test_same_namespace_sources_merge_into_one_lang_file(
 
 
 @pytest.mark.asyncio
-async def test_legacy_lang_file_keeps_lang_format(tmp_path: Path) -> None:
+async def test_format_three_lang_file_is_lowercase_and_loadable(
+    tmp_path: Path,
+) -> None:
     source = _write(
         tmp_path / "modpack/.mct_cache/extracted/m.jar/assets/m/lang/en_US.lang",
         "a=Alpha\n",
     )
-    gen = _generator(tmp_path)
+    gen = OutputGenerator(
+        OutputConfig(
+            modpack_root=tmp_path / "modpack",
+            output_dir=tmp_path / "out",
+            pack_format=3,
+        )
+    )
     result = await gen.generate(
         [FileOutput(source, fresh={"a": "알파"}, full={"a": "알파"}, namespace="m")]
     )
-    out = tmp_path / "out/resourcepack/assets/m/lang/ko_KR.lang"
+    out = tmp_path / "out/resourcepack/assets/m/lang/ko_kr.lang"
     assert result.resourcepack_files == [out]
     assert "a=알파" in out.read_text(encoding="utf-8")
+    assert result.pack_mcmeta is not None
+    mcmeta = json.loads(result.pack_mcmeta.read_text(encoding="utf-8"))
+    assert mcmeta["pack"]["pack_format"] == 3
 
 
 # -- skips ---------------------------------------------------------------------

@@ -37,6 +37,7 @@ from ..output import (
     GenerationResult,
     OutputConfig,
     OutputGenerator,
+    pack_format_for_minecraft_version,
 )
 from ..placeholder import PlaceholderError, PlaceholderProtector, ProtectedText
 from ..scanner import ModpackScanner, ScanResult
@@ -969,13 +970,17 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
     identity = detect_pack_identity(config.modpack_path)
     pack_name = identity.name or config.modpack_path.name
     title = f"{pack_name} {identity.version}" if identity.version else pack_name
+    pack_format = pack_format_for_minecraft_version(
+        identity.mc_version,
+        config.pack_format,
+    )
     generator = OutputGenerator(
         OutputConfig(
             modpack_root=config.modpack_path,
             output_dir=output_root(config),
             source_locale=config.source_locale,
             target_locale=config.target_locale,
-            pack_format=config.pack_format,
+            pack_format=pack_format,
             description=f"§f{title} §7한국어 번역\n§a모루§7로 번역됨 — §amoru.gg",
         )
     )

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import zipfile
 from dataclasses import dataclass, field
@@ -37,12 +38,28 @@ from ..utils.locale_helper import replace_locale_in_path
 
 logger = logging.getLogger(__name__)
 
-#: MC 1.20.x. Packs with a mismatched format still load after a confirm
-#: prompt, so one sane default beats a per-version table for now.
+#: MC 1.20-1.20.1 fallback. Known legacy versions are resolved from launcher
+#: metadata before generation so their packs load without a compatibility error.
 DEFAULT_PACK_FORMAT = 15
 
 RESOURCEPACK_DIRNAME = "resourcepack"
 OVERRIDES_DIRNAME = "overrides"
+
+def pack_format_for_minecraft_version(
+    mc_version: str | None,
+    fallback: int = DEFAULT_PACK_FORMAT,
+) -> int:
+    """Return the resource-pack format for legacy versions we can prove.
+
+    Forge 1.12 requires format 3 and lowercase asset names. Unknown/newer
+    versions retain the configured fallback rather than guessing.
+    """
+    if mc_version is None:
+        return fallback
+    match = re.search(r"(?<!\d)1\.(\d+)(?:\.\d+)?", mc_version)
+    if match is not None and int(match.group(1)) in {11, 12}:
+        return 3
+    return fallback
 
 #: Bundled moru anvil icon, shipped as ``pack.png`` so the generated pack
 #: is recognizable in the resource-pack selection screen.
@@ -280,7 +297,7 @@ class OutputGenerator:
     def _asset_relative(self, source_path: Path) -> str | None:
         """Path below the asset root, or None when there is no such root.
 
-        Recognized layouts (case preserved from the original path):
+        Recognized layouts:
         - ``…/assets/<ns>/…`` — standard resource pack / mod JAR tree.
         - ``…/resources/<ns>/…`` — 1.12.x launcher overlay where
           ``resources/`` itself is the asset root.
@@ -292,7 +309,10 @@ class OutputGenerator:
             if idx >= 0:
                 rel = source_str[idx + len(marker) :]
                 return replace_locale_in_path(
-                    rel, self.config.source_locale, self.config.target_locale
+                    rel,
+                    self.config.source_locale,
+                    self.config.target_locale,
+                    preserve_case=self.config.pack_format < 3,
                 )
         return None
 

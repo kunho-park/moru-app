@@ -52,6 +52,10 @@ class LangParser(BaseParser):
             raise ParseError(self.path, f"Could not read file: {e}") from e
 
         mapping: dict[str, str] = {}
+        parse_escapes = any(
+            line.strip().upper() == PARSE_ESCAPES_DIRECTIVE
+            for line in text.splitlines()
+        )
 
         for line_num, line in enumerate(text.splitlines(), start=1):
             line = line.strip()
@@ -67,14 +71,15 @@ class LangParser(BaseParser):
             key = key.strip()
             value = value.strip()
 
-            try:
-                parsed_value = json.loads(f'"{value}"')
-            except json.JSONDecodeError:
-                logger.debug(
-                    "Could not parse escape sequences on line %d, using raw value",
-                    line_num,
-                )
-                parsed_value = value
+            parsed_value = value
+            if parse_escapes:
+                try:
+                    parsed_value = json.loads(f'"{value}"')
+                except json.JSONDecodeError:
+                    logger.debug(
+                        "Could not parse escape sequences on line %d, using raw value",
+                        line_num,
+                    )
 
             mapping[key] = parsed_value
 
@@ -102,7 +107,11 @@ class LangParser(BaseParser):
 
         for key, value in sorted(data.items()):
             if isinstance(value, str):
-                escaped_value = json.dumps(value, ensure_ascii=False)[1:-1]
+                escaped_value = (
+                    json.dumps(value, ensure_ascii=False)[1:-1]
+                    if has_parse_escapes
+                    else value.replace("\r", "\\r").replace("\n", "\\n")
+                )
             else:
                 escaped_value = str(value)
             lines.append(f"{key}={escaped_value}")
@@ -117,11 +126,11 @@ class LangParser(BaseParser):
 
     @staticmethod
     async def _has_parse_escapes_directive(source: Path) -> bool:
-        """Return True if the first non-blank line declares ``#PARSE_ESCAPES``.
+        """Return True when the file declares ``#PARSE_ESCAPES``.
 
-        BetterQuesting and other older mods only honor escape sequences
-        (``\\n``, ``\\u0027``, etc.) when this header is present, so the
-        dump path must echo it back when the source file had one.
+        Forge 1.12 permits the directive anywhere in the file. BetterQuesting
+        and similar mods honor escape sequences only when it is present, so
+        the generated file must echo it.
         """
         try:
             async with aiofiles.open(
@@ -129,9 +138,8 @@ class LangParser(BaseParser):
             ) as f:
                 async for raw_line in f:
                     line = raw_line.strip()
-                    if not line:
-                        continue
-                    return line.upper() == PARSE_ESCAPES_DIRECTIVE
+                    if line.upper() == PARSE_ESCAPES_DIRECTIVE:
+                        return True
         except (OSError, FileNotFoundError):
             return False
         return False

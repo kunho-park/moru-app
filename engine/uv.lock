@@ -821,7 +821,7 @@ wheels = [
 
 [[package]]
 name = "moru-engine"
-version = "0.4.3"
+version = "0.4.4"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },

@@ -1,0 +1,305 @@
+{
+  "version": 1,
+  "source_lang": "en_us",
+  "target_lang": "ko_kr",
+  "cases": [
+    {
+      "id": "ph_dense_01",
+      "category": "placeholder",
+      "key": "quest.reward.broadcast",
+      "source": "{player} completed {quest} in {time}! Reward: {count}x {item}",
+      "gold": "{player}님이 {quest} 퀘스트를 {time} 만에 완료했습니다! 보상: {item} {count}개"
+    },
+    {
+      "id": "ph_dense_02",
+      "category": "placeholder",
+      "key": "gui.schematic.rotate_hint",
+      "source": "Press <key>R</key> to rotate the <b>schematic</b> before placing it.",
+      "gold": "<b>설계도</b>를 배치하기 전에 <key>R</key> 키를 눌러 회전하세요."
+    },
+    {
+      "id": "ph_dense_03",
+      "category": "placeholder",
+      "key": "skill.unlock.requirement",
+      "source": "Requires <red>{level}</red> levels and {cost} Emeralds to unlock this skill.",
+      "gold": "이 스킬을 해금하려면 <red>{level}</red>레벨과 에메랄드 {cost}개가 필요합니다."
+    },
+    {
+      "id": "ph_dense_04",
+      "category": "placeholder",
+      "key": "gui.storage.slots",
+      "source": "{used}/{total} slots used — {free} remaining",
+      "gold": "{used}/{total}칸 사용 중 — {free}칸 남음"
+    },
+    {
+      "id": "ph_dense_05",
+      "category": "placeholder",
+      "key": "book.recipes.wiki_link",
+      "source": "Visit <link url='https://wiki.example.com'>the wiki</link> for advanced recipes and machine layouts.",
+      "gold": "고급 조합법과 기계 배치는 <link url='https://wiki.example.com'>위키</link>에서 확인하세요."
+    },
+    {
+      "id": "color_01",
+      "category": "color",
+      "key": "item.dragonfire_sword.lore",
+      "source": "§6Legendary§r §7— forged in dragonfire, this blade never dulls.",
+      "gold": "§6전설§r §7— 용의 불꽃으로 벼려낸 이 검은 결코 무뎌지지 않습니다."
+    },
+    {
+      "id": "color_02",
+      "category": "color",
+      "key": "block.harvester.usage",
+      "source": "§aRight-click§r to harvest. §cWarning:§r walking over crops tramples them!",
+      "gold": "§a우클릭§r으로 수확하세요. §c주의:§r 작물 위를 걸어 다니면 작물이 짓밟힙니다!"
+    },
+    {
+      "id": "color_03",
+      "category": "color",
+      "key": "boss.vault_warden.spawn",
+      "source": "§l§4BOSS§r §8The Warden of the Vault stirs below...§r",
+      "gold": "§l§4보스§r §8금고의 감시자가 지하에서 꿈틀거립니다...§r"
+    },
+    {
+      "id": "color_04",
+      "category": "color",
+      "key": "item.sunfire_blade.desc",
+      "source": "§x§f§f§a§a§0§0Sunfire Blade§r sets enemies ablaze on hit.",
+      "gold": "§x§f§f§a§a§0§0태양불꽃 검§r은 적중한 적을 불태웁니다."
+    },
+    {
+      "id": "color_05",
+      "category": "color",
+      "key": "altar.activate.requirement",
+      "source": "You need §b5 more levels§r to activate this altar.",
+      "gold": "이 제단을 활성화하려면 §b5레벨§r이 더 필요합니다."
+    },
+    {
+      "id": "fmt_01",
+      "category": "format",
+      "key": "death.attack.player.item",
+      "source": "%s was slain by %s using %s",
+      "gold": "%s이(가) %s의 %s에 살해당했습니다"
+    },
+    {
+      "id": "fmt_02",
+      "category": "format",
+      "key": "merchant.trade.log",
+      "source": "%1$s bought %3$d items from %2$s.",
+      "gold": "%1$s이(가) %2$s에게서 아이템 %3$d개를 구입했습니다."
+    },
+    {
+      "id": "fmt_03",
+      "category": "format",
+      "key": "gui.level.progress",
+      "source": "Level: %d\nNext level: %d XP\n\nDefeat monsters to earn experience.",
+      "gold": "레벨: %d\n다음 레벨까지: %d XP\n\n몬스터를 처치해 경험치를 얻으세요."
+    },
+    {
+      "id": "fmt_04",
+      "category": "format",
+      "key": "item.stats.attack_speed",
+      "source": "Attack Speed: %.1f (+%.1f from socketed gems)",
+      "gold": "공격 속도: %.1f (보석 장착 효과 +%.1f)"
+    },
+    {
+      "id": "fmt_05",
+      "category": "format",
+      "key": "affix.crit_chance.desc",
+      "source": "Critical strike chance +%d%% while at full health.",
+      "gold": "체력이 가득 찬 동안 치명타 확률 +%d%%"
+    },
+    {
+      "id": "json_str_01",
+      "category": "json_in_string",
+      "key": "chat.welcome.raw",
+      "source": "{\"text\":\"Welcome to the server, adventurer!\",\"color\":\"gold\",\"bold\":true}",
+      "gold": "{\"text\":\"모험가님, 서버에 오신 것을 환영합니다!\",\"color\":\"gold\",\"bold\":true}"
+    },
+    {
+      "id": "json_str_02",
+      "category": "json_in_string",
+      "key": "title.chapter_one.raw",
+      "source": "{\"title\":\"Chapter One\",\"subtitle\":\"The Journey Begins\",\"fadeIn\":10,\"stay\":70,\"fadeOut\":20}",
+      "gold": "{\"title\":\"1장\",\"subtitle\":\"여정의 시작\",\"fadeIn\":10,\"stay\":70,\"fadeOut\":20}"
+    },
+    {
+      "id": "json_str_03",
+      "category": "json_in_string",
+      "key": "book.guide_link.raw",
+      "source": "[{\"text\":\"Click \"},{\"text\":\"here\",\"underlined\":true,\"clickEvent\":{\"action\":\"open_url\",\"value\":\"https://modpack.wiki/guide\"}},{\"text\":\" to open the getting-started guide.\"}]",
+      "gold": "[{\"text\":\"입문 가이드를 열려면 \"},{\"text\":\"여기\",\"underlined\":true,\"clickEvent\":{\"action\":\"open_url\",\"value\":\"https://modpack.wiki/guide\"}},{\"text\":\"를 클릭하세요.\"}]"
+    },
+    {
+      "id": "json_str_04",
+      "category": "json_in_string",
+      "key": "item.mystic_ore.hover_raw",
+      "source": "{\"text\":\"[Mystic Ore]\",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"Found only below Y=-32 in the Nether\"}}",
+      "gold": "{\"text\":\"[신비한 광석]\",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"네더의 Y=-32 아래에서만 발견됩니다\"}}"
+    },
+    {
+      "id": "quest_long_01",
+      "category": "long_quest",
+      "key": "ftbquests.chapter.intro.description",
+      "source": "Welcome to the Shattered Frontier! Long ago this land was whole, but the Rift tore it into floating islands drifting through an endless void. Your first task is simple: survive the night. Punch some trees, craft a Crafting Table, and build a small shelter before the sun sets. Once you have a roof over your head, open this quest book again — a new chapter will unlock, and with it the tools you will need to stitch this broken world back together.\n\nGood luck, traveler. The Frontier is watching.",
+      "gold": "산산이 조각난 변경 지대에 오신 것을 환영합니다! 오래전 이 땅은 하나였지만, 균열이 대지를 찢어 끝없는 공허를 떠도는 부유섬으로 만들어 버렸습니다. 첫 번째 과제는 간단합니다. 밤을 버텨내세요. 나무를 캐서 제작대를 만들고, 해가 지기 전에 작은 은신처를 지으세요. 머리 위에 지붕이 생겼다면 이 퀘스트 책을 다시 펼쳐 보세요. 새로운 장이 열리고, 부서진 세계를 다시 꿰매는 데 필요한 도구들이 함께 해금됩니다.\n\n행운을 빕니다, 여행자여. 변경 지대가 당신을 지켜보고 있습니다."
+    },
+    {
+      "id": "quest_long_02",
+      "category": "long_quest",
+      "key": "ftbquests.chapter.deep.description",
+      "source": "§lChapter 2: Into the Deep§r\n\nThe miners of Old Hollowton dug too greedily and too deep, and what they woke has kept these tunnels sealed for a hundred years. To reach the Deepslate layer you will need more than courage: bring at least a full stack of torches, a §9Water Bucket§r for lava crossings, and a bed to anchor your spawn point. Ores below Y=0 drop twice the raw material, but the darkness down there spawns twice the horror. Set up a forward base, light every corridor, and whatever you do, §c§ldo not dig straight down§r.",
+      "gold": "§l2장: 심연 속으로§r\n\n옛 할로우턴의 광부들은 너무 욕심을 부려 너무 깊이 파 내려갔고, 그들이 깨운 존재 때문에 이 갱도는 백 년 동안 봉인되어 있었습니다. 심층암 층에 도달하려면 용기만으로는 부족합니다. 횃불 한 묶음 이상과 용암 지대를 건널 §9물 양동이§r, 리스폰 지점을 고정할 침대를 꼭 챙기세요. Y=0 아래의 광석은 원석을 두 배로 주지만, 그곳의 어둠은 공포도 두 배로 불러냅니다. 전진 기지를 세우고 모든 통로에 불을 밝히세요. 그리고 무슨 일이 있어도 §c§l수직으로 파 내려가지 마세요§r."
+    },
+    {
+      "id": "quest_long_03",
+      "category": "long_quest",
+      "key": "ftbquests.quest.storm_heart.description",
+      "source": "The Archivist studies you with eyes like cracked amethyst. \"So you are the one the constellations whispered about,\" she says, sliding a dusty tome across the desk. \"Every mage before you tried to bind the Storm Heart by force, and every one of them is now a very interesting stain on my ceiling. You will be different, I hope. Gather {count} Resonant Crystals from the Crystal Caverns, temper them in a Soul Forge, and return to me before the blood moon rises. We have three days, apprentice — do not waste them.\"",
+      "gold": "기록관리인이 금 간 자수정 같은 눈으로 당신을 살핍니다. \"그러니까 당신이 별자리가 속삭이던 바로 그 사람이군요.\" 그녀가 먼지 쌓인 고서를 책상 너머로 밀며 말합니다. \"당신 이전의 마법사들은 하나같이 폭풍의 심장을 힘으로 속박하려 들었고, 지금은 전부 제 천장의 아주 흥미로운 얼룩이 되어 있죠. 당신은 다르기를 바랍니다. 수정 동굴에서 공명 수정 {count}개를 모아 영혼 화로에서 담금질한 뒤, 붉은 달이 떠오르기 전에 제게 돌아오세요. 사흘 남았습니다, 견습생. 허투루 쓰지 마세요.\""
+    },
+    {
+      "id": "quest_long_04",
+      "category": "long_quest",
+      "key": "ftbquests.chapter.automation.description",
+      "source": "§6Automation 101§r\n\nHand-cranking machines is fine for your first week, but real factories run on their own. Start by placing a Mechanical Press next to a Water Wheel: flowing water on any three sides will spin the wheel and feed 512 su of rotational force into every connected shaft. Use cogwheels to route power around corners, and remember that large cogwheels halve speed while doubling torque. When your press stamps its first Iron Sheet without you touching anything, come back here — Chapter 3 will teach you belts, funnels, and the gentle art of not flooding your own base.",
+      "gold": "§6자동화 입문§r\n\n첫 주에는 기계를 손으로 돌려도 괜찮지만, 진짜 공장은 스스로 굴러가야 합니다. 먼저 기계식 압착기를 물레방아 옆에 설치하세요. 세 면 이상에 흐르는 물이 닿으면 물레방아가 돌면서 연결된 모든 축에 512su의 회전력을 공급합니다. 톱니바퀴로 모서리 너머까지 동력을 전달하고, 큰 톱니바퀴는 속도를 절반으로 줄이는 대신 토크를 두 배로 늘린다는 점을 기억하세요. 손 하나 대지 않고 압착기가 첫 철판을 찍어내면 이곳으로 돌아오세요. 3장에서는 벨트와 깔때기, 그리고 자기 기지를 물바다로 만들지 않는 섬세한 기술을 배웁니다."
+    },
+    {
+      "id": "tooltip_01",
+      "category": "tooltip",
+      "key": "item.backpack.tooltip.open",
+      "source": "Right-click to open",
+      "gold": "우클릭으로 열기"
+    },
+    {
+      "id": "tooltip_02",
+      "category": "tooltip",
+      "key": "tooltip.shift_details",
+      "source": "Hold §eShift§r for details",
+      "gold": "§eShift§r를 누르고 있으면 상세 정보 표시"
+    },
+    {
+      "id": "tooltip_03",
+      "category": "tooltip",
+      "key": "item.wrench.tooltip.mode",
+      "source": "Sneak-click to change mode",
+      "gold": "웅크린 채 클릭하면 모드 변경"
+    },
+    {
+      "id": "tooltip_04",
+      "category": "tooltip",
+      "key": "tooltip.durability",
+      "source": "Durability: {current}/{max}",
+      "gold": "내구도: {current}/{max}"
+    },
+    {
+      "id": "tooltip_05",
+      "category": "tooltip",
+      "key": "item.fluid_cell.tooltip.capacity",
+      "source": "Stores up to 16,000 mB of any fluid",
+      "gold": "어떤 액체든 최대 16,000mB까지 저장"
+    },
+    {
+      "id": "gloss_01",
+      "category": "glossary",
+      "key": "guide.enchanting.setup",
+      "source": "Place your Enchanting Table near bookshelves to unlock level 30 enchantments.",
+      "gold": "마법 부여대를 책장 근처에 설치하면 30레벨 마법 부여가 해금됩니다.",
+      "term_rules": [
+        {
+          "aliases": [
+            "Enchanting Table"
+          ],
+          "target": "마법 부여대"
+        }
+      ]
+    },
+    {
+      "id": "gloss_02",
+      "category": "glossary",
+      "key": "advancement.elytra_flight.desc",
+      "source": "Equip the Elytra, leap off a cliff, and fire a rocket to soar across the sky.",
+      "gold": "겉날개를 장착하고 절벽에서 뛰어내린 뒤 폭죽 로켓을 사용해 하늘을 활공하세요.",
+      "term_rules": [
+        {
+          "aliases": [
+            "Elytra"
+          ],
+          "target": "겉날개"
+        }
+      ]
+    },
+    {
+      "id": "gloss_03",
+      "category": "glossary",
+      "key": "recipe.eye_of_ender.hint",
+      "source": "Craft an Eye of Ender by combining an Ender Pearl with Blaze Powder.",
+      "gold": "엔더 진주와 블레이즈 가루를 조합해 엔더의 눈을 만드세요.",
+      "term_rules": [
+        {
+          "aliases": [
+            "Eye of Ender"
+          ],
+          "target": "엔더의 눈"
+        },
+        {
+          "aliases": [
+            "Ender Pearl"
+          ],
+          "target": "엔더 진주"
+        },
+        {
+          "aliases": [
+            "Blaze Powder"
+          ],
+          "target": "블레이즈 가루"
+        }
+      ]
+    },
+    {
+      "id": "gloss_04",
+      "category": "glossary",
+      "key": "recipe.netherite_ingot.hint",
+      "source": "Combine four Netherite Scraps and four Gold Ingots to craft a single Netherite Ingot.",
+      "gold": "네더라이트 파편 4개와 금 주괴 4개를 조합하면 네더라이트 주괴 1개를 만들 수 있습니다.",
+      "term_rules": [
+        {
+          "aliases": [
+            "Netherite Ingot"
+          ],
+          "target": "네더라이트 주괴"
+        },
+        {
+          "aliases": [
+            "Netherite Scrap",
+            "Netherite Scraps"
+          ],
+          "target": "네더라이트 파편"
+        },
+        {
+          "aliases": [
+            "Gold Ingot",
+            "Gold Ingots"
+          ],
+          "target": "금 주괴"
+        }
+      ]
+    },
+    {
+      "id": "gloss_05",
+      "category": "glossary",
+      "key": "machine.pulverizer.energy_desc",
+      "source": "The Pulverizer consumes 40 Redstone Flux per tick while crushing ores, or 20 RF when idle.",
+      "gold": "분쇄기는 광석을 분쇄하는 동안 틱당 레드스톤 플럭스 40을 소모하며, 대기 중에는 레드스톤 플럭스 20을 소모합니다.",
+      "term_rules": [
+        {
+          "aliases": [
+            "Redstone Flux",
+            "RF"
+          ],
+          "target": "레드스톤 플럭스"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "appTagline": "Modpack Translation Studio",
+  "preset": {
+    "fast": "Fast",
+    "balanced": "Balanced",
+    "best": "Best quality"
+  },
+  "nav": {
+    "newTranslation": "New Translation",
+    "home": "Home",
+    "history": "History",
+    "glossary": "Glossary",
+    "community": "Community",
+    "settings": "Settings"
+  },
+  "update": {
+    "available": "Update available",
+    "installNow": "Install now",
+    "downloading": "Downloading {{percent}}%",
+    "upToDate": "Up to date"
+  },
+  "account": {
+    "connected": "Discord connected",
+    "notConnected": "Not signed in",
+    "guest": "Guest"
+  },
+  "engine": {
+    "starting": "Starting translation engine…",
+    "restarting": "Restarting engine… ({{count}}/3)",
+    "failedTitle": "Failed to start the translation engine",
+    "retry": "Retry",
+    "copyLog": "Copy log",
+    "details": "Details"
+  },
+  "wizard": {
+    "title": "New Translation",
+    "step1": "Select Modpack",
+    "step2": "Scan Results",
+    "step3": "Settings",
+    "step4": "Progress",
+    "step5": "Review",
+    "step6": "Export · Share",
+    "eta": "Estimated completion",
+    "stepsDone": "{{done}} / 6 steps done"
+  },
+  "status": {
+    "pending": "Pending",
+    "running": "Running",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "warning": "Warning",
+    "passed": "Passed",
+    "modified": "Modified",
+    "tmHit": "TM reuse",
+    "skipped": "Skipped",
+    "shared": "Shared"
+  },
+  "action": {
+    "next": "Next",
+    "back": "Back",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "retry": "Retry",
+    "delete": "Delete",
+    "save": "Save",
+    "close": "Close",
+    "openFolder": "Open folder",
+    "search": "Search"
+  },
+  "unit": {
+    "files": "{{count}} files",
+    "entries": "{{count}} entries"
+  }
+}

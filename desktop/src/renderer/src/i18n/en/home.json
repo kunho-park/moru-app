@@ -1,0 +1,62 @@
+{
+  "greeting": "Hello",
+  "title": "Ready to <1>translate</1> today?",
+  "import": "Import",
+  "stats": {
+    "totalEntries": "Total translated entries",
+    "thisWeek": "+{{n}} this week",
+    "tmTokens": "TM tokens saved",
+    "tmSaved": "≈ {{amount}} saved",
+    "completedPacks": "Completed modpacks",
+    "packsBreakdown": "Shared {{shared}} · Local {{local}}",
+    "ranking": "Contribution rank",
+    "rankingLocked": "Available after web sign-in"
+  },
+  "recent": {
+    "title": "Recent jobs",
+    "viewAll": "View all →",
+    "resume": "Resume",
+    "entries": "{{n}} entries",
+    "passRate": "{{percent}}% passed",
+    "doneAt": "Finished {{when}}",
+    "folder": "Folder",
+    "shareLink": "Share link",
+    "retry": "Retry",
+    "delete": "Delete",
+    "failedFallback": "Stopped by an error",
+    "cancelledFallback": "Cancelled by user"
+  },
+  "empty": {
+    "title": "No jobs yet",
+    "desc": "Import a modpack folder to start your first translation.",
+    "cta": "Start translating"
+  },
+  "quick": {
+    "eyebrow": "Quick start",
+    "title": "Drop a modpack folder here",
+    "desc": "CurseForge, Modrinth, Prism, or any folder with <1>mods/</1> works.",
+    "pickFolder": "Choose folder",
+    "fromRecent": "From recent"
+  },
+  "community": {
+    "title": "Community alerts",
+    "newCount": "{{n}} new",
+    "loginTitle": "Sign in for alerts",
+    "loginDesc": "Get correction and review alerts for the packs you upload.",
+    "login": "Sign in with Discord",
+    "loginPending": "Continuing in your browser…",
+    "empty": "No new alerts",
+    "emptyDesc": "Correction proposals and reviews will show up here.",
+    "loadError": "Could not load alerts",
+    "markAllRead": "Mark all read",
+    "visit": "moru.gg",
+    "types": {
+      "correction_proposed": "<0>@{{name}}</0> proposed a correction on {{pack}}",
+      "correction_accepted": "Your correction on {{pack}} was accepted",
+      "correction_rejected": "Your correction on {{pack}} was declined",
+      "request_fulfilled": "Translation request fulfilled: <0>{{pack}}</0>",
+      "request_claimed": "<0>@{{name}}</0> started working on: {{pack}}",
+      "review_posted": "<0>@{{name}}</0> reviewed {{pack}}"
+    }
+  }
+}

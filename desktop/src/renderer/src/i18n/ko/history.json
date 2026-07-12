@@ -1,0 +1,43 @@
+{
+  "eyebrow": "작업 기록",
+  "title": "History",
+  "searchPlaceholder": "모드팩 검색...",
+  "filter": {
+    "all": "전체",
+    "done": "완료",
+    "running": "진행중",
+    "stopped": "중단됨"
+  },
+  "col": {
+    "pack": "모드팩",
+    "status": "상태",
+    "entries": "엔트리",
+    "passRate": "통과율",
+    "model": "모델",
+    "date": "날짜"
+  },
+  "status": {
+    "running": "진행중",
+    "done": "완료",
+    "failed": "실패",
+    "cancelled": "중단"
+  },
+  "action": {
+    "view": "보기"
+  },
+  "footer": {
+    "summary": "{{count}} 작업",
+    "summaryWithCost": "{{count}} 작업 · 누적 {{cost}}",
+    "more": "더 보기"
+  },
+  "empty": {
+    "title": "아직 작업 기록이 없어요",
+    "desc": "첫 모드팩을 번역하면 여기에 기록이 쌓입니다.",
+    "cta": "새 번역 시작"
+  },
+  "noResults": "검색 결과가 없습니다",
+  "confirm": {
+    "title": "작업 기록 삭제",
+    "body": "\"{{name}}\" 기록을 삭제할까요? 되돌릴 수 없습니다."
+  }
+}

@@ -1,0 +1,204 @@
+openapi: "3.1.0"
+info:
+  title: Moru Web API (desktop <-> web public contract)
+  description: >
+    Single source of truth for the desktop app <-> moru.gg contract.
+    moru-web keeps a copy at docs/web-api.yaml synchronized by the
+    contract_version tag. Prefer additive changes (new fields, new
+    endpoints) because auto-update lag keeps old desktop builds alive.
+    Contract v2: uploads require authentication; anonymous uploads
+    (contract v1) are rejected with 401.
+  version: "0.3.0"
+  x-contract-version: 2
+servers:
+  - url: "https://moru.gg"
+paths:
+  /api/upload-url:
+    post:
+      summary: Issue presigned R2 upload URLs for pack archives
+      description: >
+        Authentication is required: a signed-in web session or a desktop
+        API token sent as a Bearer header. The desktop app obtains its
+        token via /auth/desktop-login. Unauthenticated calls are rejected
+        with 401.
+      security: [{ apiToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: object
+                    required: [kind, size, sha256]
+                    properties:
+                      kind:
+                        type: string
+                        enum: [resource_pack, overrides]
+                        description: >
+                          overrides = plain text override files layered onto
+                          the modpack instance folder (kubejs/, ftbquests/,
+                          config/ ...). Uploading mod .jar files is a ToS
+                          violation (mod redistribution) and is not accepted.
+                      size: { type: integer }
+                      sha256: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploads:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kind: { type: string }
+                        url: { type: string, description: presigned PUT URL }
+                        object_key: { type: string }
+  /api/translations:
+    post:
+      summary: Register uploaded pack metadata (after presigned upload completes)
+      description: >
+        Authentication is required: a signed-in web session or a desktop
+        API token sent as a Bearer header. The desktop app obtains its
+        token via /auth/desktop-login. Unauthenticated calls are rejected
+        with 401; the pack is registered under the calling user.
+      security: [{ apiToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TranslationPackCreate" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pack_id: { type: string }
+                  url: { type: string, description: public pack page }
+  /api/export/corrections:
+    get:
+      summary: Approved corrections for evalset building (operator token required)
+      security: [{ apiToken: [] }]
+      parameters:
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: lang
+          in: query
+          schema: { type: string, example: ko_kr }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  corrections:
+                    type: array
+                    items:
+                      type: object
+                      required: [entry_key, source_text, previous_text, corrected_text, resolved_at]
+                      properties:
+                        pack_id: { type: string }
+                        entry_key: { type: string }
+                        source_text: { type: string }
+                        previous_text: { type: string }
+                        corrected_text: { type: string }
+                        target_lang: { type: string }
+                        resolved_at: { type: string, format: date-time }
+  /api/tm/manifest:
+    get:
+      summary: >
+        Shared-TM snapshot manifest (few KB, edge-cached, ETag). The snapshot
+        body is downloaded directly from R2 - it never passes through Vercel.
+      parameters:
+        - { name: lang, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SnapshotManifest" }
+        "304": { description: not modified }
+  /api/glossary/manifest:
+    get:
+      summary: Approved community glossary snapshot manifest (same pattern as TM)
+      parameters:
+        - { name: lang, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SnapshotManifest" }
+        "304": { description: not modified }
+  /auth/desktop-login:
+    get:
+      summary: >
+        Browser entry point for desktop login. Runs Discord OAuth, then
+        redirects to http://127.0.0.1:{port}/callback with a desktop API token.
+      security: []
+      parameters:
+        - { name: port, in: query, required: true, schema: { type: integer } }
+      responses:
+        "302": { description: redirect into OAuth flow }
+components:
+  securitySchemes:
+    apiToken:
+      type: http
+      scheme: bearer
+      description: Desktop API token issued via /auth/desktop-login
+  schemas:
+    SnapshotManifest:
+      type: object
+      required: [version, hash, size, url]
+      properties:
+        version: { type: string }
+        hash: { type: string, description: sha256 of the gzip snapshot }
+        size: { type: integer }
+        url: { type: string, description: "R2 public URL of snapshot-{version}.json.gz" }
+        entry_count: { type: integer }
+    TranslationPackCreate:
+      type: object
+      required: [modpack_name, target_lang, files, stats, engine_version]
+      properties:
+        modpack_name: { type: string }
+        modpack_version: { type: string }
+        curseforge_id: { type: integer, nullable: true }
+        target_lang: { type: string, example: ko_kr }
+        source_lang: { type: string, default: en_us }
+        description: { type: string }
+        changelog: { type: string }
+        files:
+          type: array
+          items:
+            type: object
+            required: [kind, object_key]
+            properties:
+              kind: { type: string, enum: [resource_pack, overrides] }
+              object_key: { type: string }
+        engine_version: { type: string }
+        artifact_id:
+          type: string
+          description: which compiled DSPy artifact produced this pack
+        stats:
+          type: object
+          properties:
+            total_entries: { type: integer }
+            translated_entries: { type: integer }
+            failed_entries: { type: integer }
+            coverage_percent: { type: number }
+            quality_score: { type: number, description: validator pass rate 0-1 }
+            tm_hits: { type: integer }
+            categories:
+              type: object
+              additionalProperties: { type: integer }
+            model: { type: string }
+            duration_seconds: { type: number }

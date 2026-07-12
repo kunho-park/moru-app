@@ -1,0 +1,43 @@
+{
+  "eyebrow": "History",
+  "title": "History",
+  "searchPlaceholder": "Search modpacks...",
+  "filter": {
+    "all": "All",
+    "done": "Done",
+    "running": "Running",
+    "stopped": "Stopped"
+  },
+  "col": {
+    "pack": "Modpack",
+    "status": "Status",
+    "entries": "Entries",
+    "passRate": "Pass rate",
+    "model": "Model",
+    "date": "Date"
+  },
+  "status": {
+    "running": "Running",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled"
+  },
+  "action": {
+    "view": "View"
+  },
+  "footer": {
+    "summary": "{{count}} jobs",
+    "summaryWithCost": "{{count}} jobs · total {{cost}}",
+    "more": "Show more"
+  },
+  "empty": {
+    "title": "No translation history yet",
+    "desc": "Translate your first modpack and it will show up here.",
+    "cta": "Start a translation"
+  },
+  "noResults": "No results found",
+  "confirm": {
+    "title": "Delete history entry",
+    "body": "Delete the record for \"{{name}}\"? This cannot be undone."
+  }
+}

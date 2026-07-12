@@ -1,0 +1,83 @@
+{
+  "stepLabel": "번역 설정",
+  "title": "번역 품질을 정해주세요",
+  "subtitleBefore": "잘 모르겠다면 ",
+  "subtitleAccent": "균형",
+  "subtitleAfter": "을 고르세요. 대부분의 모드팩에 잘 맞습니다.",
+  "lang": {
+    "targetLabel": "번역 대상 언어",
+    "sourceLabel": "원문",
+    "ko_kr": "한국어",
+    "ja_jp": "일본어",
+    "zh_cn": "중국어 간체",
+    "zh_tw": "중국어 번체"
+  },
+  "provider": {
+    "label": "AI 제공자",
+    "connected": "연결됨",
+    "needsKey": "키 필요",
+    "unreachable": "미연결",
+    "ollamaModelsTitle": "설치된 로컬 모델",
+    "ollamaModelsLoading": "로컬 모델 확인 중…",
+    "ollamaEmpty": "모델을 찾지 못했어요 — Ollama가 실행 중인지 확인해 주세요"
+  },
+  "preset": {
+    "recommended": "추천",
+    "model": "모델",
+    "fastDesc": "간단한 모드팩·언어 파일 위주에 적합. 검증은 최소한만.",
+    "balancedDesc": "퀘스트, 가이드북, 언어파일 어디에나. 검증 + 1회 재시도.",
+    "bestDesc": "스토리·롤플레잉 팩. 이중 검증 + 문맥 리뷰 패스."
+  },
+  "advanced": {
+    "title": "고급 설정",
+    "hint": "— 온도, 배치, 리뷰 강도, 모델 직접 선택",
+    "changed": "{{n}} 변경됨",
+    "model": "모델",
+    "temperature": "온도",
+    "batchSize": "배치 크기",
+    "maxConcurrent": "동시 요청",
+    "maxRefine": "재검증 횟수",
+    "loading": "프로바이더 목록 불러오는 중…",
+    "loadError": "프로바이더 목록을 불러오지 못했어요",
+    "refresh": "새로고침",
+    "modelsLoading": "모델 목록 불러오는 중…",
+    "modelsLive": "실시간 목록 · {{n}}개 모델",
+    "modelsStatic": "최신 목록을 불러오지 못해 기본 목록을 표시 중"
+  },
+  "key": {
+    "checking": "API 키 확인 중…",
+    "confirmed": "{{provider}} API 키 확인됨",
+    "savedLocal": "이 컴퓨터의 보안 저장소에 저장됨",
+    "engineManaged": "엔진 설정에 등록된 키 사용",
+    "change": "변경",
+    "needed": "{{provider}} API 키가 필요해요",
+    "hint": "키는 이 컴퓨터의 보안 저장소에만 저장돼요",
+    "placeholder": "API 키 붙여넣기",
+    "test": "연결 테스트",
+    "testing": "확인 중…",
+    "ollamaTitle": "Ollama · API 키 필요 없음",
+    "ollamaSub": "완전 무료 · 로컬 실행",
+    "baseUrl": "BASE URL"
+  },
+  "options": {
+    "glossaryTitle": "용어사전 사용",
+    "glossarySub": "전역 {{n}} 용어 · 팩 용어 자동 추출",
+    "glossaryLoading": "용어사전 불러오는 중…",
+    "glossaryError": "용어사전 정보를 불러오지 못했어요",
+    "tmTitle": "번역 메모리 재사용",
+    "tmSub": "저장된 문장 {{n}}개 재사용 가능",
+    "tmLoading": "번역 메모리 확인 중…",
+    "tmError": "번역 메모리 정보를 불러오지 못했어요",
+    "placeholderTitle": "색코드(§)·플레이스홀더 보존",
+    "placeholderSub": "%s, {player}, §e §r 등 원본 유지",
+    "shareTitle": "완료 후 자동으로 커뮤니티에 공유",
+    "shareSub": "Discord 로그인 필요 · 준비 중"
+  },
+  "footer": {
+    "tokens": "{{n}} 토큰",
+    "estimated": "예상",
+    "free": "무료",
+    "start": "번역 시작",
+    "custom": "커스텀"
+  }
+}

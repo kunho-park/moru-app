@@ -1,0 +1,48 @@
+{
+  "stepLabel": "Scan results",
+  "title": "Choose what to translate",
+  "subtitle": "Unchecked categories are skipped. If you haven't touched anything, the defaults are safe.",
+  "stat": {
+    "files": "Files",
+    "entries": "Entries",
+    "tokens": "Est. tokens",
+    "cost": "Est. cost",
+    "tm": "Local TM",
+    "tmSuffix": " entries"
+  },
+  "tree": {
+    "header": "Categories",
+    "selectAll": "Select all",
+    "deselectAll": "Clear all",
+    "groupMods": "Mods",
+    "selectedCount": "Selected: {{selected}} / {{total}}",
+    "entriesCount": "{{count}} entries",
+    "moreFiles": "… {{count}} more"
+  },
+  "preview": {
+    "meta": "{{files}} files · {{entries}} entries",
+    "fileMeta": "{{entries}} entries · {{size}}",
+    "emptySample": "No preview sample for this file",
+    "noFiles": "No files in this category",
+    "moreFiles": "… {{count}} more files"
+  },
+  "scanning": {
+    "title": "Scanning the modpack…",
+    "hint": "Looking for translatable files. Large packs can take a little while."
+  },
+  "failed": {
+    "title": "Scan failed",
+    "retry": "Rescan"
+  },
+  "empty": {
+    "title": "Nothing to translate",
+    "desc": "No translatable text was found in this modpack. Double-check the folder or run the scan again."
+  },
+  "footer": {
+    "back": "Back",
+    "entriesPart": "{{entries}} entries · ",
+    "estSuffix": " est.",
+    "tokensOnly": "{{count}} tokens",
+    "next": "Next: Translation settings"
+  }
+}

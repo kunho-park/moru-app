@@ -1,0 +1,487 @@
+openapi: "3.1.0"
+info:
+  title: Moru Engine API
+  description: >
+    engine <-> desktop local contract. The FastAPI sidecar binds to 127.0.0.1
+    on a port chosen by the Electron main process and requires the session
+    token issued at spawn time (Authorization: Bearer <token>) on every route
+    except /health.
+  version: "0.1.0"
+servers:
+  - url: "http://127.0.0.1:{port}"
+    variables:
+      port:
+        default: "43110"
+paths:
+  /health:
+    get:
+      summary: Liveness probe polled by Electron main during startup handshake
+      security: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version]
+                properties:
+                  status: { type: string, const: ok }
+                  version: { type: string }
+  /shutdown:
+    post:
+      summary: Graceful shutdown requested by Electron before-quit
+      responses:
+        "202": { description: shutdown scheduled }
+  /jobs:
+    post:
+      summary: Start a job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JobRequest" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+  /jobs/{jobId}:
+    get:
+      summary: Job status
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "404": { description: unknown job }
+  /jobs/{jobId}/cancel:
+    post:
+      summary: Cancel a running job (partial results preserved)
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "202": { description: cancellation requested }
+  /jobs/{jobId}/events:
+    get:
+      summary: >
+        WebSocket upgrade (?token= query or Authorization header).
+        Replays buffered events, then streams live JSON frames:
+        progress {stage, file?, done, total} (scan progress uses
+        {stage, current, total, message}; the scan job emits a second
+        "parse" stage while it counts entries per file),
+        entry_failed {key, errors},
+        entry_done {key, source, translated} (sampled every ~5th freshly
+        translated entry, texts truncated to 120 chars - GUI live ticker),
+        tokens {prompt_tokens, completion_tokens, total_tokens, cached_tokens}
+        (emitted after each translated batch; cached_tokens = cumulative
+        prompt tokens served from the provider cache),
+        glossary_progress {done, total, new_terms, attempt?, error?, skipped?}
+        (extraction chunk progress; attempt/error present when a
+        schema-invalid LLM response is being retried with the error fed
+        back, skipped=true when a chunk gave up after retries),
+        glossary_extracted {new_terms},
+        and a single terminal frame {type: done|failed|cancelled, status}
+        after which the socket closes with code 1000. On done the frame
+        also carries the job's result payload: translate {stats}, export
+        {zip_path (resource pack, null when the run shipped no
+        resource-pack files), overrides_zip_path (kubejs/config/ftbquests
+        overrides, null when none), file_count},
+        upload {pack_id, url}.
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "101": { description: switching protocols }
+  /scan/{jobId}/result:
+    get:
+      summary: Category/handler tree of a completed scan job
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScanResult" }
+  /translate/{jobId}/entries:
+    get:
+      summary: Paginated entry table for the review screen
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - name: filter
+          in: query
+          schema: { type: string, enum: [all, failed, warning, modified] }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, maximum: 500, default: 100 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EntryPage" }
+  /translate/{jobId}/entries/{entryKey}:
+    patch:
+      summary: Manual edit of one entry (review screen)
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - name: entryKey
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [translated_text]
+              properties:
+                translated_text: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Entry" }
+  /translate/{jobId}/entries/{entryKey}/retranslate:
+    post:
+      summary: >
+        Re-translate one entry with the job's own model config (review
+        screen "AI retranslate"). Synchronous - returns the updated entry
+        (status becomes modified on success). 409 while the job is running;
+        422 when the translator cannot be built or the retranslation of a
+        previously passing entry fails validation.
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - name: entryKey
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Entry" }
+        "409": { description: translate job still running }
+        "422": { description: translator build or retranslation failure }
+  /glossary:
+    get:
+      summary: Glossary for a language pair
+      parameters:
+        - { name: source_lang, in: query, required: true, schema: { type: string } }
+        - { name: target_lang, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Glossary" }
+    put:
+      summary: Replace user glossary entries
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Glossary" }
+      responses:
+        "200": { description: saved }
+  /community/sync:
+    post:
+      summary: >
+        Pull the latest published community snapshots from the web platform
+        (web-api.yaml /api/tm/manifest + /api/glossary/manifest). TM entries
+        merge into the local TM with origin=community under the "shared"
+        version sentinel (they hit regardless of the per-run glossary
+        fingerprint and outrank machine-cached rows); glossary snapshot
+        entries map scope=vanilla to origin=vanilla rows (the engine no
+        longer bundles a local vanilla glossary) and everything else to
+        origin=community, replacing both origins in the user glossary
+        store while manual/extracted rows survive. Every translate run
+        merges the store. Unchanged versions are cheap no-ops.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [web_url, target_lang]
+              properties:
+                web_url: { type: string }
+                source_lang: { type: string, default: en_us }
+                target_lang: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  glossary:
+                    type: object
+                    nullable: true
+                    description: null when the web has no published snapshot
+                    properties:
+                      version: { type: string }
+                      terms: { type: integer }
+                      updated: { type: boolean }
+                  tm:
+                    type: object
+                    nullable: true
+                    properties:
+                      version: { type: string }
+                      entries: { type: integer }
+                      updated: { type: boolean }
+        "502": { description: web platform unreachable or bad snapshot }
+  /tm/stats:
+    get:
+      summary: Local translation-memory statistics
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries: { type: integer }
+                  hits: { type: integer }
+                  last_sync_version: { type: string, nullable: true }
+  /providers:
+    get:
+      summary: Known providers/models and configured-key status
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Provider" }
+  /providers/test:
+    post:
+      summary: Validate an API key with a minimal call
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider]
+              properties:
+                provider: { type: string }
+                api_key: { type: string }
+                model: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  error: { type: string, nullable: true }
+  /providers/models:
+    post:
+      summary: >
+        Live model list for one provider (LiteLLM ids). Falls back to the
+        static catalog when the live fetch fails or returns nothing
+        (source=static, error holds the failure reason). Unknown provider
+        -> 404.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider]
+              properties:
+                provider: { type: string }
+                api_key: { type: string, nullable: true }
+                api_base: { type: string, nullable: true }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [provider, models, source, error]
+                properties:
+                  provider: { type: string }
+                  models:
+                    type: array
+                    items: { type: string }
+                  source: { type: string, enum: [live, static] }
+                  error: { type: string, nullable: true }
+        "404": { description: unknown provider }
+  /config:
+    get:
+      summary: Engine config (API keys are stored by desktop via safeStorage, not here)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+    put:
+      summary: Update engine config
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200": { description: saved }
+components:
+  securitySchemes:
+    sessionToken:
+      type: http
+      scheme: bearer
+  parameters:
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    JobRequest:
+      type: object
+      required: [type, params]
+      properties:
+        type:
+          type: string
+          enum: [scan, translate, export, upload]
+        params:
+          type: object
+          additionalProperties: true
+          description: >
+            scan: {modpack_path, source_locale?, target_locale?}.
+            translate: engine PipelineConfig surface - {modpack_path,
+            output_dir?, source_locale?, target_locale?, model?, api_key?,
+            api_base?, temperature?, batch_size?, max_concurrent?,
+            file_workers?, max_refine?, use_tm?, use_vanilla_glossary?
+            (include the server-synced origin=vanilla glossary store rows;
+            no bundled vanilla data), extract_glossary?,
+            include_categories?}. include_categories
+            limits translation to the named scan categories (default all).
+            export: {translate_job_id, output_zip?}.
+            upload: {translate_job_id, modpack_name, web_url? (default
+            https://moru.gg), api_token (Bearer token for the web platform;
+            uploads without it are rejected with 401),
+            modpack_version?, description?, changelog?, curseforge_id?
+            (positive integer; forwarded verbatim so the web platform can
+            link the pack to its CurseForge project)} - publishes the
+            completed translate job's reviewed zip to the moru web
+            platform (see contracts/web-api.yaml); the terminal done
+            frame carries {pack_id, url}.
+    Job:
+      type: object
+      required: [id, type, status]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [scan, translate, export, upload] }
+        status: { type: string, enum: [pending, running, done, failed, cancelled] }
+        error: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    ScanResult:
+      type: object
+      description: >
+        Translatable source files grouped by category. Volumes come from
+        the scan job's parse pass; entry_count/char_count are 0 for files
+        the parser could not read.
+      properties:
+        modpack_path: { type: string }
+        categories:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              handler: { type: string }
+              file_count: { type: integer }
+              entry_count: { type: integer }
+              char_count: { type: integer }
+              files:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    path: { type: string }
+                    entry_count: { type: integer }
+                    char_count: { type: integer }
+                    sample:
+                      type: object
+                      additionalProperties: { type: string }
+                      description: up to 3 entries, values truncated to 160 chars
+        identity:
+          type: object
+          description: >
+            Launcher-metadata pack identity (CurseForge app instance,
+            CurseForge export manifest, Modrinth pack index, Prism/MultiMC
+            instance config), used to prefill the upload form and link the
+            pack to its upstream project. Always present; confident=false
+            means only the folder name was available.
+          properties:
+            name: { type: string, nullable: true }
+            version: { type: string, nullable: true }
+            mc_version: { type: string, nullable: true }
+            loader:
+              type: string
+              nullable: true
+              description: forge | neoforge | fabric | quilt
+            curseforge_project_id: { type: integer, nullable: true }
+            curseforge_file_id: { type: integer, nullable: true }
+            modrinth_project_id: { type: string, nullable: true }
+            modrinth_version_id: { type: string, nullable: true }
+            source:
+              type: string
+              enum:
+                [
+                  curseforge_instance,
+                  curseforge_manifest,
+                  modrinth_pack,
+                  prism_managed,
+                  prism_instance,
+                  folder,
+                ]
+            confident: { type: boolean }
+    Entry:
+      type: object
+      required: [key, source_text, translated_text, status]
+      properties:
+        key: { type: string }
+        file: { type: string }
+        source_text: { type: string }
+        translated_text: { type: string }
+        status:
+          type: string
+          enum: [passed, warning, failed, modified, tm_hit, skipped]
+        errors:
+          type: array
+          items: { type: string }
+    EntryPage:
+      type: object
+      properties:
+        total: { type: integer }
+        page: { type: integer }
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/Entry" }
+    Glossary:
+      type: object
+      properties:
+        source_lang: { type: string }
+        target_lang: { type: string }
+        terms:
+          type: array
+          items:
+            type: object
+            required: [source, target]
+            properties:
+              source: { type: string }
+              target: { type: string }
+              origin: { type: string, enum: [vanilla, extracted, manual, community] }
+    Provider:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        models:
+          type: array
+          items: { type: string }
+        has_key: { type: boolean }
+security:
+  - sessionToken: []

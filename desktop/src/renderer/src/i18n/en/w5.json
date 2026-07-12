@@ -1,0 +1,51 @@
+{
+  "title": "Review your translation",
+  "subtitle": "Handle failures and warnings first. Passed entries are safe to skip.",
+  "summary": {
+    "passRate": "Pass rate",
+    "warnings": "Warnings",
+    "failed": "Failed"
+  },
+  "searchPlaceholder": "Search key · source · translation...",
+  "filter": {
+    "all": "All",
+    "failed": "Failed",
+    "warning": "Warning",
+    "modified": "Modified"
+  },
+  "colorPreview": "§ color preview",
+  "bulkRetranslate": "Retranslate failed",
+  "col": {
+    "key": "Key",
+    "source": "Source",
+    "translation": "Translation",
+    "status": "Status"
+  },
+  "rowsMore": "↓ {{n}} rows more",
+  "rowsPrev": "↑ previous {{n}} rows",
+  "footerCount": "Total {{total}} · showing {{shown}}",
+  "hintMove": "↑↓ move",
+  "hintEdit": "E edit",
+  "hintRetranslate": "R retranslate",
+  "noRows": "No entries match the current filter",
+  "detail": {
+    "sourceLabel": "Source ({{lang}})",
+    "translationLabel": "Translation ({{lang}})",
+    "preview": "§ preview",
+    "retranslate": "Retranslate with AI",
+    "retranslating": "Retranslating...",
+    "save": "Save manual edit",
+    "saving": "Saving...",
+    "file": "File:",
+    "model": "Model:",
+    "noSelection": "Select an entry from the list"
+  },
+  "empty": {
+    "title": "Run a translation first",
+    "desc": "Once a translation finishes, you can review the results here.",
+    "cta": "Go translate"
+  },
+  "loadError": "Failed to load the review list",
+  "failedRemain": "⚠ {{n}} failed remaining (warnings can be ignored)",
+  "next": "Next: Export"
+}

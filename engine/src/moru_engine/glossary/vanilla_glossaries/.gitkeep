@@ -1,0 +1,15 @@
+# Vanilla Minecraft Glossaries (dev tool output)
+
+At runtime the engine no longer bundles vanilla glossaries: vanilla terms
+arrive via community sync (`sync_community`) as `origin="vanilla"` rows in
+the user glossary store, published by the web platform's glossary snapshot.
+
+This directory only holds the output of the dev-side builder used to
+generate the web platform's vanilla bundle:
+
+- `tools/build_vanilla_glossary.py` writes
+  `vanilla_glossary_{source_locale}_{target_locale}.json` here
+  (e.g. `vanilla_glossary_en_us_ko_kr.json`).
+
+Generated files are not shipped in the PyInstaller bundle and must not be
+committed.

@@ -1,0 +1,62 @@
+{
+  "greeting": "안녕하세요",
+  "title": "오늘도 <1>한글화</1> 해볼까요?",
+  "import": "가져오기",
+  "stats": {
+    "totalEntries": "누적 번역 엔트리",
+    "thisWeek": "이번 주 +{{n}}",
+    "tmTokens": "TM 절약 토큰",
+    "tmSaved": "≈ {{amount}} 절감",
+    "completedPacks": "완료한 모드팩",
+    "packsBreakdown": "공유 {{shared}} · 로컬 {{local}}",
+    "ranking": "기여도 랭킹",
+    "rankingLocked": "웹 로그인 후 제공"
+  },
+  "recent": {
+    "title": "최근 작업",
+    "viewAll": "전체 보기 →",
+    "resume": "이어보기",
+    "entries": "{{n}} 엔트리",
+    "passRate": "통과 {{percent}}%",
+    "doneAt": "{{when}} 완료",
+    "folder": "폴더",
+    "shareLink": "공유 링크",
+    "retry": "다시 시도",
+    "delete": "삭제",
+    "failedFallback": "오류로 작업이 중단되었습니다",
+    "cancelledFallback": "사용자가 작업을 중단했습니다"
+  },
+  "empty": {
+    "title": "아직 작업이 없어요",
+    "desc": "모드팩 폴더를 가져오면 첫 한글화가 시작됩니다.",
+    "cta": "새 번역 시작"
+  },
+  "quick": {
+    "eyebrow": "빠른 시작",
+    "title": "모드팩 폴더를 끌어다 놓으세요",
+    "desc": "CurseForge, Modrinth, Prism, 또는 <1>mods/</1>가 있는 어떤 폴더든 됩니다.",
+    "pickFolder": "폴더 선택",
+    "fromRecent": "최근 폴더에서"
+  },
+  "community": {
+    "title": "커뮤니티 알림",
+    "newCount": "{{n}} 새 알림",
+    "loginTitle": "로그인하고 알림 받기",
+    "loginDesc": "업로드한 팩의 교정 제안·리뷰 알림을 받아보세요.",
+    "login": "Discord 로그인",
+    "loginPending": "브라우저에서 진행 중…",
+    "empty": "새 알림이 없어요",
+    "emptyDesc": "교정 제안·리뷰가 오면 여기에 표시됩니다.",
+    "loadError": "알림을 불러오지 못했어요",
+    "markAllRead": "모두 읽음",
+    "visit": "moru.gg",
+    "types": {
+      "correction_proposed": "<0>@{{name}}</0>이(가) {{pack}}에 교정 제안",
+      "correction_accepted": "{{pack}} 교정 제안이 채택됐어요",
+      "correction_rejected": "{{pack}} 교정 제안이 반려됐어요",
+      "request_fulfilled": "번역 요청 완료: <0>{{pack}}</0>",
+      "request_claimed": "<0>@{{name}}</0>이(가) 요청 작업 시작: {{pack}}",
+      "review_posted": "<0>@{{name}}</0>이(가) {{pack}}에 리뷰 남김"
+    }
+  }
+}

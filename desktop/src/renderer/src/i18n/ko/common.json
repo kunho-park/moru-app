@@ -1,0 +1,75 @@
+{
+  "appTagline": "모드팩 한글화 스튜디오",
+  "preset": {
+    "fast": "빠른",
+    "balanced": "균형",
+    "best": "최고 품질"
+  },
+  "nav": {
+    "newTranslation": "새 번역",
+    "home": "홈",
+    "history": "작업 기록",
+    "glossary": "용어사전",
+    "community": "커뮤니티",
+    "settings": "설정"
+  },
+  "update": {
+    "available": "업데이트 가능",
+    "installNow": "지금 설치",
+    "downloading": "다운로드 중 {{percent}}%",
+    "upToDate": "최신 버전"
+  },
+  "account": {
+    "connected": "Discord 연결됨",
+    "notConnected": "로그인 안 됨",
+    "guest": "게스트"
+  },
+  "engine": {
+    "starting": "번역 엔진 시작 중…",
+    "restarting": "엔진 재시작 중… ({{count}}/3)",
+    "failedTitle": "번역 엔진을 시작하지 못했습니다",
+    "retry": "다시 시도",
+    "copyLog": "로그 복사",
+    "details": "자세히"
+  },
+  "wizard": {
+    "title": "새 번역 작업",
+    "step1": "모드팩 선택",
+    "step2": "스캔 결과",
+    "step3": "번역 설정",
+    "step4": "진행",
+    "step5": "검수",
+    "step6": "내보내기 · 공유",
+    "eta": "예상 완료",
+    "stepsDone": "{{done}} / 6 단계 완료"
+  },
+  "status": {
+    "pending": "대기",
+    "running": "진행중",
+    "done": "완료",
+    "failed": "실패",
+    "cancelled": "중단됨",
+    "warning": "경고",
+    "passed": "통과",
+    "modified": "수정됨",
+    "tmHit": "TM 재사용",
+    "skipped": "건너뜀",
+    "shared": "공유됨"
+  },
+  "action": {
+    "next": "다음",
+    "back": "뒤로",
+    "cancel": "취소",
+    "confirm": "확인",
+    "retry": "다시 시도",
+    "delete": "삭제",
+    "save": "저장",
+    "close": "닫기",
+    "openFolder": "폴더 열기",
+    "search": "검색"
+  },
+  "unit": {
+    "files": "{{count}} 파일",
+    "entries": "{{count}} 엔트리"
+  }
+}

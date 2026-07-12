@@ -1,0 +1,54 @@
+{
+  "step": "Step {{current}}/{{total}}",
+  "skip": "Skip",
+  "welcome": {
+    "title": "Welcome to moru",
+    "intro": "moru is a desktop studio for translating Minecraft modpacks with AI. Load a modpack folder and moru finds the translatable text, translates it, and exports a resource pack you can drop straight into the game.",
+    "start": "Get started",
+    "scan": "Scan the modpack",
+    "scanDesc": "Automatically finds translatable text in mod JARs, configs, and quests",
+    "translate": "Translate with AI",
+    "translateDesc": "Produces consistent translations using the glossary and translation memory",
+    "export": "Export a resource pack",
+    "exportDesc": "Saves a resource pack and patches ready to drop into the game"
+  },
+  "key": {
+    "title": "Connect an AI provider",
+    "desc": "Register an API key for the provider you want to translate with. Keys are encrypted in this computer's OS keychain and never sent to our servers.",
+    "loading": "Loading providers…",
+    "loadError": "Could not load the provider list",
+    "needsKey": "Key required",
+    "envKey": "Using environment key",
+    "saved": "Connected",
+    "placeholder": "Enter your {{name}} API key",
+    "test": "Verify & save",
+    "testing": "Testing connection…",
+    "testOk": "Key saved to the keychain",
+    "testFail": "Connection failed",
+    "later": "Set up later",
+    "hint": "You can add or change keys anytime in Settings → Models · API keys"
+  },
+  "account": {
+    "title": "Discord sign-in (optional)",
+    "desc": "Connect a moru.gg account to share finished translation packs with the community and earn contribution points.",
+    "login": "Sign in with Discord",
+    "waitingBrowser": "Finish signing in from your browser…",
+    "connected": "Connected",
+    "shareBenefit": "Share translation packs",
+    "shareBenefitDesc": "Publish finished packs to the community for other players",
+    "scoreBenefit": "Contribution points",
+    "scoreBenefitDesc": "Earn points for sharing and reviewing translations",
+    "optional": "Every translation feature works without signing in"
+  },
+  "tour": {
+    "title": "You're all set",
+    "desc": "You can start your first translation now. Here's how the screens flow.",
+    "home": "Import a modpack from Home",
+    "homeDesc": "Pick a modpack folder or auto-detect one from installed launchers",
+    "wizard": "The 6-step translation wizard",
+    "wizardDesc": "Select → Scan → Settings → Progress → Review → Export",
+    "library": "Glossary · History",
+    "libraryDesc": "Refine terms and reopen past jobs anytime",
+    "finish": "Start using moru"
+  }
+}

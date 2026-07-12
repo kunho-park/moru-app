@@ -1,0 +1,35 @@
+{
+  "title": "번역할 모드팩을 알려주세요",
+  "subtitle": "폴더를 끌어다 놓거나, 설치된 런처에서 자동 감지된 모드팩을 선택하세요.",
+  "drop": {
+    "title": "모드팩 폴더를 여기로 끌어다 놓으세요",
+    "hintPre": "폴더 안에 ",
+    "hintPost": " 가 있으면 자동으로 인식합니다",
+    "pickFolder": "폴더 선택...",
+    "fromZip": ".zip 파일에서",
+    "zipFilter": "모드팩 zip"
+  },
+  "probing": "폴더 확인 중",
+  "error": {
+    "noMods": "mods/ 폴더를 찾지 못했어요",
+    "notFound": "폴더를 찾을 수 없어요",
+    "notDirectory": "폴더가 아니에요 — 모드팩 폴더를 선택해 주세요",
+    "zip": ".zip 가져오기는 준비 중이에요 — 압축을 풀고 폴더를 선택해 주세요",
+    "probeFailed": "폴더를 확인하지 못했어요 — 다시 시도해 주세요"
+  },
+  "detected": {
+    "label": "자동 감지됨",
+    "empty": "설치된 런처에서 모드팩을 찾지 못했어요",
+    "emptyHint": "CurseForge · Modrinth · Prism 인스턴스를 자동으로 찾아요. 위에서 폴더를 직접 선택할 수도 있어요.",
+    "error": "런처 인스턴스를 불러오지 못했어요"
+  },
+  "recent": {
+    "label": "최근 폴더"
+  },
+  "badge": {
+    "translated": "이미 번역됨"
+  },
+  "jarCount": "{{n}} mods",
+  "selectedStatus": "{{name}} 선택됨",
+  "next": "다음: 스캔"
+}

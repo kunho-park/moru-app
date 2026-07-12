@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  engine-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: engine/uv.lock
+      - name: Sync dependencies
+        run: uv sync --locked
+      - name: Run pytest
+        run: uv run pytest
+
+  desktop-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Build renderer/main bundles
+        run: bun run build
+
+  # Guards the release pipeline: the PyInstaller spec must keep producing a
+  # bootable sidecar (hidden imports + bundled data drift silently otherwise).
+  engine-package-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: engine/uv.lock
+      - name: Sync dependencies (build group)
+        run: uv sync --locked --group build
+      - name: Build onedir bundle
+        run: uv run pyinstaller --clean --noconfirm packaging/moru-engine-server.spec
+      - name: Boot sidecar and poll /health
+        run: |
+          ./dist/moru-engine-server/moru-engine-server --port 43199 --token ci-smoke &
+          SIDECAR_PID=$!
+          ok=""
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:43199/health; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$SIDECAR_PID" || true
+          test -n "$ok"
+      - name: Verify bundled engine data
+        run: |
+          test -f dist/moru-engine-server/_internal/moru_engine/assets/vanilla_minecraft_assets/versions/1.21.5/en_us.json
+          test -f dist/moru-engine-server/_internal/moru_engine/evalset/data/stress_cases.json

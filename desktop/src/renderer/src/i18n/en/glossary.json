@@ -1,0 +1,62 @@
+{
+  "eyebrow": "Glossary",
+  "title": "Glossary",
+  "subtitle": "Registered terms are applied consistently across every translation.",
+  "importCsv": "Import CSV",
+  "importTooltip": "Pick a CSV file with a source,target header to import terms",
+  "exportCsv": "Export CSV",
+  "exportTooltip": "Builds a CSV of all terms and copies it to the clipboard",
+  "addTerm": "Add Term",
+  "sync": {
+    "button": "Community Sync",
+    "running": "Syncing…",
+    "tooltip": "Pull approved community terms and translation memory from moru.gg (last: {{version}})",
+    "updated": "Synced — {{terms}} terms · {{entries}} TM entries",
+    "upToDate": "Already up to date",
+    "nothing": "No community snapshot published yet",
+    "failed": "Sync failed: {{error}}"
+  },
+  "filterAll": "All",
+  "origin": {
+    "vanilla": "Vanilla",
+    "extracted": "Extracted",
+    "manual": "Manual",
+    "community": "Community"
+  },
+  "searchPlaceholder": "Search terms...",
+  "col": {
+    "source": "Source (EN)",
+    "target": "Target ({{lang}})",
+    "origin": "Origin"
+  },
+  "readonly": "read-only",
+  "rowEdit": "Edit",
+  "rowDelete": "Delete",
+  "rowSave": "Save",
+  "rowCancel": "Cancel",
+  "sourcePlaceholder": "Source text",
+  "targetPlaceholder": "Translation",
+  "noMatch": "No matching terms",
+  "empty": {
+    "title": "No terms registered yet",
+    "desc": "Registered terms are applied consistently across every translation.",
+    "cta": "Add Term"
+  },
+  "error": {
+    "title": "Failed to load the glossary",
+    "retry": "Retry"
+  },
+  "footer": {
+    "summary": "{{count}} terms · last updated {{time}}",
+    "webPending": "Web sync coming soon",
+    "sync": "Sync",
+    "syncTooltip": "Available once the web platform launches"
+  },
+  "toast": {
+    "copied": "Copied to clipboard",
+    "copyFailed": "Failed to copy to clipboard",
+    "imported": "Imported {{count}} terms",
+    "importFailed": "Could not read the CSV",
+    "saveFailed": "Failed to save"
+  }
+}

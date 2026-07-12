@@ -1,0 +1,44 @@
+# Packaging. The engine PyInstaller onedir build must be
+# staged at resources/engine/ before running `bun run dist` — CI does this
+# in .github/workflows/release.yml; locally:
+#   cd ../engine && uv sync --locked --group build \
+#     && uv run pyinstaller --clean --noconfirm packaging/moru-engine-server.spec \
+#     && rm -rf ../desktop/resources/engine \
+#     && cp -R dist/moru-engine-server ../desktop/resources/engine
+appId: gg.moru.desktop
+productName: moru
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**
+extraResources:
+  - from: resources/engine
+    to: engine
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+npmRebuild: false
+win:
+  # Unsigned by default. CI (release.yml) injects Azure Trusted Signing via
+  # --config.win.azureSignOptions.* when the AZURE_* secrets exist, or a
+  # classic PFX through WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD. Either kills the
+  # SmartScreen "unknown publisher" warning once the cert has reputation.
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  category: public.app-category.utilities
+  darkModeSupport: true
+  # Unsigned by default (ad-hoc). Provide CSC_LINK/CSC_KEY_PASSWORD +
+  # notarization env in CI for a signed build; electron-updater on macOS
+  # requires a valid Developer ID signature.
+publish:
+  provider: github
+  owner: kunho-park
+  repo: moru-app

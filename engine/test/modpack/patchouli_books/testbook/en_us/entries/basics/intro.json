@@ -1,0 +1,16 @@
+{
+  "name": "Getting Started",
+  "icon": "minecraft:book",
+  "category": "testbook:basics",
+  "pages": [
+    {
+      "type": "patchouli:text",
+      "text": "Welcome to the $(l)Test Book$(). Use %s to navigate and press $(k:inventory) to open your inventory."
+    },
+    {
+      "type": "patchouli:text",
+      "title": "Next Steps",
+      "text": "Craft an $(item)Enchanting Table$() when you gather enough resources."
+    }
+  ]
+}

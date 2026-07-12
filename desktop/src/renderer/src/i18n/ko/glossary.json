@@ -1,0 +1,62 @@
+{
+  "eyebrow": "용어사전",
+  "title": "Glossary",
+  "subtitle": "용어를 등록하면 모든 번역에 일관되게 반영됩니다.",
+  "importCsv": "CSV 가져오기",
+  "importTooltip": "source,target 헤더의 CSV 파일을 선택해 용어를 가져옵니다",
+  "exportCsv": "CSV 내보내기",
+  "exportTooltip": "용어 전체를 CSV로 만들어 클립보드에 복사합니다",
+  "addTerm": "용어 추가",
+  "sync": {
+    "button": "커뮤니티 동기화",
+    "running": "동기화 중…",
+    "tooltip": "moru.gg의 승인된 커뮤니티 용어·번역 메모리를 내려받습니다 (마지막: {{version}})",
+    "updated": "동기화 완료 — 용어 {{terms}}개 · TM {{entries}}개",
+    "upToDate": "이미 최신 상태예요",
+    "nothing": "아직 게시된 커뮤니티 스냅샷이 없어요",
+    "failed": "동기화 실패: {{error}}"
+  },
+  "filterAll": "전체",
+  "origin": {
+    "vanilla": "바닐라",
+    "extracted": "자동추출",
+    "manual": "수동",
+    "community": "커뮤니티"
+  },
+  "searchPlaceholder": "용어 검색...",
+  "col": {
+    "source": "원문 (EN)",
+    "target": "번역 ({{lang}})",
+    "origin": "출처"
+  },
+  "readonly": "읽기전용",
+  "rowEdit": "편집",
+  "rowDelete": "삭제",
+  "rowSave": "저장",
+  "rowCancel": "취소",
+  "sourcePlaceholder": "원문 입력",
+  "targetPlaceholder": "번역 입력",
+  "noMatch": "검색 결과가 없습니다",
+  "empty": {
+    "title": "등록된 용어가 없습니다",
+    "desc": "용어를 등록하면 모든 번역에 일관되게 반영됩니다.",
+    "cta": "용어 추가"
+  },
+  "error": {
+    "title": "용어사전을 불러오지 못했습니다",
+    "retry": "다시 시도"
+  },
+  "footer": {
+    "summary": "{{count}} 용어 · 마지막 갱신 {{time}}",
+    "webPending": "웹 동기화 준비중",
+    "sync": "동기화",
+    "syncTooltip": "웹 플랫폼 출시 후 제공됩니다"
+  },
+  "toast": {
+    "copied": "클립보드에 복사됨",
+    "copyFailed": "클립보드 복사에 실패했습니다",
+    "imported": "{{count}}개 용어를 가져왔습니다",
+    "importFailed": "CSV를 읽지 못했습니다",
+    "saveFailed": "저장에 실패했습니다"
+  }
+}

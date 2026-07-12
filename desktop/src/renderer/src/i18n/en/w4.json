@@ -1,0 +1,81 @@
+{
+  "state": {
+    "idle": "Standby",
+    "running": "In progress",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled"
+  },
+  "controls": {
+    "pause": "Pause",
+    "pauseSoon": "Coming soon",
+    "cancel": "Cancel"
+  },
+  "ring": {
+    "elapsed": "Elapsed",
+    "remaining": "Remaining",
+    "counting": "Waiting for totals"
+  },
+  "ticker": {
+    "live": "Now translating",
+    "done": "Translation complete",
+    "failed": "Translation failed",
+    "cancelled": "Translation cancelled",
+    "idle": "Standby",
+    "waiting": "Waiting for translations…",
+    "empty": "Results will stream here once translation starts"
+  },
+  "stats": {
+    "rate": "Entries/sec",
+    "tokens": "Tokens used",
+    "estimate": "/ {{value}} est.",
+    "tmHits": "TM hits",
+    "tmReuse": "{{percent}}% reused",
+    "afterDone": "Tallied on completion",
+    "cost": "Current cost",
+    "noPrice": "No price data",
+    "cacheHit": "Cache hit {{value}}%"
+  },
+  "files": {
+    "title": "File progress ({{count}})",
+    "chipDone": "● Done {{count}}",
+    "chipRunning": "● Active {{count}}",
+    "chipTm": "● TM {{count}}",
+    "chipFailed": "● Failed {{count}}",
+    "chipPending": "● Queued {{count}}",
+    "entries": "{{count}} entries",
+    "running": "{{percent}}% active",
+    "done": "Done",
+    "pendingMore": "… {{count}} files queued",
+    "waiting": "Waiting for file progress…"
+  },
+  "glossary": {
+    "label": "Building glossary",
+    "retrying": "retry {{attempt}}",
+    "chunks": "chunk {{done}}/{{total}}",
+    "terms": "+{{count}} terms"
+  },
+  "log": {
+    "title": "Live log",
+    "copy": "Copy",
+    "copied": "Copied",
+    "streaming": "▶ Streaming live log...",
+    "empty": "No log lines yet"
+  },
+  "banner": {
+    "doneTitle": "Translation complete",
+    "doneBody": "{{count}} entries translated · review the results in the next step",
+    "toReview": "Go to review",
+    "failedTitle": "Translation failed",
+    "failedFallback": "Stopped by an unknown error. Check the log for details.",
+    "retry": "Retry",
+    "cancelledTitle": "Translation cancelled",
+    "cancelledBody": "Partial results were preserved · you can inspect them in review"
+  },
+  "cancelDialog": {
+    "title": "Cancel this translation?",
+    "body": "Partial results translated so far will be preserved. You can inspect them in the review step.",
+    "keep": "Keep running",
+    "confirm": "Cancel translation"
+  }
+}

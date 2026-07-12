@@ -1,0 +1,216 @@
+@import "pretendard/dist/web/variable/pretendardvariable.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/700.css";
+@import "tailwindcss";
+
+/*
+ * Design tokens.
+ * Dark-first; values are the design's exact hex codes. Do not reinterpret.
+ */
+@theme {
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* neutrals */
+  --color-ink: #06090a; /* page backdrop */
+  --color-bar: #0a100d; /* titlebar, deep wells */
+  --color-panel: #0b1310; /* sidebar */
+  --color-bg: #0e1512; /* main content */
+  --color-card: #0f1613; /* card wells */
+  --color-hover: #101815; /* nav hover surface */
+  --color-raised: #141c18; /* stat cards, raised surfaces */
+  --color-raised-hover: #171f1b;
+  --color-line: #1a231f; /* hairline borders */
+  --color-line2: #1f2b25; /* card borders */
+  --color-edge: #24322b; /* strong borders */
+  --color-edge2: #3a4f45; /* hover borders */
+  --color-tint: #14201a; /* accent-tinted gradient start */
+
+  /* text */
+  --color-text: #eaf5ef;
+  --color-text2: #a2b3ab;
+  --color-text3: #6a7c74;
+  --color-text4: #4a5a52;
+
+  /* accent (emerald) */
+  --color-accent: #3ddc84;
+  --color-accent-hi: #56ea99;
+  --color-accent-bright: #6de9a2;
+  --color-accent-mid: #2fb86b;
+  --color-accent-lo: #1f8a5b;
+  --color-sel-ink: #0a0f0c; /* text on accent */
+
+  /* status */
+  --color-red: #f26b6b;
+  --color-amber: #f5b454;
+  --color-blue: #6bb3f5;
+  --color-purple: #a78bfa;
+  --color-discord: #5865f2;
+
+  /* motion (design keyframes, verbatim timing) */
+  --animate-pxspin: pxspin 1s linear infinite;
+  --animate-pxpulse: pxpulse 1.6s infinite;
+  --animate-pxblink: pxblink 1s infinite;
+  --animate-ticker: ticker 9s infinite;
+  --animate-bar-crawl: barCrawl 0.8s linear infinite;
+  --animate-progress-shift: progressShift 1s linear infinite;
+  --animate-fade-in-up: fadeInUp 0.3s ease-out;
+
+  @keyframes pxspin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes pxpulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+  @keyframes pxblink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+  @keyframes ticker {
+    0%,
+    4% {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    10%,
+    22% {
+      opacity: 1;
+      transform: none;
+    }
+    28%,
+    100% {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+  }
+  @keyframes barCrawl {
+    0% {
+      background-position: 0 0;
+    }
+    100% {
+      background-position: 16px 0;
+    }
+  }
+  @keyframes progressShift {
+    0% {
+      background-position: 0 0;
+    }
+    100% {
+      background-position: 24px 0;
+    }
+  }
+  @keyframes fadeInUp {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+
+/* Element defaults live in the base layer so Tailwind utility classes
+   (higher layer) keep winning; un-layered rules would override them. */
+@layer base {
+:root {
+  color-scheme: dark; /* native popups (select dropdowns, pickers) render dark */
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  line-height: normal; /* the design uses normal line-height, not preflight's 1.5 */
+  background: var(--color-ink);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01", "ss02";
+  overflow: hidden; /* app shell scrolls internally */
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--color-accent-bright);
+}
+
+button {
+  font-family: inherit;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+  padding: 0;
+  border-radius: 0; /* blocky design: no rounding anywhere */
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  outline: none;
+  border-radius: 0;
+}
+
+/* Native <select> popup list: UA default is a white panel with inherited
+   gray text -> unreadable. Force the design's dark surface tokens. */
+select option,
+select optgroup {
+  background-color: var(--color-raised);
+  color: var(--color-text);
+}
+select option:disabled {
+  color: var(--color-text4);
+}
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-sel-ink);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #24322b;
+  border: 2px solid #0e1512;
+  border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4f45;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+} /* @layer base */

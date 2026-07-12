@@ -1,0 +1,132 @@
+name: Release
+
+# Tag push (vX.Y.Z) -> PyInstaller sidecar per-OS -> electron-builder
+# installer -> GitHub Release draft. Publish the draft to make
+# electron-updater pick it up.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  # electron-builder inside each matrix job races to create the tag's draft
+  # release when none exists — v0.1.0 produced TWO drafts with assets split
+  # between them. Create the draft once up front; the builders then find
+  # and reuse it by tag.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure draft release exists for tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
+              --draft --title "${GITHUB_REF_NAME#v}"
+          fi
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches desktop/engine versions
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          DESKTOP=$(node -p "require('./desktop/package.json').version")
+          ENGINE=$(grep -m1 '^version' engine/pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          INIT=$(grep -m1 '^__version__' engine/src/moru_engine/__init__.py | sed 's/.*"\(.*\)".*/\1/')
+          echo "tag=$TAG desktop=$DESKTOP engine=$ENGINE init=$INIT"
+          if [ "$TAG" != "$DESKTOP" ] || [ "$TAG" != "$ENGINE" ] || [ "$TAG" != "$INIT" ]; then
+            echo "::error::version mismatch — run scripts/bump-version.sh $TAG before tagging"
+            exit 1
+          fi
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: engine/uv.lock
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build engine sidecar (PyInstaller onedir)
+        shell: bash
+        working-directory: engine
+        run: |
+          uv sync --locked --group build
+          uv run pyinstaller --clean --noconfirm packaging/moru-engine-server.spec
+
+      - name: Stage engine into desktop resources
+        shell: bash
+        run: |
+          rm -rf desktop/resources/engine
+          mkdir -p desktop/resources
+          cp -R engine/dist/moru-engine-server desktop/resources/engine
+          # Optimized-prompt artifacts ship with the app when present
+          # (sidecar sets MORU_ARTIFACTS_DIR=resources/engine/artifacts).
+          if [ -d engine/artifacts ] && [ -n "$(ls -A engine/artifacts 2>/dev/null)" ]; then
+            mkdir -p desktop/resources/engine/artifacts
+            cp -R engine/artifacts/. desktop/resources/engine/artifacts/
+          fi
+
+      - name: Smoke-test staged sidecar
+        shell: bash
+        run: |
+          BIN=desktop/resources/engine/moru-engine-server
+          [ "$RUNNER_OS" = "Windows" ] && BIN="$BIN.exe"
+          "$BIN" --port 43199 --token release-smoke &
+          SIDECAR_PID=$!
+          ok=""
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:43199/health; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$SIDECAR_PID" || true
+          test -n "$ok"
+
+      - name: Build and publish installer
+        shell: bash
+        working-directory: desktop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No Apple Developer ID yet: ad-hoc signed dmg (Gatekeeper requires
+          # right-click > Open). Add CSC_LINK/CSC_KEY_PASSWORD + APPLE_ID/
+          # APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID secrets to sign+notarize;
+          # macOS auto-update stays disabled until the app is properly signed.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          # -- Windows Authenticode (kills the SmartScreen warning) --------
+          # Path A (recommended): Azure Trusted Signing. Create the account +
+          # cert profile in Azure, then set the six AZURE_* secrets below;
+          # signing turns on automatically when AZURE_CLIENT_SECRET exists.
+          # Path B: classic PFX cert — set WIN_CSC_LINK (base64 .pfx) and
+          # WIN_CSC_KEY_PASSWORD; electron-builder picks them up untouched.
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGN_ENDPOINT: ${{ secrets.AZURE_SIGN_ENDPOINT }}
+          AZURE_SIGN_ACCOUNT: ${{ secrets.AZURE_SIGN_ACCOUNT }}
+          AZURE_SIGN_PROFILE: ${{ secrets.AZURE_SIGN_PROFILE }}
+          AZURE_SIGN_PUBLISHER: ${{ secrets.AZURE_SIGN_PUBLISHER }}
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          SIGN_FLAGS=()
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "$AZURE_CLIENT_SECRET" ]; then
+            SIGN_FLAGS+=(
+              --config.win.azureSignOptions.endpoint="$AZURE_SIGN_ENDPOINT"
+              --config.win.azureSignOptions.codeSigningAccountName="$AZURE_SIGN_ACCOUNT"
+              --config.win.azureSignOptions.certificateProfileName="$AZURE_SIGN_PROFILE"
+              --config.win.azureSignOptions.publisherName="$AZURE_SIGN_PUBLISHER"
+            )
+          fi
+          bunx electron-builder --publish always "${SIGN_FLAGS[@]}"

@@ -1,0 +1,81 @@
+{
+  "state": {
+    "idle": "대기 중",
+    "running": "진행 중",
+    "done": "완료",
+    "failed": "실패",
+    "cancelled": "중단됨"
+  },
+  "controls": {
+    "pause": "일시정지",
+    "pauseSoon": "곧 지원 예정",
+    "cancel": "취소"
+  },
+  "ring": {
+    "elapsed": "경과",
+    "remaining": "남은 시간",
+    "counting": "집계 대기 중"
+  },
+  "ticker": {
+    "live": "지금 번역 중",
+    "done": "번역 완료",
+    "failed": "번역 실패",
+    "cancelled": "번역 중단됨",
+    "idle": "대기 중",
+    "waiting": "번역 결과를 기다리는 중…",
+    "empty": "번역이 시작되면 결과가 여기에 흐릅니다"
+  },
+  "stats": {
+    "rate": "엔트리/초",
+    "tokens": "토큰 사용",
+    "estimate": "/ {{value}} 예상",
+    "tmHits": "TM 히트",
+    "tmReuse": "{{percent}}% 재사용",
+    "afterDone": "완료 후 집계",
+    "cost": "현재 비용",
+    "noPrice": "가격 정보 없음",
+    "cacheHit": "캐시 적중 {{value}}%"
+  },
+  "files": {
+    "title": "파일 진행 ({{count}})",
+    "chipDone": "● 완료 {{count}}",
+    "chipRunning": "● 진행 {{count}}",
+    "chipTm": "● TM {{count}}",
+    "chipFailed": "● 실패 {{count}}",
+    "chipPending": "● 대기 {{count}}",
+    "entries": "{{count}} 엔트리",
+    "running": "진행 {{percent}}%",
+    "done": "완료",
+    "pendingMore": "… {{count}} 파일 대기 중",
+    "waiting": "파일 진행 정보를 기다리는 중…"
+  },
+  "glossary": {
+    "label": "용어사전 생성 중",
+    "retrying": "재시도 {{attempt}}회",
+    "chunks": "청크 {{done}}/{{total}}",
+    "terms": "+{{count}} 용어"
+  },
+  "log": {
+    "title": "라이브 로그",
+    "copy": "복사",
+    "copied": "복사됨",
+    "streaming": "▶ 실시간 로그 수신중...",
+    "empty": "아직 로그가 없습니다"
+  },
+  "banner": {
+    "doneTitle": "번역이 완료되었습니다",
+    "doneBody": "{{count}} 엔트리 번역 완료 · 검수 화면에서 결과를 확인하세요",
+    "toReview": "검수로 이동",
+    "failedTitle": "번역이 실패했습니다",
+    "failedFallback": "알 수 없는 오류로 중단되었습니다. 로그를 확인해 주세요.",
+    "retry": "다시 시도",
+    "cancelledTitle": "번역이 중단되었습니다",
+    "cancelledBody": "부분 결과는 보존되었습니다 · 검수 화면에서 확인할 수 있어요"
+  },
+  "cancelDialog": {
+    "title": "번역을 취소할까요?",
+    "body": "지금까지 번역된 부분 결과는 보존됩니다. 검수 화면에서 확인할 수 있어요.",
+    "keep": "계속 진행",
+    "confirm": "번역 취소"
+  }
+}

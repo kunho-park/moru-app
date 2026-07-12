@@ -1,0 +1,27 @@
+{
+	id: "0000000000000001"
+	group: ""
+	order_index: 0
+	filename: "welcome"
+	title: "Welcome to &6the Pack&r"
+	icon: "minecraft:crafting_table"
+	default_quest_shape: ""
+	default_hide_dependency_lines: false
+	quests: [{
+		title: "First Steps"
+		x: 0.0d
+		y: 0.0d
+		subtitle: "Getting started"
+		description: [
+			"Craft a &aCrafting Table&r to begin."
+			""
+			"Press %s to open your quest book."
+		]
+		id: "0000000000000002"
+		tasks: [{
+			id: "0000000000000003"
+			type: "item"
+			item: "minecraft:crafting_table"
+		}]
+	}]
+}

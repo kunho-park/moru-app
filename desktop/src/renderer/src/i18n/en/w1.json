@@ -1,0 +1,35 @@
+{
+  "title": "Which modpack should we translate?",
+  "subtitle": "Drag a folder here, or pick a modpack auto-detected from your installed launchers.",
+  "drop": {
+    "title": "Drop your modpack folder here",
+    "hintPre": "If the folder contains ",
+    "hintPost": ", it is detected automatically",
+    "pickFolder": "Choose folder...",
+    "fromZip": "From .zip file",
+    "zipFilter": "Modpack zip"
+  },
+  "probing": "Checking folder",
+  "error": {
+    "noMods": "Couldn't find a mods/ folder",
+    "notFound": "Folder not found",
+    "notDirectory": "That's not a folder — please pick a modpack folder",
+    "zip": ".zip import is coming soon — extract it and pick the folder instead",
+    "probeFailed": "Couldn't inspect the folder — please try again"
+  },
+  "detected": {
+    "label": "Auto-detected",
+    "empty": "No modpacks found in installed launchers",
+    "emptyHint": "We look for CurseForge · Modrinth · Prism instances. You can also pick a folder above.",
+    "error": "Failed to load launcher instances"
+  },
+  "recent": {
+    "label": "Recent folders"
+  },
+  "badge": {
+    "translated": "Already translated"
+  },
+  "jarCount": "{{n}} mods",
+  "selectedStatus": "{{name}} selected",
+  "next": "Next: Scan"
+}

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+# electron-builder buildResources (icons) — not a build output
+!desktop/build/
+
+# JS / Electron
+node_modules/
+desktop/dist/
+desktop/out/
+desktop/resources/engine/
+
+# Env / secrets — never commit
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# scanner extraction caches (created by scan runs on fixtures)
+.mct_cache/
+*.zip_extracted/
+engine/evalset_snapshot.json
+
+# runtime artifacts when running against the repo fixture
+moru_output/
+
+# dev-built vanilla glossaries (runtime gets vanilla terms via server sync)
+engine/src/moru_engine/glossary/vanilla_glossaries/*.json

@@ -1,0 +1,83 @@
+{
+  "stepLabel": "Translation settings",
+  "title": "Pick your translation quality",
+  "subtitleBefore": "Not sure? Go with ",
+  "subtitleAccent": "Balanced",
+  "subtitleAfter": " — it fits most modpacks.",
+  "lang": {
+    "targetLabel": "Target language",
+    "sourceLabel": "Source",
+    "ko_kr": "Korean",
+    "ja_jp": "Japanese",
+    "zh_cn": "Simplified Chinese",
+    "zh_tw": "Traditional Chinese"
+  },
+  "provider": {
+    "label": "AI provider",
+    "connected": "Connected",
+    "needsKey": "Key required",
+    "unreachable": "Not connected",
+    "ollamaModelsTitle": "Installed local models",
+    "ollamaModelsLoading": "Checking local models…",
+    "ollamaEmpty": "No models found — make sure Ollama is running"
+  },
+  "preset": {
+    "recommended": "Best pick",
+    "model": "Model",
+    "fastDesc": "Great for simple packs that are mostly lang files. Minimal validation.",
+    "balancedDesc": "Quests, guidebooks, lang files — anything. Validation + 1 retry.",
+    "bestDesc": "Story and roleplay packs. Double validation + a context review pass."
+  },
+  "advanced": {
+    "title": "Advanced settings",
+    "hint": "— temperature, batching, review intensity, custom model",
+    "changed": "{{n}} changed",
+    "model": "Model",
+    "temperature": "Temperature",
+    "batchSize": "Batch size",
+    "maxConcurrent": "Concurrency",
+    "maxRefine": "Refine passes",
+    "loading": "Loading providers…",
+    "loadError": "Could not load the provider list",
+    "refresh": "Refresh",
+    "modelsLoading": "Fetching model list…",
+    "modelsLive": "Live list · {{n}} models",
+    "modelsStatic": "Live fetch failed — showing the default list"
+  },
+  "key": {
+    "checking": "Checking API key…",
+    "confirmed": "{{provider}} API key verified",
+    "savedLocal": "Stored in this computer's secure storage",
+    "engineManaged": "Using the key registered in engine settings",
+    "change": "Change",
+    "needed": "{{provider}} API key required",
+    "hint": "Your key is stored only in this computer's secure storage",
+    "placeholder": "Paste your API key",
+    "test": "Test connection",
+    "testing": "Testing…",
+    "ollamaTitle": "Ollama · no API key needed",
+    "ollamaSub": "Completely free · runs locally",
+    "baseUrl": "BASE URL"
+  },
+  "options": {
+    "glossaryTitle": "Use glossary",
+    "glossarySub": "{{n}} global terms · auto-extract pack terms",
+    "glossaryLoading": "Loading glossary…",
+    "glossaryError": "Could not load glossary info",
+    "tmTitle": "Reuse translation memory",
+    "tmSub": "{{n}} stored segments available for reuse",
+    "tmLoading": "Checking translation memory…",
+    "tmError": "Could not load translation memory info",
+    "placeholderTitle": "Preserve color codes (§) & placeholders",
+    "placeholderSub": "%s, {player}, §e §r etc. kept as-is",
+    "shareTitle": "Auto-share with the community when done",
+    "shareSub": "Discord sign-in required · coming soon"
+  },
+  "footer": {
+    "tokens": "{{n}} tokens",
+    "estimated": "est.",
+    "free": "free",
+    "start": "Start translating",
+    "custom": "Custom"
+  }
+}

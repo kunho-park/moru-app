@@ -15,6 +15,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Marker suffix for segments lifted out of an embedded JSON text component:
+#: ``quests[0].description[3]::jsonseg[2]`` is the third translatable segment
+#: of that description string.
+_JSONSEG = "::jsonseg["
+
+
+def _collect_segment_refs(
+    node: object, refs: list[tuple[list[object] | dict[str, object], int | str]]
+) -> None:
+    """DFS over a Minecraft raw-JSON-text tree, recording mutable text slots.
+
+    Translatable slots are bare strings inside component arrays and the
+    ``text`` field of component objects (recursing into ``extra``). Event
+    payloads (clickEvent/hoverEvent) are never visited — commands and
+    tooltips must survive verbatim. Visit order is deterministic, which is
+    what keys extracted segments to their slots across extract/apply.
+    """
+    if isinstance(node, list):
+        for index, item in enumerate(node):
+            if isinstance(item, str):
+                if item.strip():
+                    refs.append((node, index))
+            else:
+                _collect_segment_refs(item, refs)
+    elif isinstance(node, dict):
+        text = node.get("text")
+        if isinstance(text, str) and text.strip():
+            refs.append((node, "text"))
+        extra = node.get("extra")
+        if isinstance(extra, list):
+            _collect_segment_refs(extra, refs)
+
 
 class FTBQuestsHandler(ContentHandler):
     """Handler for FTBQuests SNBT/NBT files.
@@ -24,6 +56,12 @@ class FTBQuestsHandler(ContentHandler):
     - description, text: Descriptions
     - subtitle: Subtitles
     - Lore, Name: Item display components
+
+    Strings that embed a Minecraft raw-JSON-text component (single object
+    or component array) are split into per-segment entries keyed with the
+    ``::jsonseg[n]`` marker; apply() splices the translated segments back
+    and re-serializes, so structure, styling, and click/hover events
+    survive byte-for-byte semantics.
     """
 
     name: ClassVar[str] = "ftbquests"
@@ -87,80 +125,48 @@ class FTBQuestsHandler(ContentHandler):
 
         return last_part in self.TRANSLATABLE_KEYS
 
-    def _is_json_structure(self, text: str) -> bool:
-        """Check if text is a complete JSON structure (object or array).
+    @staticmethod
+    def _parse_json_component(text: str) -> dict[str, object] | list[object] | None:
+        """Parse an embedded raw-JSON-text component, else None.
 
-        Args:
-            text: Text to check.
-
-        Returns:
-            True if it's a JSON structure that should not be translated.
+        Only whole-string ``{...}`` / ``[...]`` bodies qualify; anything
+        that fails to parse is treated as plain text by the caller.
         """
-        if not text:
-            return False
-        
-        # Check if entire text is wrapped in {} or []
-        if (text.startswith("{") and text.endswith("}")) or \
-           (text.startswith("[") and text.endswith("]")):
-            try:
-                json.loads(text)
-                return True
-            except (json.JSONDecodeError, ValueError):
-                pass
-        return False
-
-    def _is_json_text(self, text: str) -> bool:
-        """Check if text is a JSON text component.
-
-        Args:
-            text: Text to check.
-
-        Returns:
-            True if it's a JSON text component.
-        """
+        stripped = text.strip()
+        if not (
+            (stripped.startswith("{") and stripped.endswith("}"))
+            or (stripped.startswith("[") and stripped.endswith("]"))
+        ):
+            return None
         try:
-            if text.startswith('{"') and text.endswith('"}'):
-                json.loads(text)
-                return True
+            data = json.loads(stripped)
         except (json.JSONDecodeError, ValueError):
-            pass
-        return False
+            return None
+        return data if isinstance(data, (dict, list)) else None
 
-    def _extract_json_text(self, json_str: str) -> str:
-        """Extract 'text' field from JSON text component.
+    def _apply_component_segments(
+        self, key: str, value: str, translations: Mapping[str, str]
+    ) -> str | None:
+        """Splice translated ``::jsonseg[n]`` entries back into a component.
 
-        Args:
-            json_str: JSON string.
-
-        Returns:
-            Text content or empty string.
+        Returns the re-serialized JSON string, or None when the value is
+        not a component or no segment translation changes anything.
         """
-        try:
-            data = json.loads(json_str)
-            if isinstance(data, dict) and "text" in data:
-                return str(data["text"])
-        except (json.JSONDecodeError, ValueError):
-            pass
-        return ""
-
-    def _rebuild_json_text(self, json_str: str, new_text: str) -> str:
-        """Rebuild JSON text component with new text.
-
-        Args:
-            json_str: Original JSON string.
-            new_text: New text content.
-
-        Returns:
-            Updated JSON string.
-        """
-        try:
-            data = json.loads(json_str)
-            if isinstance(data, dict) and "text" in data:
-                data["text"] = new_text
-                return json.dumps(data, ensure_ascii=False)
-        except (json.JSONDecodeError, ValueError):
-            pass
-        return json_str
+        prefix = f"{key}{_JSONSEG}"
+        if not any(k.startswith(prefix) for k in translations):
+            return None
+        component = self._parse_json_component(value)
+        if component is None:
+            return None
+        refs: list[tuple[list[object] | dict[str, object], int | str]] = []
+        _collect_segment_refs(component, refs)
+        changed = False
+        for n, (parent, slot) in enumerate(refs):
+            translated = translations.get(f"{prefix}{n}]")
+            if translated is not None and translated != parent[slot]:  # type: ignore[index]
+                parent[slot] = translated  # type: ignore[index]
+                changed = True
+        return json.dumps(component, ensure_ascii=False) if changed else None
 
     async def extract(self, path: Path) -> Mapping[str, str]:
         """Extract translatable strings from FTBQuests file.
@@ -228,20 +234,18 @@ class FTBQuestsHandler(ContentHandler):
         """
         if isinstance(value, str):
             if self._should_translate_key(key) and value.strip():
-                # Skip if entire text is a JSON structure (starts with { or [)
-                stripped = value.strip()
-                if self._is_json_structure(stripped):
-                    logger.debug("Skipping JSON structure for key %s: %s", key, stripped[:100])
+                component = self._parse_json_component(value)
+                if component is not None:
+                    # Embedded raw-JSON-text: one entry per text segment so
+                    # the LLM never sees (or breaks) the JSON structure.
+                    refs: list[
+                        tuple[list[object] | dict[str, object], int | str]
+                    ] = []
+                    _collect_segment_refs(component, refs)
+                    for n, (parent, slot) in enumerate(refs):
+                        entries[f"{key}{_JSONSEG}{n}]"] = parent[slot]  # type: ignore[index,assignment]
                     return
-                
-                # Handle JSON text components
-                if self._is_json_text(value):
-                    json_text = self._extract_json_text(value)
-                    if json_text.strip():
-                        # Store with marker for JSON reconstruction
-                        entries[f"{key}::json"] = json_text
-                else:
-                    entries[key] = value
+                entries[key] = value
 
         elif isinstance(value, dict):
             self._extract_recursive(value, entries, key)
@@ -322,11 +326,11 @@ class FTBQuestsHandler(ContentHandler):
             full_key = f"{prefix}.{key}" if prefix else key
 
             if isinstance(value, str):
-                # Check for JSON marker
-                json_key = f"{full_key}::json"
-                if json_key in translations:
-                    # Rebuild JSON with translated text
-                    data[key] = self._rebuild_json_text(value, translations[json_key])
+                rebuilt = self._apply_component_segments(
+                    full_key, value, translations
+                )
+                if rebuilt is not None:
+                    data[key] = rebuilt
                     modified = True
                 elif full_key in translations:
                     data[key] = translations[full_key]
@@ -364,9 +368,11 @@ class FTBQuestsHandler(ContentHandler):
             item_key = f"{prefix}[{i}]"
 
             if isinstance(item, str):
-                json_key = f"{item_key}::json"
-                if json_key in translations:
-                    data[i] = self._rebuild_json_text(item, translations[json_key])
+                rebuilt = self._apply_component_segments(
+                    item_key, item, translations
+                )
+                if rebuilt is not None:
+                    data[i] = rebuilt
                     modified = True
                 elif item_key in translations:
                     data[i] = translations[item_key]

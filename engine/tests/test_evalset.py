@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 from moru_engine.batching import DEFAULT_BATCH_SIZE, DEFAULT_MAX_BATCH_CHARS
 from moru_engine.evalset import build_evalset, build_stress_examples
@@ -101,19 +102,23 @@ def test_stress_examples_stratified_across_splits() -> None:
     assert all(count > 0 for count in counts.values()), counts
 
 
-def test_stress_cases_token_mirroring() -> None:
+def test_stress_cases_token_multisets_match_exactly() -> None:
+    """Every stress entry's protected source and gold must carry the SAME
+    token multiset — a divergent case (e.g. raw JSON masked on one side
+    only) is structurally unsolvable for the model and poisons the metric,
+    the reflective feedback, and the judge."""
     examples = build_stress_examples()
     assert examples
-    mirrored = 0
+    tokened = 0
     for ex in examples:
         for key, source in ex.entries.items():
-            src_tokens = set(PH_RE.findall(source))
-            gold_tokens = set(PH_RE.findall(ex.translations[key]))
-            # every gold token must come from the source protection map
-            assert gold_tokens <= src_tokens, key
-            if src_tokens and src_tokens == gold_tokens:
-                mirrored += 1
-    # stress set is token-heavy by design: most protected entries mirror fully.
-    # (json_in_string cases legitimately diverge: the whole JSON body is
-    # protected as one token on the source side only.)
-    assert mirrored >= 15
+            src_tokens = Counter(PH_RE.findall(source))
+            gold_tokens = Counter(PH_RE.findall(ex.translations[key]))
+            assert src_tokens == gold_tokens, (
+                f"{key}: source tokens {dict(src_tokens)} != "
+                f"gold tokens {dict(gold_tokens)}"
+            )
+            if src_tokens:
+                tokened += 1
+    # the stress set stays token-heavy by design
+    assert tokened >= 15

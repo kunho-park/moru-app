@@ -109,34 +109,6 @@
       "gold": "체력이 가득 찬 동안 치명타 확률 +%d%%"
     },
     {
-      "id": "json_str_01",
-      "category": "json_in_string",
-      "key": "chat.welcome.raw",
-      "source": "{\"text\":\"Welcome to the server, adventurer!\",\"color\":\"gold\",\"bold\":true}",
-      "gold": "{\"text\":\"모험가님, 서버에 오신 것을 환영합니다!\",\"color\":\"gold\",\"bold\":true}"
-    },
-    {
-      "id": "json_str_02",
-      "category": "json_in_string",
-      "key": "title.chapter_one.raw",
-      "source": "{\"title\":\"Chapter One\",\"subtitle\":\"The Journey Begins\",\"fadeIn\":10,\"stay\":70,\"fadeOut\":20}",
-      "gold": "{\"title\":\"1장\",\"subtitle\":\"여정의 시작\",\"fadeIn\":10,\"stay\":70,\"fadeOut\":20}"
-    },
-    {
-      "id": "json_str_03",
-      "category": "json_in_string",
-      "key": "book.guide_link.raw",
-      "source": "[{\"text\":\"Click \"},{\"text\":\"here\",\"underlined\":true,\"clickEvent\":{\"action\":\"open_url\",\"value\":\"https://modpack.wiki/guide\"}},{\"text\":\" to open the getting-started guide.\"}]",
-      "gold": "[{\"text\":\"입문 가이드를 열려면 \"},{\"text\":\"여기\",\"underlined\":true,\"clickEvent\":{\"action\":\"open_url\",\"value\":\"https://modpack.wiki/guide\"}},{\"text\":\"를 클릭하세요.\"}]"
-    },
-    {
-      "id": "json_str_04",
-      "category": "json_in_string",
-      "key": "item.mystic_ore.hover_raw",
-      "source": "{\"text\":\"[Mystic Ore]\",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"Found only below Y=-32 in the Nether\"}}",
-      "gold": "{\"text\":\"[신비한 광석]\",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"네더의 Y=-32 아래에서만 발견됩니다\"}}"
-    },
-    {
       "id": "quest_long_01",
       "category": "long_quest",
       "key": "ftbquests.chapter.intro.description",

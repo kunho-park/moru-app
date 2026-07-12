@@ -302,6 +302,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
       use_tm: settings.useTm,
       use_vanilla_glossary: settings.useVanillaGlossary,
       extract_glossary: settings.extractGlossary,
+      glossary_max_terms: settings.glossaryMaxTerms,
       include_categories:
         state.excludedCategories.length > 0 && state.scanResult !== null
           ? state.scanResult.categories
@@ -466,7 +467,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
             if (failedAttempt) {
               get().appendLog(
                 "warn",
-                `glossary chunk ${frame.done + 1}/${frame.total} ` +
+                `glossary chunk ${frame.chunk ?? frame.done + 1}/${frame.total} ` +
                   (frame.skipped ? "skipped" : `retry ${frame.attempt}`) +
                   `: ${frame.error}`,
               );

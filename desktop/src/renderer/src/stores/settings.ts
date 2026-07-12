@@ -21,6 +21,8 @@ interface SettingsStore {
   useTm: boolean;
   useVanillaGlossary: boolean;
   extractGlossary: boolean;
+  /** Maximum mined candidates sent to glossary curation; null means unlimited. */
+  glossaryMaxTerms: number | null;
   ollamaBaseUrl: string;
   targetLocale: string;
   recentFolders: string[];
@@ -45,6 +47,7 @@ export const useSettings = create<SettingsStore>()(
       useTm: true,
       useVanillaGlossary: true,
       extractGlossary: true,
+      glossaryMaxTerms: 3000,
       ollamaBaseUrl: "http://localhost:11434",
       targetLocale: "ko_kr",
       recentFolders: [],

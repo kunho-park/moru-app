@@ -103,6 +103,8 @@ def test_default_glossary_candidate_budget_is_3000(tmp_path: Path) -> None:
     config = PipelineConfig(modpack_path=tmp_path)
     assert config.glossary_max_terms == 3000
     assert config.glossary_chunk_size == 50
+    unlimited = PipelineConfig(modpack_path=tmp_path, glossary_max_terms=None)
+    assert unlimited.glossary_max_terms is None
 
 
 async def _run(
@@ -524,6 +526,31 @@ class FlakyGlossaryExtractor:
         return dspy.Prediction(term_rules=[rule])
 
 
+class BlockingGlossaryExtractor:
+    """Hold curation calls open so request overlap is observable."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.active = 0
+        self.max_active = 0
+        self.overlapped = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def acall(
+        self, *, candidates, existing_glossary, target_lang, feedback=""
+    ):
+        self.calls += 1
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if self.active >= 2:
+            self.overlapped.set()
+        try:
+            await self.release.wait()
+        finally:
+            self.active -= 1
+        return dspy.Prediction(term_rules=[])
+
+
 def _fixed_candidates(count: int):
     from moru_engine.glossary.term_miner import TermCandidate
 
@@ -612,6 +639,28 @@ async def test_glossary_chunk_progress_events(
         payload for event, payload in events[:first_batch] if event == "tokens"
     ]
     assert len(glossary_token_frames) == 2
+
+
+@pytest.mark.asyncio
+async def test_glossary_curation_obeys_max_concurrent(
+    modpack: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = BlockingGlossaryExtractor()
+    _patch_glossary(monkeypatch, fake, candidates=6)
+    config = _glossary_config(modpack, tmp_path)
+    config.max_concurrent = 2
+
+    run_task = asyncio.create_task(
+        _run(config, FakeTranslator())
+    )
+    try:
+        await asyncio.wait_for(fake.overlapped.wait(), timeout=1)
+    finally:
+        fake.release.set()
+        await run_task
+
+    assert fake.calls == 3
+    assert fake.max_active == 2
 
 
 @pytest.mark.asyncio

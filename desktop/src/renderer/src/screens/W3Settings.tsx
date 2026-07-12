@@ -69,6 +69,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 const ADVANCED_DEFAULTS = { temperature: 0.3, batchSize: 30, maxConcurrent: 15, maxRefine: 2 };
+const DEFAULT_GLOSSARY_MAX_TERMS = 3000;
 
 function maskKey(key: string): string {
   if (key.length <= 12) return `${key.slice(0, 3)}...`;
@@ -283,7 +284,9 @@ export function W3Settings() {
   const changedCount =
     (Object.keys(ADVANCED_DEFAULTS) as (keyof typeof ADVANCED_DEFAULTS)[]).filter(
       (k) => settings[k] !== ADVANCED_DEFAULTS[k],
-    ).length + (settings.preset === "custom" ? 1 : 0);
+    ).length +
+    (settings.glossaryMaxTerms !== DEFAULT_GLOSSARY_MAX_TERMS ? 1 : 0) +
+    (settings.preset === "custom" ? 1 : 0);
 
   const presetName =
     settings.preset === "custom" ? t("w3.footer.custom") : t(`common.preset.${settings.preset}`);
@@ -771,6 +774,49 @@ export function W3Settings() {
               {numberField("batchSize", t("w3.advanced.batchSize"), 1, 1)}
               {numberField("maxConcurrent", t("w3.advanced.maxConcurrent"), 1, 1)}
               {numberField("maxRefine", t("w3.advanced.maxRefine"), 1, 0)}
+            </div>
+            <div className="grid grid-cols-4 gap-3">
+              <div className="col-span-2">
+                <span className="mb-[6px] block font-mono text-[11px] text-text3">
+                  {t("w3.advanced.glossaryMaxTerms")}
+                </span>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    step={1}
+                    min={1}
+                    value={settings.glossaryMaxTerms ?? ""}
+                    placeholder="∞"
+                    disabled={settings.glossaryMaxTerms === null}
+                    onChange={(e) => {
+                      const n = e.target.valueAsNumber;
+                      if (Number.isInteger(n) && n >= 1) {
+                        settings.set({ glossaryMaxTerms: n });
+                      }
+                    }}
+                    className="min-w-0 flex-1 border border-edge bg-ink px-[10px] py-[7px] font-mono text-[12px] text-text disabled:text-text3"
+                  />
+                  <button
+                    type="button"
+                    aria-pressed={settings.glossaryMaxTerms === null}
+                    onClick={() =>
+                      settings.set({
+                        glossaryMaxTerms:
+                          settings.glossaryMaxTerms === null
+                            ? DEFAULT_GLOSSARY_MAX_TERMS
+                            : null,
+                      })
+                    }
+                    className={
+                      settings.glossaryMaxTerms === null
+                        ? "cursor-pointer border border-accent bg-accent/10 px-3 font-mono text-[11px] text-accent"
+                        : "cursor-pointer border border-edge bg-ink px-3 font-mono text-[11px] text-text3 hover:border-edge2 hover:text-text"
+                    }
+                  >
+                    {t("w3.advanced.unlimited")}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         )}

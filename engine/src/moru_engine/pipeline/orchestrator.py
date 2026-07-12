@@ -121,7 +121,7 @@ class PipelineConfig(BaseModel):
 
     batch_size: int = 30
     max_batch_chars: int = 8000
-    max_concurrent: int = 15
+    max_concurrent: int = Field(default=15, ge=1)
     file_workers: int = 3
     max_refine: int = 2
 
@@ -140,7 +140,7 @@ class PipelineConfig(BaseModel):
     #: Cap on mined term candidates sent to the curation LLM. Candidates
     #: come from a deterministic whole-corpus scan (term_miner), not from
     #: sampling, so coverage does not depend on file order.
-    glossary_max_terms: int = 3000
+    glossary_max_terms: int | None = Field(default=3000, ge=1)
     #: Candidates per curation LLM call. Small chunks bound the blast
     #: radius of one malformed response and make progress observable.
     glossary_chunk_size: int = 50
@@ -273,33 +273,69 @@ class TranslationPipeline:
                     for i in range(0, len(candidates), size)
                 ]
                 total = len(chunks)
-                new_terms = 0
-                extracted_rules: list[TermRule] = []
+                progress = {"done": 0, "new_terms": 0}
+                chunk_rules: list[list[TermRule] | None] = [None] * total
                 self._emit(
                     "glossary_progress",
                     {"done": 0, "total": total, "new_terms": 0},
                 )
-                for index, chunk in enumerate(chunks):
-                    rules = await self._curate_glossary_chunk(
-                        extractor, glossary, chunk, index, total, new_terms
-                    )
-                    if rules:
-                        new_terms += len(rules)
-                        extracted_rules.extend(rules)
-                        glossary = glossary.merge_with(
-                            Glossary(
-                                locale_source=self.config.source_locale,
-                                locale_target=self.config.target_locale,
-                                term_rules=rules,
-                            )
+                work = iter(enumerate(chunks))
+
+                async def curate_worker() -> None:
+                    for index, chunk in work:
+                        rules = await self._curate_glossary_chunk(
+                            extractor,
+                            glossary,
+                            chunk,
+                            index,
+                            total,
+                            progress,
                         )
-                    self._emit(
-                        "glossary_progress",
-                        {"done": index + 1, "total": total, "new_terms": new_terms},
+                        chunk_rules[index] = rules
+                        progress["done"] += 1
+                        progress["new_terms"] += len(rules)
+                        self._emit(
+                            "glossary_progress",
+                            {
+                                "done": progress["done"],
+                                "total": total,
+                                "new_terms": progress["new_terms"],
+                            },
+                        )
+
+                workers = [
+                    asyncio.create_task(
+                        curate_worker(), name=f"moru-glossary-{worker_index}"
                     )
-                self._emit("glossary_extracted", {"new_terms": new_terms})
+                    for worker_index in range(
+                        min(self.config.max_concurrent, total)
+                    )
+                ]
+                try:
+                    await asyncio.gather(*workers)
+                except BaseException:
+                    for worker in workers:
+                        worker.cancel()
+                    await asyncio.gather(*workers, return_exceptions=True)
+                    raise
+
+                extracted_rules = [
+                    rule
+                    for rules in chunk_rules
+                    if rules is not None
+                    for rule in rules
+                ]
+                new_terms = len(extracted_rules)
                 if extracted_rules:
+                    glossary = glossary.merge_with(
+                        Glossary(
+                            locale_source=self.config.source_locale,
+                            locale_target=self.config.target_locale,
+                            term_rules=extracted_rules,
+                        )
+                    )
                     self._persist_extracted_terms(extracted_rules)
+                self._emit("glossary_extracted", {"new_terms": new_terms})
 
         fingerprint = hashlib.sha256(
             "\x1e".join(
@@ -365,7 +401,7 @@ class TranslationPipeline:
         chunk: list[TermCandidate],
         index: int,
         total: int,
-        new_terms: int,
+        progress: dict[str, int],
     ) -> list[TermRule]:
         """One curation LLM call with schema-error feedback retries.
 
@@ -379,16 +415,18 @@ class TranslationPipeline:
         for attempt in range(1, self.config.glossary_max_retries + 2):
             self._check_cancelled()
             try:
-                with dspy.context(lm=self.lm, adapter=dspy.JSONAdapter()):
-                    pred = await extractor.acall(
-                        candidates="\n".join(c.as_line() for c in chunk),
-                        existing_glossary=GlossaryFilter.filter_for_texts(
-                            glossary,
-                            {str(i): c.term for i, c in enumerate(chunk)},
-                        ).to_context_string(),
-                        target_lang=self.config.target_locale,
-                        feedback=feedback,
-                    )
+                async with self._llm_semaphore:
+                    self._check_cancelled()
+                    with dspy.context(lm=self.lm, adapter=dspy.JSONAdapter()):
+                        pred = await extractor.acall(
+                            candidates="\n".join(c.as_line() for c in chunk),
+                            existing_glossary=GlossaryFilter.filter_for_texts(
+                                glossary,
+                                {str(i): c.term for i, c in enumerate(chunk)},
+                            ).to_context_string(),
+                            target_lang=self.config.target_locale,
+                            feedback=feedback,
+                        )
                 return list(pred.term_rules or [])
             except Exception as exc:  # noqa: BLE001 — LLM output is untrusted
                 error = str(exc)
@@ -404,9 +442,10 @@ class TranslationPipeline:
                 self._emit(
                     "glossary_progress",
                     {
-                        "done": index,
+                        "done": progress["done"],
                         "total": total,
-                        "new_terms": new_terms,
+                        "new_terms": progress["new_terms"],
+                        "chunk": index + 1,
                         "attempt": attempt,
                         "error": error[:300],
                         "skipped": skipped,

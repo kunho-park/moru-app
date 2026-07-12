@@ -155,6 +155,8 @@ export interface TranslateParams {
   use_tm?: boolean;
   use_vanilla_glossary?: boolean;
   extract_glossary?: boolean;
+  /** Maximum mined glossary candidates; null means unlimited. */
+  glossary_max_terms?: number | null;
   include_categories?: string[];
 }
 
@@ -240,6 +242,8 @@ export interface GlossaryProgressFrame {
   /** extraction chunks completed */
   done: number;
   total: number;
+  /** one-based chunk number for retry/skip diagnostics */
+  chunk?: number;
   /** terms extracted so far */
   new_terms: number;
   /** present when a schema-invalid LLM response failed this attempt */

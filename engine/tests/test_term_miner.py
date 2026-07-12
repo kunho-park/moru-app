@@ -63,6 +63,24 @@ def test_ranking_and_cap() -> None:
     assert [c.term for c in cands] == ["Alpha Gem", "Beta Core"]
 
 
+def test_unlimited_budget_keeps_every_ranked_candidate() -> None:
+    entries = {
+        "item.mymod.alpha": "Alpha Gem",
+        "item.mymod.beta": "Beta Core",
+        "item.mymod.gamma": "Gamma Stone",
+    }
+
+    limited = mine_candidates(entries, existing_terms=set(), max_terms=2)
+    unlimited = mine_candidates(entries, existing_terms=set(), max_terms=None)
+
+    assert [c.term for c in limited] == ["Alpha Gem", "Beta Core"]
+    assert [c.term for c in unlimited] == [
+        "Alpha Gem",
+        "Beta Core",
+        "Gamma Stone",
+    ]
+
+
 def test_deterministic_output() -> None:
     entries = {
         "quest.a": "Seek the Sunken Shrine.",

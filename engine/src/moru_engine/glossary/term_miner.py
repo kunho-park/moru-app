@@ -89,7 +89,7 @@ def mine_candidates(
     entries: dict[str, str],
     existing_terms: set[str],
     *,
-    max_terms: int = 300,
+    max_terms: int | None = 300,
     min_count: int = 2,
 ) -> list[TermCandidate]:
     """Mine ranked term candidates from ``{entry_key: source_text}``.
@@ -97,6 +97,8 @@ def mine_candidates(
     ``existing_terms`` (lowercased aliases of already-fixed rules - vanilla,
     community, manual) are excluded so the LLM never re-translates settled
     vocabulary. Deterministic: same corpus in, same candidates out.
+
+    ``max_terms=None`` keeps every ranked candidate.
     """
     excluded = {t.lower() for t in existing_terms}
     by_term: dict[str, TermCandidate] = {}
@@ -142,4 +144,4 @@ def mine_candidates(
         if c.from_name_key or c.count >= min_count
     ]
     kept.sort(key=lambda c: (not c.from_name_key, -c.count, c.term.lower()))
-    return kept[:max_terms]
+    return kept if max_terms is None else kept[:max_terms]

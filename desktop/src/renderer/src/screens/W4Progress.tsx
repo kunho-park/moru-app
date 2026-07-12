@@ -7,7 +7,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { formatCompact, formatDuration, formatInt, formatUsd } from "@/lib/format";
+import {
+  formatCompact,
+  formatDuration,
+  formatInt,
+  formatUsd,
+  ratePerSecond,
+  remainingSeconds,
+} from "@/lib/format";
 import { estimateUsage } from "@/lib/models";
 import { cacheRatioPercent, costUsd, priceForModel, usePricingTable } from "@/lib/pricing";
 import { useRouter } from "@/stores/router";
@@ -236,6 +243,7 @@ export function W4Progress() {
     runState,
     runError,
     startedAt,
+    translationStartedAt,
     finishedAt,
     doneEntries,
     fileProgress,
@@ -264,9 +272,12 @@ export function W4Progress() {
   const fileTimesRef = useRef<Record<string, { start: number; end?: number }>>({});
 
   useEffect(() => {
-    rateSamplesRef.current = [];
     fileTimesRef.current = {};
   }, [startedAt]);
+
+  useEffect(() => {
+    rateSamplesRef.current = [];
+  }, [translationStartedAt]);
 
   useEffect(() => {
     if (!running) return;
@@ -302,9 +313,8 @@ export function W4Progress() {
 
   const elapsedLiveSec = startedAt !== null ? Math.max(0, ((finishedAt ?? now) - startedAt) / 1000) : 0;
   const elapsedSec = !running && stats !== null ? stats.duration_seconds : elapsedLiveSec;
-  const rate = elapsedSec > 0 ? doneShown / elapsedSec : 0;
-  const remainingSec =
-    running && rate > 0 && totalEntries > 0 ? Math.max(0, (totalEntries - doneShown) / rate) : null;
+  const rate = ratePerSecond(doneShown, translationStartedAt, finishedAt ?? now);
+  const remainingSec = running ? remainingSeconds(totalEntries, doneShown, rate) : null;
 
   /* rate chart: last 8 per-second deltas (re-derived each 1s tick render) */
   const rateSamples = rateSamplesRef.current;

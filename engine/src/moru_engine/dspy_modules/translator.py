@@ -156,11 +156,33 @@ class BatchTranslator(dspy.Module):
         for attempt in range(self.max_refine):
             if not failed:
                 break
-            logger.debug(
-                "Refine pass %d: %d failing entries", attempt + 1, len(failed)
-            )
             still_failed: dict[str, list[str]] = {}
-            for key, errors in failed.items():
+            missing = {
+                key: entries[key] for key in failed if key not in translations
+            }
+            if missing:
+                logger.debug(
+                    "Retry pass %d: %d missing entries", attempt + 1, len(missing)
+                )
+                retry_pred = self.translate(
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    context=context,
+                    glossary=glossary,
+                    entries=missing,
+                )
+                retry_translations, retry_failed = self._initial_state(
+                    missing, retry_pred
+                )
+                translations.update(retry_translations)
+                still_failed.update(retry_failed)
+
+            invalid = {key: errors for key, errors in failed.items() if key not in missing}
+            if invalid:
+                logger.debug(
+                    "Refine pass %d: %d invalid entries", attempt + 1, len(invalid)
+                )
+            for key, errors in invalid.items():
                 fixed = self.refine(
                     source=entries[key],
                     bad_translation=translations.get(key, ""),
@@ -193,11 +215,33 @@ class BatchTranslator(dspy.Module):
         for attempt in range(self.max_refine):
             if not failed:
                 break
-            logger.debug(
-                "Refine pass %d: %d failing entries", attempt + 1, len(failed)
-            )
             still_failed: dict[str, list[str]] = {}
-            for key, errors in failed.items():
+            missing = {
+                key: entries[key] for key in failed if key not in translations
+            }
+            if missing:
+                logger.debug(
+                    "Retry pass %d: %d missing entries", attempt + 1, len(missing)
+                )
+                retry_pred = await self.translate.acall(
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    context=context,
+                    glossary=glossary,
+                    entries=missing,
+                )
+                retry_translations, retry_failed = self._initial_state(
+                    missing, retry_pred
+                )
+                translations.update(retry_translations)
+                still_failed.update(retry_failed)
+
+            invalid = {key: errors for key, errors in failed.items() if key not in missing}
+            if invalid:
+                logger.debug(
+                    "Refine pass %d: %d invalid entries", attempt + 1, len(invalid)
+                )
+            for key, errors in invalid.items():
                 fixed = (
                     await self.refine.acall(
                         source=entries[key],

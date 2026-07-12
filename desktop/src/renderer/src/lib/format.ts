@@ -4,6 +4,18 @@ export function formatInt(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+/** Completed units per second since the measured stage began. */
+export function ratePerSecond(done: number, startedAt: number | null, endedAt: number): number {
+  if (done <= 0 || startedAt === null || endedAt <= startedAt) return 0;
+  return done / ((endedAt - startedAt) / 1000);
+}
+
+/** Linear ETA from a stage-local rate; null until the rate is measurable. */
+export function remainingSeconds(total: number, done: number, rate: number): number | null {
+  if (total <= 0 || rate <= 0) return null;
+  return Math.max(0, (total - done) / rate);
+}
+
 /** 2400000 -> "2.4M", 8204 -> "8.2K", 412 -> "412" */
 export function formatCompact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;

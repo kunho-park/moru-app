@@ -78,6 +78,8 @@ interface WizardStore {
   runState: "idle" | "running" | "done" | "failed" | "cancelled";
   runError: string | null;
   startedAt: number | null;
+  /** First provider batch start; excludes scan/glossary from live throughput. */
+  translationStartedAt: number | null;
   finishedAt: number | null;
   doneEntries: number;
   fileProgress: Record<string, FileProgress>;
@@ -150,6 +152,7 @@ const initialJobState = {
   runState: "idle" as const,
   runError: null,
   startedAt: null,
+  translationStartedAt: null,
   finishedAt: null,
   doneEntries: 0,
   fileProgress: {},
@@ -316,6 +319,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
       runState: "running",
       runError: null,
       startedAt: Date.now(),
+      translationStartedAt: null,
       finishedAt: null,
       doneEntries: 0,
       fileProgress: {},
@@ -418,8 +422,10 @@ export const useWizard = create<WizardStore>((set, get) => ({
             }
             break;
           }
-          case "batch_started":
+          case "batch_started": {
+            const batchStartedAt = Date.now();
             set((prev) => ({
+              translationStartedAt: prev.translationStartedAt ?? batchStartedAt,
               activeBatches: {
                 ...prev.activeBatches,
                 [frame.request_id]: {
@@ -427,11 +433,12 @@ export const useWizard = create<WizardStore>((set, get) => ({
                   file: frame.file,
                   key: frame.key,
                   entries: frame.entries,
-                  startedAt: Date.now(),
+                  startedAt: batchStartedAt,
                 },
               },
             }));
             break;
+          }
           case "batch_finished":
             set((prev) => {
               const activeBatches = { ...prev.activeBatches };

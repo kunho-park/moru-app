@@ -5,6 +5,7 @@ import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
 
 import { ActiveBatchPanel } from "./ActiveBatchPanel.tsx";
+import { ratePerSecond, remainingSeconds } from "../lib/format.ts";
 
 const i18n = createInstance();
 await i18n.init({
@@ -63,4 +64,19 @@ test("renders every active provider request with slot usage", () => {
   expect(html).toContain("40 entries");
   expect(html).toContain("REQ 12");
   expect(html).toContain("quests.snbt");
+});
+
+test("uses the translation-stage clock for live rate and ETA", () => {
+  // Screenshot scenario: translation has run for 106s, while scan/glossary
+  // made the whole job 710s old. Only the provider stage belongs in the rate.
+  const rate = ratePerSecond(1_826, 604_000, 710_000);
+  const eta = remainingSeconds(175_561, 1_826, rate);
+
+  expect(rate).toBeCloseTo(17.226, 3);
+  expect(eta).toBeCloseTo(10_085, -1);
+});
+
+test("does not invent a rate before the first translation batch", () => {
+  expect(ratePerSecond(0, null, 710_000)).toBe(0);
+  expect(remainingSeconds(175_561, 0, 0)).toBeNull();
 });

@@ -2,7 +2,7 @@
 
 import { useTranslation } from "react-i18next";
 
-import { formatDuration } from "@/lib/format";
+import { formatDuration, ratePerSecond, remainingSeconds } from "@/lib/format";
 import { modelDisplayName } from "@/lib/models";
 import { useRouter, type Screen } from "@/stores/router";
 import { useSettings } from "@/stores/settings";
@@ -70,12 +70,11 @@ export function WizardLayout({ children }: { children: React.ReactNode }) {
     w6: null,
   };
 
-  /* ETA: linear extrapolation from live throughput */
-  const elapsed = wizard.startedAt !== null ? (Date.now() - wizard.startedAt) / 1000 : 0;
-  const remainingEntries = Math.max(totals.entries - wizard.doneEntries, 0);
+  /* ETA: extrapolate from provider translation time, excluding scan/glossary. */
+  const rate = ratePerSecond(wizard.doneEntries, wizard.translationStartedAt, Date.now());
   const eta =
-    wizard.runState === "running" && wizard.doneEntries > 0
-      ? (elapsed / wizard.doneEntries) * remainingEntries
+    wizard.runState === "running"
+      ? remainingSeconds(totals.entries, wizard.doneEntries, rate)
       : null;
 
   return (

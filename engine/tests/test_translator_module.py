@@ -70,11 +70,11 @@ def test_refine_exhaustion_surfaces_failure() -> None:
     assert pred.translations["c.d"] == GOOD["c.d"]
 
 
-def test_hallucinated_keys_dropped_and_missing_failed() -> None:
+def test_hallucinated_keys_dropped_and_missing_retried() -> None:
     lm = DummyLM(
         [
             {"translations": {"c.d": "철 검", "made.up": "환각"}},
-            {"fixed_translation": "안녕 {{PH1}} 세계"},
+            {"translations": {"a.b": "안녕 {{PH1}} 세계"}},
         ],
         adapter=dspy.JSONAdapter(),
     )
@@ -83,6 +83,30 @@ def test_hallucinated_keys_dropped_and_missing_failed() -> None:
     # missing a.b was refined back in
     assert pred.translations["a.b"] == "안녕 {{PH1}} 세계"
     assert pred.failed == {}
+
+
+async def test_multiple_missing_entries_are_retried_in_one_batch() -> None:
+    entries = {"a": "Alpha", "b": "Beta", "c": "Gamma"}
+    expected = {"a": "알파", "b": "베타", "c": "감마"}
+    lm = DummyLM(
+        [
+            {"translations": {"a": expected["a"]}},
+            {"translations": {"b": expected["b"], "c": expected["c"]}},
+        ],
+        adapter=dspy.JSONAdapter(),
+    )
+    with dspy.context(lm=lm, adapter=dspy.JSONAdapter()):
+        pred = await BatchTranslator(max_refine=2).acall(
+            source_lang="en_us",
+            target_lang="ko_kr",
+            context="test",
+            glossary="",
+            entries=entries,
+        )
+
+    assert pred.translations == expected
+    assert pred.failed == {}
+    assert len(lm.history) == 2
 
 
 async def test_acall_async_path_matches_forward() -> None:

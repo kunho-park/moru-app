@@ -249,6 +249,13 @@ class TranslationPipeline:
                 if handler is None:
                     continue
                 data = await handler.extract(pair.source_path)
+                if pair.target_path is not None and pair.target_path.exists():
+                    existing = await handler.extract(pair.target_path)
+                    data = {
+                        key: value
+                        for key, value in data.items()
+                        if not existing.get(key, "").strip()
+                    }
                 for key, value in data.items():
                     corpus[f"{pair.source_path}:{key}"] = value
             candidates = mine_candidates(
@@ -565,6 +572,10 @@ class TranslationPipeline:
             existing: dict[str, str] = {}
             if pair.target_path is not None and pair.target_path.exists():
                 existing = dict(await handler.extract(pair.target_path))
+            existing_keys = {
+                key for key in source_data if existing.get(key, "").strip()
+            }
+            work_total = len(source_data) - len(existing_keys)
 
             final: dict[str, str] = {}
             file_entries: list[EntryResult] = []
@@ -573,7 +584,7 @@ class TranslationPipeline:
             to_translate: dict[str, str] = {}
 
             for key, text in source_data.items():
-                if key in existing and existing[key].strip():
+                if key in existing_keys:
                     final[key] = existing[key]
                     file_entries.append(
                         EntryResult(
@@ -624,6 +635,16 @@ class TranslationPipeline:
                         )
                     )
 
+            if work_total > 0:
+                self._emit(
+                    "progress",
+                    {
+                        "stage": "translate",
+                        "file": rel,
+                        "done": len(final) - len(existing_keys),
+                        "total": work_total,
+                    },
+                )
             context = f"file: {rel}; handler: {handler.name}"
             translated_raw: dict[str, str] = {}
 
@@ -701,10 +722,12 @@ class TranslationPipeline:
                         {
                             "stage": "translate",
                             "file": rel,
-                            # final holds skipped/existing/TM entries here;
-                            # fresh translations join after validation.
-                            "done": len(final) + len(translated_raw),
-                            "total": len(source_data),
+                            # Existing target-locale keys are excluded from the
+                            # scan totals and therefore from live progress.
+                            "done": len(final)
+                            - len(existing_keys)
+                            + len(translated_raw),
+                            "total": work_total,
                         },
                     )
                     # lm.history aggregation is O(calls); once per completed

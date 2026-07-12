@@ -232,6 +232,10 @@ def _scan_result_payload(enriched: EnrichedScanResult) -> dict[str, Any]:
         if not name:
             name, handler = "Other", "other"
         meta = enriched.files.get(path) or FileParseMeta()
+        # Successfully parsed files with no untranslated entries are already
+        # complete in the target locale and should not inflate scan totals.
+        if meta.parsed and meta.entry_count == 0:
+            continue
         groups.setdefault((name, handler), []).append((path, meta))
     categories = [
         {

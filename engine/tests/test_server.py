@@ -7,6 +7,7 @@ real against the repo fixture at test/modpack, which is fast and LLM-free.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 import uuid
@@ -160,6 +161,34 @@ def test_scan_result_category_tree(
     # The parse pass counts real entries: the fixture modpack has content.
     assert sum(c["entry_count"] for c in categories) > 0
     assert sum(c["char_count"] for c in categories) > 0
+
+
+def test_scan_counts_only_entries_missing_target_locale(
+    client: TestClient, scan_job: dict[str, Any]
+) -> None:
+    body = client.get(f"/scan/{scan_job['id']}/result", headers=AUTH).json()
+    kubejs = next(category for category in body["categories"] if category["name"] == "KubeJS")
+    file_info = next(
+        file
+        for file in kubejs["files"]
+        if Path(file["path"]).name.lower() == "en_us.json"
+    )
+    source_path = Path(file_info["path"])
+    target_path = source_path.with_name("ko_kr.json")
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    existing = json.loads(target_path.read_text(encoding="utf-8"))
+    pending = {
+        key: value
+        for key, value in source.items()
+        if not str(existing.get(key, "")).strip()
+    }
+
+    assert file_info["entry_count"] == len(pending)
+    assert file_info["entry_count"] < len(source)
+    assert file_info["char_count"] == sum(len(value) for value in pending.values())
+    assert file_info["sample"] == {
+        key: value[:160] for key, value in list(pending.items())[:3]
+    }
 
 
 def test_scan_result_samples_are_bounded(

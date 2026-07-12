@@ -130,11 +130,13 @@ const GLOSSARY_TOKENS_PER_BATCH = 250;
 const KEY_TOKENS_PER_ENTRY = 7;
 /** ko/ja/zh completions tokenize to roughly the source token volume */
 const COMPLETION_RATIO = 1.0;
-/** refine passes for validation failures */
-const REFINE_FACTOR = 1.12;
-/** glossary term mining/curation calls, proportional to corpus size */
-const EXTRACT_RATIO = 0.12;
-const EXTRACT_OVERHEAD_TOKENS = 600;
+/** Glossary curation: 50 candidates per engine request. */
+const GLOSSARY_CHUNK_SIZE = 50;
+/** DSPy signature/schema plus existing-glossary context on every chunk. */
+const GLOSSARY_PROMPT_OVERHEAD_TOKENS = 3000;
+/** Candidate line and structured TermRule output token volumes. */
+const GLOSSARY_PROMPT_TOKENS_PER_CANDIDATE = 30;
+const GLOSSARY_COMPLETION_TOKENS_PER_CANDIDATE = 75;
 /** engine-side batch splitting also caps chars per batch */
 const MAX_BATCH_CHARS = 8000;
 
@@ -149,6 +151,8 @@ export interface UsageEstimateInput {
   glossary: boolean;
   /** term extraction pass enabled */
   extractGlossary: boolean;
+  /** maximum candidates curated by the glossary LLM; null means uncapped */
+  glossaryMaxTerms: number | null;
 }
 
 export interface UsageEstimate {
@@ -180,12 +184,20 @@ export function estimateUsage(input: UsageEstimateInput): UsageEstimate {
     keyTokens;
   let completion = sourceTokens * COMPLETION_RATIO + keyTokens;
 
-  prompt *= REFINE_FACTOR;
-  completion *= REFINE_FACTOR;
+  // Baseline only: optional refine and schema-retry calls are deliberately
+  // excluded so the estimate never prices work that may not run.
 
   if (input.extractGlossary) {
-    prompt += sourceTokens * EXTRACT_RATIO + EXTRACT_OVERHEAD_TOKENS;
-    completion += sourceTokens * EXTRACT_RATIO * 0.3;
+    const configuredLimit =
+      input.glossaryMaxTerms === null
+        ? entries
+        : Math.max(0, Math.floor(input.glossaryMaxTerms));
+    const candidates = Math.min(entries, configuredLimit);
+    const chunks = Math.ceil(candidates / GLOSSARY_CHUNK_SIZE);
+    prompt +=
+      chunks * GLOSSARY_PROMPT_OVERHEAD_TOKENS +
+      candidates * GLOSSARY_PROMPT_TOKENS_PER_CANDIDATE;
+    completion += candidates * GLOSSARY_COMPLETION_TOKENS_PER_CANDIDATE;
   }
 
   const promptTokens = Math.round(prompt);

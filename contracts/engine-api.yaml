@@ -384,9 +384,10 @@ components:
     ScanResult:
       type: object
       description: >
-        Translatable source files grouped by category. Volumes come from
-        the scan job's parse pass; entry_count/char_count are 0 for files
-        the parser could not read.
+        Source files with untranslated target-locale entries, grouped by
+        category. entry_count/char_count and samples exclude keys that already
+        have a non-empty target value. Parser failures remain visible with zero
+        volumes instead of being treated as fully translated.
       properties:
         modpack_path: { type: string }
         categories:

@@ -1,8 +1,8 @@
 /**
- * Live model pricing from OpenRouter (https://openrouter.ai/api/v1/models —
- * public, no key). OpenRouter carries nearly every hosted model, so one
- * fetch prices all providers, including cache-read rates. Falls back to the
- * static MODEL_PRICES table offline; Ollama is always free.
+ * Model pricing from OpenRouter plus the static direct-provider table.
+ * Direct-provider models use the lower known rate for each token class so
+ * displayed costs may be low but are not inflated by OpenRouter markup.
+ * OpenRouter-selected models use their live OpenRouter row. Ollama is free.
  *
  * All rates are normalized to USD per 1M tokens.
  */
@@ -18,7 +18,7 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
 
 export interface LivePrice extends ModelPrice {
   /** where the numbers came from */
-  source: "openrouter" | "static" | "free";
+  source: "openrouter" | "static" | "conservative" | "free";
 }
 
 export type PricingTable = ReadonlyMap<string, ModelPrice>;
@@ -163,23 +163,38 @@ export function usePricingTable(): PricingTable | null {
 /* -------------------------------------------------------------------- */
 
 /**
- * Price for a LiteLLM model string: live OpenRouter row when the table has
- * one, static fallback otherwise. Ollama is free; unknown paid models
- * return null (UI shows "—").
+ * Price for a LiteLLM model string. OpenRouter models use their live route
+ * price. Direct-provider models use the lower of the static direct price and
+ * the OpenRouter row for every token class; unknown paid models return null.
  */
 export function priceForModel(table: PricingTable | null, model: string): LivePrice | null {
   if (providerIdOf(model) === "ollama") {
     return { input: 0, output: 0, cacheRead: 0, source: "free" };
   }
   const orId = openRouterId(model);
-  if (table !== null && orId !== null) {
-    const live = table.get(orId);
-    if (live !== undefined) return { ...live, source: "openrouter" };
-  }
+  const live = table !== null && orId !== null ? table.get(orId) : undefined;
   const staticPrice =
     MODEL_PRICES[model] ??
-    (model.startsWith("openrouter/") ? MODEL_PRICES[model.slice("openrouter/".length).replace(/\./g, "-")] : undefined);
-  return staticPrice !== undefined ? { ...staticPrice, source: "static" } : null;
+    (model.startsWith("openrouter/")
+      ? MODEL_PRICES[model.slice("openrouter/".length).replace(/\./g, "-")]
+      : undefined);
+
+  if (model.startsWith("openrouter/")) {
+    if (live !== undefined) return { ...live, source: "openrouter" };
+    return staticPrice !== undefined ? { ...staticPrice, source: "static" } : null;
+  }
+  if (live !== undefined && staticPrice !== undefined) {
+    const liveCache = live.cacheRead ?? live.input;
+    const staticCache = staticPrice.cacheRead ?? staticPrice.input;
+    return {
+      input: Math.min(live.input, staticPrice.input),
+      output: Math.min(live.output, staticPrice.output),
+      cacheRead: Math.min(liveCache, staticCache),
+      source: "conservative",
+    };
+  }
+  if (staticPrice !== undefined) return { ...staticPrice, source: "static" };
+  return live !== undefined ? { ...live, source: "openrouter" } : null;
 }
 
 export interface TokenUsageLike {

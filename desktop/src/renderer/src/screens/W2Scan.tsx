@@ -577,6 +577,7 @@ function DoneState() {
   const batchSize = useSettings((s) => s.batchSize);
   const useVanillaGlossary = useSettings((s) => s.useVanillaGlossary);
   const extractGlossary = useSettings((s) => s.extractGlossary);
+  const glossaryMaxTerms = useSettings((s) => s.glossaryMaxTerms);
   const scanResult = useWizard((s) => s.scanResult);
   const excludedCategories = useWizard((s) => s.excludedCategories);
   const toggleCategory = useWizard((s) => s.toggleCategory);
@@ -604,6 +605,7 @@ function DoneState() {
     batchSize,
     glossary: useVanillaGlossary,
     extractGlossary,
+    glossaryMaxTerms,
   });
   const pricingTable = usePricingTable();
   const price = priceForModel(pricingTable, model);

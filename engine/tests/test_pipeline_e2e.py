@@ -125,7 +125,12 @@ async def test_full_run_translates_and_writes_outputs(
     modpack: Path, tmp_path: Path
 ) -> None:
     fake = FakeTranslator()
-    result = await _run(_config(modpack, tmp_path), fake)
+    events: list[tuple[str, dict]] = []
+    result = await _run(
+        _config(modpack, tmp_path),
+        fake,
+        on_event=lambda event, payload: events.append((event, payload)),
+    )
     stats = result.stats
 
     assert fake.calls > 0
@@ -135,6 +140,28 @@ async def test_full_run_translates_and_writes_outputs(
     assert stats.skipped_entries > 0
     assert stats.coverage_percent == 100.0
     assert stats.quality_score == 1.0
+
+    source = json.loads(
+        (modpack / "kubejs/assets/test/lang/en_us.json").read_text(encoding="utf-8")
+    )
+    existing = json.loads(
+        (modpack / "kubejs/assets/test/lang/ko_kr.json").read_text(encoding="utf-8")
+    )
+    pending_count = sum(
+        1 for key in source if not str(existing.get(key, "")).strip()
+    )
+    kube_progress = [
+        payload
+        for event, payload in events
+        if event == "progress"
+        and str(payload.get("file", "")).endswith(
+            "kubejs/assets/test/lang/en_us.json"
+        )
+    ]
+    assert kube_progress
+    assert {payload["total"] for payload in kube_progress} == {pending_count}
+    assert max(payload["done"] for payload in kube_progress) == pending_count
+    assert all(payload["done"] <= payload["total"] for payload in kube_progress)
 
     out = tmp_path / "out"
     # kubejs cannot ride in a resource pack -> overrides tree, and since the
@@ -567,6 +594,30 @@ def _glossary_config(modpack: Path, tmp_path: Path) -> PipelineConfig:
     config.glossary_chunk_size = 2
     config.glossary_max_retries = 1
     return config
+
+
+@pytest.mark.asyncio
+async def test_glossary_corpus_excludes_existing_target_entries(
+    modpack: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, str] = {}
+
+    def capture(entries, *args, **kwargs):
+        captured.update(entries)
+        return []
+
+    monkeypatch.setattr(
+        "moru_engine.pipeline.orchestrator.mine_candidates", capture
+    )
+    await _run(_glossary_config(modpack, tmp_path), FakeTranslator())
+
+    kube_keys = {
+        key.rsplit(":", 1)[-1]
+        for key in captured
+        if "kubejs/assets/test/lang/en_us.json" in key.replace("\\", "/")
+    }
+    assert "item.minecraft.diamond" not in kube_keys
+    assert "item.minecraft.enchanted_golden_apple" in kube_keys
 
 
 def _patch_glossary(

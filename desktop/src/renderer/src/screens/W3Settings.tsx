@@ -159,6 +159,7 @@ export function W3Settings() {
     batchSize: settings.batchSize,
     glossary: settings.useVanillaGlossary || settings.useTm,
     extractGlossary: settings.extractGlossary,
+    glossaryMaxTerms: settings.glossaryMaxTerms,
   });
   const pricingTable = usePricingTable();
 

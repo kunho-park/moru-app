@@ -237,6 +237,7 @@ export function W4Progress() {
   const maxConcurrent = useSettings((s) => s.maxConcurrent);
   const useVanillaGlossary = useSettings((s) => s.useVanillaGlossary);
   const extractGlossary = useSettings((s) => s.extractGlossary);
+  const glossaryMaxTerms = useSettings((s) => s.glossaryMaxTerms);
   const pricingTable = usePricingTable();
   const wizard = useWizard();
   const {
@@ -341,9 +342,17 @@ export function W4Progress() {
             batchSize,
             glossary: useVanillaGlossary,
             extractGlossary,
+            glossaryMaxTerms,
           })
         : null,
-    [totals.chars, totals.entries, batchSize, useVanillaGlossary, extractGlossary],
+    [
+      totals.chars,
+      totals.entries,
+      batchSize,
+      useVanillaGlossary,
+      extractGlossary,
+      glossaryMaxTerms,
+    ],
   );
 
   /* files */

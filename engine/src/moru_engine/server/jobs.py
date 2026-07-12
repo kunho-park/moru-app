@@ -45,6 +45,7 @@ from . import upload
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Mapping
+    from ..models import LanguageFilePair
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +59,12 @@ SAMPLE_TEXT_LIMIT = 160
 
 @dataclass
 class FileParseMeta:
-    """Per-source-file volumes from the scan parse pass."""
+    """Per-source-file untranslated volumes from the scan parse pass."""
 
     entry_count: int = 0
     char_count: int = 0
     sample: dict[str, str] = field(default_factory=dict)
+    parsed: bool = False
 
 
 @dataclass
@@ -429,29 +431,48 @@ class JobManager:
         semaphore = asyncio.Semaphore(PARSE_CONCURRENCY)
         parsed_count = 0
 
-        async def parse_one(source_path: Path) -> None:
+        async def parse_one(pair: LanguageFilePair) -> None:
             nonlocal parsed_count
+            source_path = pair.source_path
             meta = FileParseMeta()
             async with semaphore:
                 handler = registry.get_handler(source_path)
                 if handler is not None:
                     try:
-                        data = await handler.extract(source_path)
-                        meta.entry_count = len(data)
-                        meta.char_count = sum(len(v) for v in data.values())
-                        meta.sample = {
-                            k: v[:SAMPLE_TEXT_LIMIT]
-                            for k, v in list(data.items())[:SAMPLE_ENTRIES]
-                        }
+                        source_data = await handler.extract(source_path)
                     except Exception as exc:  # noqa: BLE001 — parse-only pass
                         logger.warning("Scan parse failed for %s: %s", source_path, exc)
+                    else:
+                        pending_data = source_data
+                        if pair.target_path is not None:
+                            try:
+                                existing = await handler.extract(pair.target_path)
+                            except Exception as exc:  # noqa: BLE001 — count all source
+                                logger.warning(
+                                    "Target scan parse failed for %s: %s",
+                                    pair.target_path,
+                                    exc,
+                                )
+                            else:
+                                pending_data = {
+                                    key: value
+                                    for key, value in source_data.items()
+                                    if not existing.get(key, "").strip()
+                                }
+                        meta.parsed = True
+                        meta.entry_count = len(pending_data)
+                        meta.char_count = sum(len(v) for v in pending_data.values())
+                        meta.sample = {
+                            key: value[:SAMPLE_TEXT_LIMIT]
+                            for key, value in list(pending_data.items())[:SAMPLE_ENTRIES]
+                        }
             enriched.files[str(source_path)] = meta
             parsed_count += 1
             progress("parse", parsed_count, len(pairs), source_path.name)
 
         if pairs:
             progress("parse", 0, len(pairs), "")
-            await asyncio.gather(*(parse_one(p.source_path) for p in pairs))
+            await asyncio.gather(*(parse_one(pair) for pair in pairs))
         return enriched
 
     async def _run_translate(

@@ -1,0 +1,79 @@
+{
+  "translate": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Translate Minecraft modpack / vanilla text entries from source_lang to target_lang.\n\nGENERAL HARD RULES (unchanged):\n- Source text contains protected tokens like {{COLOR}}, {{RESET}}, {{ARG}}, {{VAR}}, {{TAG}}, {{BR}}.\n  The translation MUST contain every token exactly as many times as the source does — never invent,\n  drop, duplicate, or alter a token.\n  - Numbered variants ({{COLOR1}} vs {{COLOR2}}, {{ARG}} appearing multiple times, etc.) are distinct\n    placeholders — copy each occurrence exactly as written, but you MAY reorder them if the target\n    language's grammar requires a different word order than English (this is expected and encouraged\n    for natural phrasing — see \"argument reordering\" below).\n  - {{COLOR}} opens a color/format span, the next {{RESET}} closes it — after reordering words, the\n    span must still wrap the same words it wrapped in the source. If the source opens a span without\n    closing it, do NOT add a closing token yourself.\n  - {{ARG}} is a runtime value slot (number/item/player name) — move it wherever it reads naturally\n    in the target language, even if that changes its position relative to other {{ARG}} tokens.\n  - {{VAR}} and {{TAG}} are verbatim markup — keep them attached to the text they mark.\n  - {{BR}} is a line break — keep line structure.\n- The glossary (if provided) is binding: when a glossary term appears in the source, its mapped\n  target term MUST be used verbatim.\n- Return the same keys as the input; translate values only.\n- Never leave a value untranslated unless it is a proper noun / credit line / specific fixed-label\n  entry that must stay as-is (see \"proper nouns\" and \"known non-translated entries\" below).\n\nCRITICAL — OFFICIAL MINECRAFT TERMINOLOGY REQUIREMENT:\nMost entries come directly from vanilla Minecraft language files (keys like `commands.*`,\n`item.minecraft.*`, `block.minecraft.*`, `key.hotbar.*`, `itemGroup.*`, `jukebox_song.*`,\n`subtitles.*`, `painting.minecraft.*`, etc.). For these keys you must reproduce Mojang's OFFICIAL\nshipped localization for target_lang as closely as possible — this is NOT a free/literal translation\ntask. Prioritize matching the real, shipped in-game wording, phrasing, sentence structure, and word\norder over a literal word-for-word rendering of the English. Recall of the canonical official string\nmatters far more than \"technically correct but freely phrased\" output. Do NOT derive a translation\npurely from the literal English semantics — many vanilla names (blocks, banner patterns, keybinds)\nhave official renderings that diverge substantially from a literal translation. If unsure, recall\nharder from memory of the actual shipped strings rather than guessing/deriving.\n\nKEY-TYPE-SPECIFIC PATTERNS (ko_kr — apply the equivalent convention for other languages too):\n\n1. `subtitles.*` entries (accessibility subtitle text) do NOT use the polite verb ending\n   (-습니다/-ㅂ니다). Official Korean subtitles use a terse NOUN-FORM / DECLARATIVE-STEM ending\n   (명사형 종결 or 동사 어간 종결), e.g.:\n   - \"Squid dies\" → '오징어가 죽음' (NOT '오징어가 죽습니다')\n   - \"Squid hurts\" → '오징어가 상처를 입음' (NOT '오징어가 다칩니다')\n   - \"Tropical Fish flops\" → '열대어가 퍼덕거림' (NOT '열대어가 꼬꾸라집니다')\n   - \"Trapdoor creaks\" → '다락문이 삐걱거림' (trapdoor = 다락문, NOT 덫문)\n   - \"Enchanted Book taken\" → '마법이 부여된 책을 빼냄' (enchanted = 마법이 부여된, taken = 빼냄)\n   - \"Bee buzzes happily\" → '꿀벌이 기쁜 듯 윙윙거림' (bee = 꿀벌, NOT 벌; happily → 기쁜 듯)\n   Always end subtitle translations in this short \"-음/-함/-됨\" style, never \"-습니다\".\n\n2. `item.minecraft.*` / `block.minecraft.*` entries must match the exact shipped item/block name,\n   which is often NOT a literal translation. Verified corrections (do not deviate):\n   - \"Charcoal\" → 숯 (NOT 목탄)\n   - \"Smithing Template\" (e.g. coast_armor_trim_smithing_template) → 대장장이 형판 (NOT 단조 템플릿)\n   - \"Minecart with Chest\" → 상자가 실린 광산 수레 (minecart = 광산 수레, NOT 마인카트; \"with X\" pattern\n     is rendered as \"X가 실린 광산 수레\")\n   - \"Wool\" → 양털 (NOT 양모) — e.g. \"Cyan Wool\" → 하늘색/청록색 양털\n   - \"Slab\" → 반블록 (NOT 슬랩/슬래브) — e.g. \"Brick Slab\" → 벽돌 반블록\n   - \"Blackstone\" → 흑암 (NOT 검은 돌)\n   - \"End Portal Frame\" → 엔드 차원문 틀 (NOT 종말의 포탈 프레임) — \"End\" → 엔드 (not 종말), \"Portal\" →\n     차원문, \"Frame\" → 틀\n   - \"Trapdoor\" → 다락문\n   - \"Advancement\" → 발전 과제 (NOT 업적)\n   - \"Spawn Egg\" → 생성 알 (NOT 스폰 알)\n   - \"Hotbar\" → 단축 바 (NOT 핫바)\n   - \"substring\" → 부분 문자열 (NOT 서브스트링)\n   - \"Minecart\" → 광산 수레 (NOT 마인카트)\n   When translating any item/block name not listed above, first recall the actual official Korean\n   term from memory rather than transliterating or translating word-by-word — many official names\n   are non-literal.\n\n3. `block.minecraft.banner.*` entries (banner pattern names) use fixed heraldry-derived Korean\n   terminology (e.g. 사각형/십자/줄무늬/갈매기무늬 combined with position words like 왼쪽 위, 오른쪽 위,\n   가운데, 위, 아래). WARNING: the position implied by the English pattern-id (e.g. \"top_right\",\n   \"left\") does NOT always map directly to the same left/right side in the official Korean name —\n   heraldic dexter/sinister conventions can cause an apparent mirroring (e.g. the pattern id\n   \"square_top_right\" for the color orange is officially '주황색 왼쪽 위 사각형', not \"오른쪽 위\"/\n   \"수직 기둥\"). Do not guess a geometric description from the English words — recall the actual\n   shipped Korean banner-pattern name as precisely as possible. When genuinely uncertain of the\n   exact official string, still produce a plausible heraldry-style Korean phrase (color + position +\n   shape noun) rather than an invented geometric term.\n\n4. Command-result sentences should follow the natural Korean grammatical order used by Mojang\n   (e.g. \"X에게 Y 발전 과제를 승인했습니다\" rather than a literal \"Y가 X에게 부여되었습니다\" construction).\n   When a source string has multiple {{ARG}} tokens, expect that the official translation often\n   reorders them (e.g. the 2nd English argument may appear before the 1st in Korean) — reorder\n   freely to match natural target-language grammar as long as every {{ARG}} occurrence count is\n   preserved.\n\nARGUMENT REORDERING GUIDANCE:\nDo not assume {{ARG}} tokens must stay in source order. Read the whole sentence, decide the most\nnatural target-language word order, then place the tokens accordingly, while keeping the exact same\ncount of each token type as the source.\n\nPROPER NOUNS / DO-NOT-TRANSLATE CASES:\n- Jukebox song entries (`jukebox_song.minecraft.*`) follow the pattern \"Composer Name - Song Title\"\n  (e.g. \"C418 - wait\", \"Samuel Åberg - 5\"). These are artist/track credits and must be copied\n  through UNCHANGED (verbatim).\n- Painting credit entries (`painting.minecraft.*.author`, e.g. \"Kristoffer Zetterstrand\") are\n  real-world artist names and must be copied through UNCHANGED (verbatim) — do NOT transliterate\n  or render them in Hangul/target-script. Any key ending in `.author`, or any value that is clearly\n  a real person's credited name, must be returned exactly as given in the source.\n- Some fixed keybind/demo-mode labels referencing numbered preset content (e.g.\n  `key.keyboard.world.1` = \"World 1\", used for Minecraft's Demo mode world slots) are left\n  UNTRANSLATED in the official localization — return such values exactly as in the source (e.g.\n  \"World 1\" stays \"World 1\", not translated to \"월드 1\"). If a key/value pattern looks like this kind\n  of fixed numbered demo/preset label, prefer keeping it verbatim.\n- Other proper nouns (player names, mod/brand names, etc.) that the glossary explicitly says to keep\n  must also remain untranslated.\n\nSTYLE PER LANGUAGE:\n- Korean (ko_kr): natural gamer-facing tone, matching official Mojang Korean localization; never\n  append the English original in parentheses/brackets; no romanization of items that have\n  established Korean names; prefer official terms over transliterated loanwords (e.g. 생성 알 over\n  스폰 알, 단축 바 over 핫바, 광산 수레 over 마인카트, 숯 over 목탄, 양털 over 양모, 반블록 over 슬랩,\n  흑암 over 검은 돌). Subtitle strings use the terse noun/stem-ending style described above, never\n  polite \"-습니다\" verb endings.\n- Japanese (ja_jp): plain polite register for UI text, matching official Mojang Japanese wording\n  where the key is a known vanilla string.\n- Chinese (zh_cn / zh_tw): follow official Minecraft terminology of the respective variant exactly.\n\nQUALITY BAR:\nYour output will be scored against the real official translation for vanilla keys, primarily on\nstring similarity (chrF) to that exact official string. A grammatically correct but freely-phrased\ntranslation that diverges from the official wording — including using the wrong grammatical register\n(e.g. polite verb endings in subtitles), non-canonical item/block names, mistranslated proper nouns\n(e.g. transliterating an artist's name), incorrectly translating fixed English labels that Mojang\nleaves untranslated, or literal-but-wrong terminology — will be scored low even if technically\naccurate. Always favor recall of the established/canonical Minecraft phrasing (exact wording, ending\nstyle, and terminology) over creative or literal re-translation. Before finalizing each vanilla-key\nentry, pause and ask: \"Is this a name/term/credit that Mojang's real shipped localization renders\ndifferently from a literal translation, or leaves untranslated entirely?\" — if so, use that known/\nrecalled form instead of a literal rendering. For modpack-specific (non-vanilla) strings without a\nknown official translation, translate naturally and idiomatically while still following the token\nand glossary rules above.",
+      "fields": [
+        {
+          "prefix": "Source Lang:",
+          "description": "source locale code, e.g. en_us"
+        },
+        {
+          "prefix": "Target Lang:",
+          "description": "target locale code, e.g. ko_kr"
+        },
+        {
+          "prefix": "Context:",
+          "description": "mod name, content type (quest/item/tooltip/guidebook), file path hint"
+        },
+        {
+          "prefix": "Glossary:",
+          "description": "binding term rules in 'source = target' form; MUST be followed"
+        },
+        {
+          "prefix": "Entries:",
+          "description": "key -> source text with protected {{KIND}} tokens"
+        },
+        {
+          "prefix": "Translations:",
+          "description": "exactly the same keys -> translated text"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "refine": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Fix a translation that failed programmatic validation.\n\nAddress every listed error. Keep the parts of the translation that are\nalready correct. Every protected token from the source ({{COLOR}} opens\na color span, {{RESET}} closes it, {{ARG}} is a value slot) must appear\nin the fix exactly as many times as in the source, copied exactly as\nwritten. The glossary is binding.",
+      "fields": [
+        {
+          "prefix": "Source:",
+          "description": "source text (placeholders protected)"
+        },
+        {
+          "prefix": "Bad Translation:",
+          "description": "current failing translation"
+        },
+        {
+          "prefix": "Validation Errors:",
+          "description": "verbatim validator error list"
+        },
+        {
+          "prefix": "Glossary:",
+          "description": "binding term rules, 'source = target'"
+        },
+        {
+          "prefix": "Target Lang:",
+          "description": "target locale code"
+        },
+        {
+          "prefix": "Fixed Translation:",
+          "description": "corrected translation"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "metadata": {
+    "dependency_versions": {
+      "python": "3.13",
+      "dspy": "3.2.1",
+      "cloudpickle": "3.1"
+    }
+  }
+}

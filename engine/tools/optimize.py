@@ -60,7 +60,7 @@ from moru_engine.evalset import (  # noqa: E402
     make_metric,
     rollout,
 )
-from moru_engine.evalset.builder import slice_pair  # noqa: E402
+from moru_engine.evalset.builder import parse_pair_spec, slice_pair  # noqa: E402
 from moru_engine.evalset.judge import PairwiseJudge  # noqa: E402
 from moru_engine.utils.log import setup_logging  # noqa: E402
 
@@ -68,15 +68,10 @@ logger = logging.getLogger("tools.optimize")
 
 
 def parse_pairs(args: argparse.Namespace) -> list[tuple[str, str]]:
-    if args.pairs:
-        pairs: list[tuple[str, str]] = []
-        for chunk in args.pairs.split(","):
-            source, _, target = chunk.strip().partition(":")
-            if not source or not target:
-                raise SystemExit(f"--pairs entry '{chunk}' must be 'source:target'")
-            pairs.append((source, target))
-        return pairs
-    return [(args.source, args.target)]
+    try:
+        return parse_pair_spec(args.pairs, args.source, args.target)
+    except ValueError as exc:
+        raise SystemExit(f"--pairs: {exc}") from exc
 
 
 
@@ -201,8 +196,8 @@ def main() -> int:
     )
     if judge is None:
         logger.warning(
-            "No --judge-model: adoption gate will use the deterministic "
-            "metric CI only"
+            "No --judge-model: the gate reports deterministic stats but "
+            "adoption is BLOCKED (use --force to save anyway)"
         )
 
     split = build_evalset(
@@ -299,6 +294,7 @@ def main() -> int:
             n_judge_tasks=n_judge_tasks,
             margin=args.margin,
             alpha=args.alpha,
+            require_judge=True,
             seed=args.seed,
         )
         decisions.append(decision)

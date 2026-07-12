@@ -32,7 +32,7 @@ import dspy  # noqa: E402
 
 from moru_engine.dspy_modules import build_lm, load_translator  # noqa: E402
 from moru_engine.evalset import LLMJudge, build_evalset, make_metric, rollout  # noqa: E402
-from moru_engine.evalset.builder import slice_pair  # noqa: E402
+from moru_engine.evalset.builder import parse_pair_spec, slice_pair  # noqa: E402
 from moru_engine.evalset.gate import entry_integrity  # noqa: E402
 from moru_engine.utils.log import setup_logging  # noqa: E402
 
@@ -40,15 +40,10 @@ logger = logging.getLogger("tools.evaluate")
 
 
 def parse_pairs(args: argparse.Namespace) -> list[tuple[str, str]]:
-    if args.pairs:
-        pairs: list[tuple[str, str]] = []
-        for chunk in args.pairs.split(","):
-            source, _, target = chunk.strip().partition(":")
-            if not source or not target:
-                raise SystemExit(f"--pairs entry '{chunk}' must be 'source:target'")
-            pairs.append((source, target))
-        return pairs
-    return [(args.source, args.target)]
+    try:
+        return parse_pair_spec(args.pairs, args.source, args.target)
+    except ValueError as exc:
+        raise SystemExit(f"--pairs: {exc}") from exc
 
 
 def judge_column(
@@ -105,9 +100,20 @@ def main() -> int:
         default=None,
         help="comma list of source:target pairs (overrides --source/--target)",
     )
-    parser.add_argument("--split", default="test", choices=["train", "val", "test"])
+    parser.add_argument(
+        "--split",
+        default="test",
+        choices=["train", "val", "test", "confirmation"],
+    )
     parser.add_argument("--vanilla-samples", type=int, default=900)
     parser.add_argument("--wide-samples", type=int, default=None)
+    parser.add_argument(
+        "--confirmation-samples",
+        type=int,
+        default=600,
+        help="size of the reserved confirmation split (used only when "
+        "--split confirmation)",
+    )
     parser.add_argument("--batch-size", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--threads", type=int, default=8)
@@ -123,6 +129,9 @@ def main() -> int:
         pairs=pairs,
         vanilla_samples=args.vanilla_samples,
         wide_samples=args.wide_samples,
+        confirmation_samples=(
+            args.confirmation_samples if args.split == "confirmation" else 0
+        ),
         batch_size=args.batch_size,
         seed=args.seed,
     )

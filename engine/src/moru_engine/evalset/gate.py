@@ -267,9 +267,15 @@ def decide(
     alpha: float = DEFAULT_ALPHA,
     det_epsilon: float = DEFAULT_DET_EPSILON,
     min_judge_coverage: float = DEFAULT_MIN_JUDGE_COVERAGE,
+    require_judge: bool = False,
     seed: int = 0,
 ) -> GateDecision:
-    """Apply the adoption rules; every failed rule lands in ``reasons``."""
+    """Apply the adoption rules; every failed rule lands in ``reasons``.
+
+    require_judge: when True, missing judge scores block adoption outright
+    (the deterministic metric CI is advisory only) — set by tools whose
+    adoption/confirmation step is defined as the pairwise-judge protocol.
+    """
     base_integrity = entry_integrity(examples, baseline_preds)
     cand_integrity = entry_integrity(examples, candidate_preds)
     base_metric = sum(baseline_scores) / max(len(baseline_scores), 1)
@@ -321,6 +327,11 @@ def decide(
                 f"{min_judge_coverage:.0%}"
             )
     else:
+        if require_judge:
+            reasons.append(
+                "LLM judge required for adoption: pass --judge-model "
+                "(deterministic metric CI alone cannot adopt)"
+            )
         if metric_boot is None:
             reasons.append("no metric scores to compare")
         else:

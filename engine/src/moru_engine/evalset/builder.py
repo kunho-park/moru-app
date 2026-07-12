@@ -111,6 +111,21 @@ def slice_pair(
     return [ex for ex in examples if (ex.source_lang, ex.target_lang) == pair]
 
 
+def parse_pair_spec(
+    spec: str | None, source_lang: str = "en_us", target_lang: str = "ko_kr"
+) -> list[tuple[str, str]]:
+    """Parse a 'src:tgt,src:tgt' CLI spec; fall back to the single pair."""
+    if not spec:
+        return [(source_lang, target_lang)]
+    pairs: list[tuple[str, str]] = []
+    for chunk in spec.split(","):
+        source, _, target = chunk.strip().partition(":")
+        if not source or not target:
+            raise ValueError(f"pair entry '{chunk}' must be 'source:target'")
+        pairs.append((source, target))
+    return pairs
+
+
 def _load_locale_maps(
     source_lang: str, target_lang: str, minecraft_version: str
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -274,6 +289,7 @@ def build_evalset(
     pairs: Sequence[tuple[str, str]] | None = None,
     vanilla_samples: int = DEFAULT_VANILLA_SAMPLES,
     wide_samples: int | None = None,
+    confirmation_samples: int = 0,
     batch_size: int = DEFAULT_BATCH_SIZE,
     seed: int = DEFAULT_SEED,
     minecraft_version: str = DEFAULT_MINECRAFT_VERSION,
@@ -285,6 +301,14 @@ def build_evalset(
         vanilla_samples: narrow-strata entries sampled per pair.
         wide_samples: production-packed strata entries per pair
             (default: vanilla_samples // 3).
+        confirmation_samples: when > 0, adds a "confirmation" split of
+            this many narrow entries (plus //3 production-packed) drawn
+            from the test KEY BUCKET but strictly AFTER the keys the
+            regular test sample consumes. It is key-disjoint from every
+            other split INCLUDING the test examples, reserved for one
+            final confirmatory gate of externally produced candidates
+            (tools/gate.py --final) after optimize.py has already spent
+            the test split on its own adoption decision.
         batch_size: narrow-strata entries per example.
 
     Keys are bucketed into splits before example construction and the
@@ -297,36 +321,56 @@ def build_evalset(
         wide_samples = vanilla_samples // 3
 
     split: dict[str, list[dspy.Example]] = {"train": [], "val": [], "test": []}
+    if confirmation_samples > 0:
+        split["confirmation"] = []
     for src, tgt in pair_list:
         source_map, target_map = _load_locale_maps(src, tgt, minecraft_version)
         keys = _translatable_keys(source_map, target_map)
         buckets = _split_keys(keys, seed)
         for name, bucket in buckets.items():
             frac = SPLIT_FRACTIONS[name]
-            n_narrow = int(round(vanilla_samples * frac))
-            n_wide = int(round(wide_samples * frac))
-            take = bucket[: min(len(bucket), n_narrow + n_wide)]
-            narrow_keys = sorted(take[:n_narrow])
-            wide_keys = sorted(take[n_narrow:])
-            entries_map, golds_map = _protected_maps(source_map, target_map, take)
-            narrow_batches: list[Sequence[str]] = [
-                narrow_keys[i : i + batch_size]
-                for i in range(0, len(narrow_keys), batch_size)
-            ]
-            wide_batches = [
-                list(batch)
-                for batch in pack_batches({k: entries_map[k] for k in wide_keys})
-            ]
-            split[name].extend(
-                _examples_from_batches(
-                    src, tgt, entries_map, golds_map, narrow_batches, stratum="narrow"
+            plan = [(name, int(round(vanilla_samples * frac)), int(round(wide_samples * frac)))]
+            if name == "test" and confirmation_samples > 0:
+                conf_narrow = confirmation_samples
+                conf_wide = confirmation_samples // 3
+                test_take = plan[0][1] + plan[0][2]
+                needed = test_take + conf_narrow + conf_wide
+                if len(bucket) < needed:
+                    raise ValueError(
+                        f"confirmation split for {src}-{tgt} needs "
+                        f"{conf_narrow + conf_wide} keys AFTER the {test_take} "
+                        f"test keys, but the test bucket holds only "
+                        f"{len(bucket)}; lower confirmation_samples or "
+                        f"vanilla_samples"
+                    )
+                plan.append(("confirmation", conf_narrow, conf_wide))
+            offset = 0
+            for split_name, n_narrow, n_wide in plan:
+                take = bucket[offset : offset + min(len(bucket) - offset, n_narrow + n_wide)]
+                offset += len(take)
+                if not take:
+                    continue
+                narrow_keys = sorted(take[:n_narrow])
+                wide_keys = sorted(take[n_narrow:])
+                entries_map, golds_map = _protected_maps(source_map, target_map, take)
+                narrow_batches: list[Sequence[str]] = [
+                    narrow_keys[i : i + batch_size]
+                    for i in range(0, len(narrow_keys), batch_size)
+                ]
+                wide_batches = [
+                    list(batch)
+                    for batch in pack_batches({k: entries_map[k] for k in wide_keys})
+                ]
+                split[split_name].extend(
+                    _examples_from_batches(
+                        src, tgt, entries_map, golds_map, narrow_batches, stratum="narrow"
+                    )
                 )
-            )
-            split[name].extend(
-                _examples_from_batches(
-                    src, tgt, entries_map, golds_map, wide_batches, stratum="wide"
+                split[split_name].extend(
+                    _examples_from_batches(
+                        src, tgt, entries_map, golds_map, wide_batches, stratum="wide"
+                    )
                 )
-            )
 
     if ("en_us", "ko_kr") in pair_list:
         stress = build_stress_examples()
@@ -338,14 +382,13 @@ def build_evalset(
         split["val"].extend(stress[n_train : n_train + n_val])
         split["test"].extend(stress[n_train + n_val :])
 
-    for index, name in enumerate(("train", "val", "test")):
-        random.Random(seed * 1000 + index).shuffle(split[name])
+    shuffle_salt = {"train": 0, "val": 1, "test": 2, "confirmation": 3}
+    for name in split:
+        random.Random(seed * 1000 + shuffle_salt[name]).shuffle(split[name])
 
     logger.info(
-        "Evalset split (%s): train=%d val=%d test=%d examples",
+        "Evalset split (%s): %s examples",
         ", ".join(f"{s}-{t}" for s, t in pair_list),
-        len(split["train"]),
-        len(split["val"]),
-        len(split["test"]),
+        ", ".join(f"{name}={len(split[name])}" for name in split),
     )
     return split

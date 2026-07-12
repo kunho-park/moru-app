@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+import pytest
+
 from moru_engine.batching import DEFAULT_BATCH_SIZE, DEFAULT_MAX_BATCH_CHARS
 from moru_engine.evalset import build_evalset, build_stress_examples
 
@@ -60,6 +62,32 @@ def test_multi_pair_covers_all_pairs_in_every_split() -> None:
     for name in ("train", "val", "test"):
         seen = {(ex.source_lang, ex.target_lang) for ex in split[name]}
         assert set(PAIRS) <= seen, name
+
+
+def test_confirmation_split_is_reserved_and_disjoint() -> None:
+    """The confirmation split (gate.py --final) must be key-disjoint from
+    every other split INCLUDING the regular test examples — optimize.py
+    already spends test on its own adoption decision."""
+    with_conf = build_evalset(vanilla_samples=64, confirmation_samples=40, seed=42)
+    assert "confirmation" in with_conf
+    assert with_conf["confirmation"]
+    conf_keys = {k for ex in with_conf["confirmation"] for k in ex.entries}
+    for name in ("train", "val", "test"):
+        other = {k for ex in with_conf[name] for k in ex.entries}
+        assert conf_keys.isdisjoint(other), name
+
+    # requesting it must not disturb the regular splits
+    without = build_evalset(vanilla_samples=64, seed=42)
+    assert "confirmation" not in without
+    for name in ("train", "val", "test"):
+        assert _ids(with_conf[name]) == _ids(without[name]), name
+
+
+def test_confirmation_split_fails_loudly_on_shortfall() -> None:
+    """A silently truncated confirmation split would run the final gate
+    with less statistical power than the operator requested."""
+    with pytest.raises(ValueError, match="confirmation split"):
+        build_evalset(vanilla_samples=64, confirmation_samples=10_000, seed=42)
 
 
 def test_vanilla_examples_carry_no_glossary() -> None:

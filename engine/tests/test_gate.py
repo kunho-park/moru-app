@@ -242,3 +242,20 @@ def test_gate_without_judge_uses_metric_ci() -> None:
         cand_scores=[0.7] * len(examples),
     )
     assert not rejected.adopted
+
+
+def test_gate_require_judge_blocks_adoption_without_judge() -> None:
+    """Confirmatory adoption is defined as the pairwise-judge protocol;
+    without a judge the deterministic CI may reject but never adopt."""
+    examples, preds = _clean_examples()
+    decision = _decide(
+        examples=examples,
+        base_preds=preds,
+        cand_preds=preds,
+        judge_scores=None,
+        base_scores=[0.7] * len(examples),
+        cand_scores=[0.8] * len(examples),
+        require_judge=True,
+    )
+    assert not decision.adopted
+    assert any("LLM judge required" in r for r in decision.reasons)

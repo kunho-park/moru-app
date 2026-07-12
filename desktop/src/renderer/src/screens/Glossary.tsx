@@ -10,38 +10,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { LocaleFlag } from "@/components/LocaleFlag";
 import { api } from "@/lib/api";
 import { formatInt, formatRelative } from "@/lib/format";
 import { WEB_URL } from "@/lib/web";
 import { useSettings } from "@/stores/settings";
 import type { GlossaryOrigin, GlossaryTerm } from "../../../shared/engine";
 
-const SOURCE_LANG = "en_us";
+const SOURCE_LANG = "en_us" as const;
 
-const TARGET_LOCALES: { code: string; short: string; flag: string }[] = [
-  {
-    code: "ko_kr",
-    short: "KO",
-    flag: "linear-gradient(180deg, #FFF 0%, #FFF 33%, #003478 33%, #003478 66%, #CD2E3A 66%, #CD2E3A 100%)",
-  },
-  {
-    code: "ja_jp",
-    short: "JA",
-    flag: "linear-gradient(180deg, #FFF 0%, #FFF 35%, #BC002D 35%, #BC002D 65%, #FFF 65%, #FFF 100%)",
-  },
-  {
-    code: "zh_cn",
-    short: "ZH-CN",
-    flag: "linear-gradient(180deg, #DE2910 0%, #DE2910 75%, #FFDE00 75%, #FFDE00 100%)",
-  },
-  {
-    code: "zh_tw",
-    short: "ZH-TW",
-    flag: "linear-gradient(180deg, #000095 0%, #000095 50%, #FE0000 50%, #FE0000 100%)",
-  },
-];
-
-const US_FLAG = "linear-gradient(180deg, #B22234 0%, #B22234 8%, #FFF 8%, #FFF 16%)";
+const TARGET_LOCALES = [
+  { code: "ko_kr", short: "KO" },
+  { code: "ja_jp", short: "JA" },
+  { code: "zh_cn", short: "ZH-CN" },
+  { code: "zh_tw", short: "ZH-TW" },
+] as const;
 
 const ORIGIN_STYLE: Record<GlossaryOrigin, string> = {
   vanilla: "text-accent bg-[rgba(61,220,132,0.08)]",
@@ -478,12 +461,12 @@ export function GlossaryScreen() {
       {/* Filter row */}
       <div className="flex items-center gap-2 border border-b-0 border-line2 bg-raised px-3.5 py-2.5">
         <div className="flex items-center gap-1.5 border border-accent bg-[rgba(61,220,132,0.08)] px-3 py-1.5">
-          <div className="h-3 w-[18px]" style={{ background: US_FLAG }} />
+          <LocaleFlag locale={SOURCE_LANG} className="h-3 w-[18px] shrink-0" />
           <span className="font-mono text-[11px] text-text">{SOURCE_LANG}</span>
           <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="#3DDC84" strokeWidth="1.8">
             <path d="M2 3 L6 3 M3 4 L5 4 M4 5 L4 5" />
           </svg>
-          <div className="h-3 w-[18px]" style={{ background: targetMeta.flag }} />
+          <LocaleFlag locale={targetMeta.code} className="h-3 w-[18px] shrink-0" />
           <select
             value={targetLang}
             onChange={(e) => setTargetLang(e.target.value)}

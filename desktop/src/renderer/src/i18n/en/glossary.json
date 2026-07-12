@@ -16,6 +16,14 @@
     "nothing": "No community snapshot published yet",
     "failed": "Sync failed: {{error}}"
   },
+  "reset": {
+    "button": "Reset",
+    "tooltip": "Deletes all manual and extracted terms (vanilla/community terms are kept)",
+    "title": "Reset glossary",
+    "body": "Delete {{count}} manual and extracted terms? Vanilla and community terms are managed by sync and will be kept. This cannot be undone.",
+    "confirm": "Reset",
+    "done": "Deleted {{count}} terms"
+  },
   "filterAll": "All",
   "origin": {
     "vanilla": "Vanilla",

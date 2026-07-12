@@ -188,6 +188,7 @@ export function GlossaryScreen() {
   const [draftSource, setDraftSource] = useState("");
   const [draftTarget, setDraftTarget] = useState("");
   const [toast, setToast] = useState<{ id: number; text: string; tone: "ok" | "err" } | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
 
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -259,6 +260,7 @@ export function GlossaryScreen() {
     setAdding(false);
     setEditIndex(null);
     setOriginFilter("all");
+    setConfirmReset(false);
   }, [targetLang]);
 
   // Filter changes reshuffle row indices; stale scroll offsets would show
@@ -337,6 +339,26 @@ export function GlossaryScreen() {
 
   const removeTerm = (index: number): void => {
     saveMutation.mutate(terms.filter((_, i) => i !== index));
+  };
+
+  /* Reset: drop user-generated rows (manual + extracted). Vanilla/community
+   * rows are kept — the community sync is version-gated (no-op while the
+   * published snapshot is unchanged), so wiping them here would leave the
+   * baseline empty until the next snapshot release. */
+  const resettableCount = counts.manual + counts.extracted;
+
+  const resetGlossary = (): void => {
+    const removed = resettableCount;
+    saveMutation.mutate(
+      terms.filter((term) => term.origin === "vanilla" || term.origin === "community"),
+      {
+        onSuccess: () => {
+          cancelRow();
+          setConfirmReset(false);
+          showToast(t("glossary.reset.done", { count: removed }));
+        },
+      },
+    );
   };
 
   const exportCsv = (): void => {
@@ -457,6 +479,17 @@ export function GlossaryScreen() {
               <path d="M1 10 H11" />
             </svg>
             {t("glossary.exportCsv")}
+          </button>
+          <button
+            onClick={() => setConfirmReset(true)}
+            disabled={busy || query.isPending || query.isError || resettableCount === 0}
+            title={t("glossary.reset.tooltip")}
+            className="flex items-center gap-1.5 border border-edge bg-transparent px-3.5 py-2 text-[12px] font-semibold text-text2 hover:border-red hover:text-red disabled:opacity-50"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M2 3 H10 M4 3 V1.5 H8 V3 M3 3 L3.5 10.5 H8.5 L9 3" />
+            </svg>
+            {t("glossary.reset.button")}
           </button>
           <button
             onClick={beginAdd}
@@ -755,6 +788,39 @@ export function GlossaryScreen() {
           </div>
         </div>
       </div>
+
+      {/* Reset confirmation dialog */}
+      {confirmReset && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={() => setConfirmReset(false)}
+        >
+          <div
+            className="w-[380px] border border-line2 bg-raised p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-2 text-[14px] font-bold text-text">{t("glossary.reset.title")}</div>
+            <p className="m-0 mb-5 text-[12px] leading-relaxed text-text2">
+              {t("glossary.reset.body", { count: resettableCount })}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                className="border border-edge px-3.5 py-2 text-[12px] font-semibold text-text2 hover:border-edge2 hover:text-text"
+                onClick={() => setConfirmReset(false)}
+              >
+                {t("glossary.rowCancel")}
+              </button>
+              <button
+                disabled={busy}
+                className="bg-red px-3.5 py-2 text-[12px] font-bold text-[#0A100D] hover:bg-[#f58585] disabled:opacity-50"
+                onClick={resetGlossary}
+              >
+                {t("glossary.reset.confirm")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Toast */}
       {toast && (

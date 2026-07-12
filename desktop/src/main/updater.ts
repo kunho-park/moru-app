@@ -19,21 +19,26 @@ function setState(next: UpdateState): void {
   }
 }
 
+async function checkForUpdates(): Promise<void> {
+  if (!app.isPackaged) {
+    // Dev builds have no update feed.
+    setState({ status: "none" });
+    return;
+  }
+  setState({ status: "checking" });
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    if (result === null && state.status === "checking") {
+      setState({ status: "none" });
+    }
+  } catch (error) {
+    setState({ status: "error", message: String(error) });
+  }
+}
+
 export function registerUpdater(): void {
   ipcMain.handle("updates:get-state", () => state);
-  ipcMain.handle("updates:check", async () => {
-    if (!app.isPackaged) {
-      // dev builds have no update feed; report a terminal "none"
-      setState({ status: "none" });
-      return;
-    }
-    setState({ status: "checking" });
-    try {
-      await autoUpdater.checkForUpdates();
-    } catch (error) {
-      setState({ status: "error", message: String(error) });
-    }
-  });
+  ipcMain.handle("updates:check", checkForUpdates);
   ipcMain.on("updates:install", () => {
     if (state.status === "ready") autoUpdater.quitAndInstall();
   });
@@ -41,6 +46,9 @@ export function registerUpdater(): void {
   if (!app.isPackaged) return;
 
   autoUpdater.autoDownload = true;
+  autoUpdater.on("checking-for-update", () => {
+    setState({ status: "checking" });
+  });
   autoUpdater.on("update-available", (info) => {
     setState({ status: "available", version: info.version });
   });
@@ -57,6 +65,7 @@ export function registerUpdater(): void {
   autoUpdater.on("error", (error) => {
     setState({ status: "error", message: String(error) });
   });
-  // fire-and-forget startup check
-  void autoUpdater.checkForUpdates().catch(() => setState({ status: "none" }));
+  // Start before the sidecar and renderer window are created. State is kept
+  // in the main process, so late renderer subscribers receive the result.
+  void checkForUpdates();
 }

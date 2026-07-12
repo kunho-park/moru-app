@@ -5,7 +5,7 @@
 
 import { useTranslation } from "react-i18next";
 
-import { MoruLogo } from "@/components/Titlebar";
+import { MoruLogo } from "@/components/MoruLogo";
 import { useEngineStore } from "@/stores/engine";
 
 export function EngineGate({ children }: { children: React.ReactNode }) {

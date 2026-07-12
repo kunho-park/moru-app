@@ -17,7 +17,11 @@
     "available": "업데이트 가능",
     "installNow": "지금 설치",
     "downloading": "다운로드 중 {{percent}}%",
-    "upToDate": "최신 버전"
+    "upToDate": "최신 버전",
+    "forceTitle": "업데이트가 필요해요",
+    "forceDesc": "모루를 계속 사용하려면 새 버전 v{{version}} 업데이트가 필요해요. 업데이트는 자동으로 다운로드돼요.",
+    "preparing": "다운로드 준비 중…",
+    "installRestart": "재시작하고 업데이트"
   },
   "account": {
     "connected": "Discord 연결됨",

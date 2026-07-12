@@ -17,7 +17,11 @@
     "available": "Update available",
     "installNow": "Install now",
     "downloading": "Downloading {{percent}}%",
-    "upToDate": "Up to date"
+    "upToDate": "Up to date",
+    "forceTitle": "Update required",
+    "forceDesc": "Version v{{version}} is required to keep using Moru. The update downloads automatically.",
+    "preparing": "Preparing download…",
+    "installRestart": "Restart & update"
   },
   "account": {
     "connected": "Discord connected",

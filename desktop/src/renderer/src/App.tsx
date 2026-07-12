@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { WEB_URL } from "@/lib/web";
 import { useSettings } from "@/stores/settings";
 import { EngineGate } from "@/components/EngineGate";
+import { UpdateGate } from "@/components/UpdateGate";
 import { Sidebar } from "@/components/Sidebar";
 import { Titlebar } from "@/components/Titlebar";
 import { WizardLayout } from "@/components/WizardLayout";
@@ -94,19 +95,23 @@ export default function App() {
     <div className="flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden bg-bg">
       <Titlebar />
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <EngineGate>
-          <StartupCommunitySync />
-          {showOnboarding ? (
-            <OnboardingScreen />
-          ) : (
-            <>
-              <Sidebar />
-              <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-bg">
-                <MainContent />
-              </main>
-            </>
-          )}
-        </EngineGate>
+        {/* UpdateGate outside EngineGate: a mandatory update blocks the
+            app even when the sidecar failed to boot. */}
+        <UpdateGate>
+          <EngineGate>
+            <StartupCommunitySync />
+            {showOnboarding ? (
+              <OnboardingScreen />
+            ) : (
+              <>
+                <Sidebar />
+                <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-bg">
+                  <MainContent />
+                </main>
+              </>
+            )}
+          </EngineGate>
+        </UpdateGate>
       </div>
     </div>
   );

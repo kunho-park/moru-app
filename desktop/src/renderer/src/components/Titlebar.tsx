@@ -3,25 +3,7 @@
 import { useTranslation } from "react-i18next";
 
 import { moru } from "@/lib/bridge";
-
-/** Pixel anvil logo (design SVG, verbatim). */
-export function MoruLogo({ width = 24, height = 20 }: { width?: number; height?: number }) {
-  return (
-    <svg
-      viewBox="0 0 24 20"
-      width={width}
-      height={height}
-      xmlns="http://www.w3.org/2000/svg"
-      shapeRendering="crispEdges"
-    >
-      <rect x="5" y="1" width="14" height="2" fill="#3DDC84" />
-      <rect x="0" y="3" width="24" height="4" fill="#3DDC84" />
-      <rect x="8" y="7" width="8" height="6" fill="#3DDC84" />
-      <rect x="5" y="13" width="14" height="2" fill="#3DDC84" />
-      <rect x="2" y="15" width="20" height="4" fill="#3DDC84" />
-    </svg>
-  );
-}
+import { MoruLogo } from "@/components/MoruLogo";
 
 export function Titlebar() {
   const { t } = useTranslation();

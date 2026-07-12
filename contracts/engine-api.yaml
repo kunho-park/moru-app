@@ -355,7 +355,8 @@ components:
             translate: engine PipelineConfig surface - {modpack_path,
             output_dir?, source_locale?, target_locale?, model?, api_key?,
             api_base?, temperature?, batch_size?, max_concurrent?,
-            file_workers?, max_refine?, use_tm?, use_vanilla_glossary?
+            file_workers? (default: max_concurrent), max_refine?, use_tm?,
+            use_vanilla_glossary?
             (include the server-synced origin=vanilla glossary store rows;
             no bundled vanilla data), extract_glossary?, glossary_max_terms?
             (positive integer; null removes the candidate limit),
@@ -364,14 +365,16 @@ components:
             export: {translate_job_id, output_zip?}; accepts a completed or
             user-cancelled translate job whose partial result is available.
             upload: {translate_job_id, modpack_name, web_url? (default
-            https://moru.gg), api_token (Bearer token for the web platform;
-            uploads without it are rejected with 401),
+            https://moru.gg), api_token? (Bearer token for the web platform;
+            omitted = anonymous desktop upload, attributed to no account),
             modpack_version?, description?, changelog?, curseforge_id?
             (positive integer; forwarded verbatim so the web platform can
             link the pack to its CurseForge project)} - publishes the
-            completed or user-cancelled translate job's reviewed zip to the
-            moru web platform (see contracts/web-api.yaml); the terminal done
-            frame carries {pack_id, url}.
+            completed or user-cancelled translate job's reviewed archives
+            (resource_pack.zip and, when the run produced override files,
+            overrides.zip) to the moru web platform (see
+            contracts/web-api.yaml); the terminal done frame carries
+            {pack_id, url}.
     Job:
       type: object
       required: [id, type, status]

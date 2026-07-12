@@ -15,7 +15,6 @@ import re
 import shutil
 import tempfile
 import uuid
-import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -177,6 +176,20 @@ def _export_stem(result: PipelineResult, identity: PackIdentity) -> str:
     ]
     stem = _FILENAME_UNSAFE_RE.sub(" ", " ".join(p for p in parts if p))
     return " ".join(stem.split()) or "moru-pack"
+
+
+def _tree_has_files(tree: Path) -> bool:
+    """True when the output tree exists and holds at least one file."""
+    return tree.is_dir() and any(p.is_file() for p in tree.rglob("*"))
+
+
+def _sha256_and_size(path: Path) -> tuple[str, int]:
+    """Streaming digest for one archive: (hex sha256, byte size)."""
+    sha = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            sha.update(chunk)
+    return sha.hexdigest(), path.stat().st_size
 
 
 class JobManager:
@@ -513,50 +526,6 @@ class JobManager:
             )
         return result
 
-    async def _build_reviewed_zip(
-        self, record: JobRecord, source: JobRecord, zip_path: Path, stage: str
-    ) -> tuple[int, int]:
-        """One archive of the whole output root (resourcepack/ + overrides/).
-
-        Used by the web upload; the local export builds per-tree zips in
-        :meth:`_run_export` instead. Emits {stage, current, total} progress
-        around the blocking build and returns (files written, total).
-        """
-        result = await self._apply_review_edits(source, stage)
-        files = [Path(p) for p in result.output_files]
-        base = output_root(result.config)
-
-        self._emit(
-            record,
-            "progress",
-            {"stage": stage, "current": 0, "total": len(files)},
-        )
-
-        def build() -> int:
-            zip_path.parent.mkdir(parents=True, exist_ok=True)
-            written = 0
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for file in files:
-                    if not file.exists():
-                        logger.warning("%s: missing output file %s", stage, file)
-                        continue
-                    try:
-                        arcname = file.relative_to(base)
-                    except ValueError:
-                        arcname = Path(file.name)
-                    zf.write(file, arcname=str(arcname))
-                    written += 1
-            return written
-
-        # Zip construction is blocking I/O; keep the loop responsive.
-        written = await asyncio.to_thread(build)
-        self._emit(
-            record,
-            "progress",
-            {"stage": stage, "current": written, "total": len(files)},
-        )
-        return written, len(files)
-
     async def _run_export(
         self, record: JobRecord, source: JobRecord
     ) -> dict[str, Any]:
@@ -592,19 +561,16 @@ class JobManager:
             {"stage": "export", "current": 0, "total": 2},
         )
 
-        def has_files(tree: Path) -> bool:
-            return tree.is_dir() and any(p.is_file() for p in tree.rglob("*"))
-
         def build() -> dict[str, Any]:
             payload: dict[str, Any] = {
                 "zip_path": None,
                 "overrides_zip_path": None,
                 "file_count": len(result.output_files),
             }
-            if has_files(pack_dir):
+            if _tree_has_files(pack_dir):
                 create_zip_from_directory(pack_dir, zip_path)
                 payload["zip_path"] = str(zip_path)
-            if has_files(overrides_dir):
+            if _tree_has_files(overrides_dir):
                 create_zip_from_directory(overrides_dir, overrides_zip)
                 payload["overrides_zip_path"] = str(overrides_zip)
             return payload
@@ -624,28 +590,53 @@ class JobManager:
     ) -> dict[str, Any]:
         """Publish a completed translate job's pack to the moru web platform.
 
-        Sequence (contracts/web-api.yaml): build the reviewed zip, request a
-        presigned upload slot, PUT the archive, then register the pack. The
-        api_token is forwarded as a Bearer header on every call; the web
-        platform rejects unauthenticated uploads with 401.
+        Sequence (contracts/web-api.yaml): build one reviewed zip per
+        output tree (resource pack / overrides), request presigned upload
+        slots, PUT each archive, then register the pack. ``api_token`` is
+        forwarded as a Bearer header when present; without it the upload
+        is anonymous (desktop-only - the X-Moru-Client marker is what the
+        web platform accepts in place of an account).
         """
         params = record.params
         web_url = str(params.get("web_url") or "https://moru.gg").rstrip("/")
         api_token = params.get("api_token") or None
 
+        result = await self._apply_review_edits(source, "pack")
+        root = output_root(result.config)
+        trees = {
+            "resource_pack": root / RESOURCEPACK_DIRNAME,
+            "overrides": root / OVERRIDES_DIRNAME,
+        }
+
         staging = Path(tempfile.mkdtemp(prefix="moru-upload-"))
         try:
-            zip_path = staging / f"{source.id}.zip"
-            await self._build_reviewed_zip(record, source, zip_path, "pack")
+            self._emit(
+                record, "progress", {"stage": "pack", "current": 0, "total": 1}
+            )
 
-            def digest() -> tuple[str, int]:
-                sha = hashlib.sha256()
-                with zip_path.open("rb") as fh:
-                    for chunk in iter(lambda: fh.read(1 << 20), b""):
-                        sha.update(chunk)
-                return sha.hexdigest(), zip_path.stat().st_size
+            def build() -> dict[str, Path]:
+                """One installable zip per non-empty tree, staged locally."""
+                archives: dict[str, Path] = {}
+                for kind, tree in trees.items():
+                    if _tree_has_files(tree):
+                        zip_path = staging / f"{kind}.zip"
+                        create_zip_from_directory(tree, zip_path)
+                        archives[kind] = zip_path
+                return archives
 
-            sha256, size = await asyncio.to_thread(digest)
+            # Zip construction is blocking I/O; keep the loop responsive.
+            archives = await asyncio.to_thread(build)
+            if not archives:
+                raise upload.WebUploadError(
+                    "translate job produced no uploadable files"
+                )
+            self._emit(
+                record, "progress", {"stage": "pack", "current": 1, "total": 1}
+            )
+            digests = {
+                kind: await asyncio.to_thread(_sha256_and_size, zip_path)
+                for kind, zip_path in archives.items()
+            }
 
             def step(current: int, message: str) -> None:
                 self._emit(
@@ -659,15 +650,25 @@ class JobManager:
                     },
                 )
 
-            step(0, "requesting upload slot")
-            slot = await upload.request_upload_slots(
-                web_url, api_token, size, sha256
+            step(0, "requesting upload slots")
+            slots = await upload.request_upload_slots(
+                web_url,
+                api_token,
+                [
+                    {"kind": kind, "size": size, "sha256": sha256}
+                    for kind, (sha256, size) in digests.items()
+                ],
             )
-            step(1, "uploading archive")
-            await upload.put_archive(str(slot["url"]), zip_path)
+            step(1, "uploading archives")
+            for kind, zip_path in archives.items():
+                await upload.put_archive(str(slots[kind]["url"]), zip_path)
             step(2, "registering pack")
             registered = await upload.register_pack(
-                web_url, api_token, self._pack_payload(record, source, slot)
+                web_url,
+                api_token,
+                self._pack_payload(
+                    record, source, {kind: slots[kind] for kind in archives}
+                ),
             )
             step(3, "registered")
         finally:
@@ -682,7 +683,9 @@ class JobManager:
 
     @staticmethod
     def _pack_payload(
-        record: JobRecord, source: JobRecord, slot: Mapping[str, Any]
+        record: JobRecord,
+        source: JobRecord,
+        slots: Mapping[str, Mapping[str, Any]],
     ) -> dict[str, Any]:
         """web-api.yaml TranslationPackCreate body from the translate result."""
         result = source.result
@@ -694,7 +697,8 @@ class JobManager:
             "target_lang": result.config.target_locale,
             "source_lang": result.config.source_locale,
             "files": [
-                {"kind": "resource_pack", "object_key": slot["object_key"]}
+                {"kind": kind, "object_key": slot["object_key"]}
+                for kind, slot in slots.items()
             ],
             "engine_version": __version__,
             "stats": {

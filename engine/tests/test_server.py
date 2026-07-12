@@ -24,7 +24,7 @@ from moru_engine.pipeline import PipelineConfig, PipelineResult, PipelineStats
 from moru_engine.server import create_app
 from moru_engine.server.jobs import JobRecord, JobStatus, JobType
 from moru_engine.server.live_models import fetch_live_models
-from moru_engine.server.upload import WebUploadError
+from moru_engine.server.upload import WebUploadError, _auth_headers
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -264,26 +264,36 @@ def test_export_requires_completed_translate_job(
 # -- jobs: upload flow ---------------------------------------------------------
 
 
-@pytest.fixture
-def done_translate_job(client: TestClient, tmp_path: Path) -> JobRecord:
+def _install_translate_record(
+    client: TestClient, tmp_path: Path, *, include_pack: bool = True
+) -> JobRecord:
     """A completed translate job injected straight into the manager.
 
     Running a real translate needs an LLM, so build the JobRecord by hand
     (the shape _run leaves behind) and register it in manager._jobs.
     """
     output_dir = tmp_path / "out"
-    lang_file = (
-        output_dir / "resourcepack" / "assets" / "somemod" / "lang" / "ko_kr.json"
-    )
-    lang_file.parent.mkdir(parents=True)
-    lang_file.write_text('{"key.hello": "안녕"}', encoding="utf-8")
-    mcmeta = output_dir / "resourcepack" / "pack.mcmeta"
-    mcmeta.write_text('{"pack": {"pack_format": 15}}', encoding="utf-8")
+    output_files: list[Path] = []
+    if include_pack:
+        lang_file = (
+            output_dir
+            / "resourcepack"
+            / "assets"
+            / "somemod"
+            / "lang"
+            / "ko_kr.json"
+        )
+        lang_file.parent.mkdir(parents=True)
+        lang_file.write_text('{"key.hello": "안녕"}', encoding="utf-8")
+        mcmeta = output_dir / "resourcepack" / "pack.mcmeta"
+        mcmeta.write_text('{"pack": {"pack_format": 15}}', encoding="utf-8")
+        output_files += [lang_file, mcmeta]
     override_file = (
         output_dir / "overrides" / "kubejs" / "assets" / "test" / "lang" / "ko_kr.json"
     )
     override_file.parent.mkdir(parents=True)
     override_file.write_text('{"gui.done": "완료"}', encoding="utf-8")
+    output_files.append(override_file)
     result = PipelineResult(
         config=PipelineConfig(
             modpack_path=tmp_path / "modpack",
@@ -292,7 +302,7 @@ def done_translate_job(client: TestClient, tmp_path: Path) -> JobRecord:
             target_locale="ko_kr",
             model="openai/gpt-4o-mini",
         ),
-        output_files=[lang_file, override_file, mcmeta],
+        output_files=output_files,
         stats=PipelineStats(
             total_entries=10,
             translated_entries=8,
@@ -315,29 +325,36 @@ def done_translate_job(client: TestClient, tmp_path: Path) -> JobRecord:
 
 
 @pytest.fixture
+def done_translate_job(client: TestClient, tmp_path: Path) -> JobRecord:
+    return _install_translate_record(client, tmp_path)
+
+
+@pytest.fixture
 def upload_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stub the three web calls in moru_engine.server.upload, recording args."""
     calls: dict[str, Any] = {}
 
     async def fake_slots(
-        web_url: str, api_token: str | None, size: int, sha256: str
-    ) -> dict[str, Any]:
+        web_url: str, api_token: str | None, files: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
         calls["slots"] = {
             "web_url": web_url,
             "api_token": api_token,
-            "size": size,
-            "sha256": sha256,
+            "files": files,
         }
         return {
-            "kind": "resource_pack",
-            "url": "https://r2.test/put/abc",
-            "object_key": "packs/abc.zip",
+            spec["kind"]: {
+                "kind": spec["kind"],
+                "url": f"https://r2.test/put/{spec['kind']}",
+                "object_key": f"translations/test/{spec['kind']}.zip",
+            }
+            for spec in files
         }
 
     async def fake_put(url: str, zip_path: Path) -> None:
         with zipfile.ZipFile(zip_path) as zf:
             names = zf.namelist()
-        calls["put"] = {"url": url, "names": names}
+        calls.setdefault("puts", []).append({"url": url, "names": names})
 
     async def fake_register(
         web_url: str, api_token: str | None, payload: dict[str, Any]
@@ -401,15 +418,27 @@ def test_upload_job_success_with_token(
     assert upload_stubs["slots"]["api_token"] == "desktop-api-token"
     assert upload_stubs["register"]["api_token"] == "desktop-api-token"
     assert upload_stubs["slots"]["web_url"] == "https://web.test"
-    assert upload_stubs["slots"]["size"] > 0
-    assert len(upload_stubs["slots"]["sha256"]) == 64
 
-    # The PUT streams one combined zip of both output trees.
-    assert upload_stubs["put"]["url"] == "https://r2.test/put/abc"
-    assert set(upload_stubs["put"]["names"]) == {
-        "resourcepack/assets/somemod/lang/ko_kr.json",
-        "resourcepack/pack.mcmeta",
-        "overrides/kubejs/assets/test/lang/ko_kr.json",
+    # One slot spec per non-empty output tree, each hashed independently.
+    specs = {spec["kind"]: spec for spec in upload_stubs["slots"]["files"]}
+    assert set(specs) == {"resource_pack", "overrides"}
+    for spec in specs.values():
+        assert spec["size"] > 0
+        assert len(spec["sha256"]) == 64
+
+    # Each tree ships as its own installable archive: pack.mcmeta sits at
+    # the resource-pack archive ROOT (game-loadable as-is) and the
+    # overrides zip mirrors the modpack root — the overrides/ folder never
+    # leaks into the resource pack.
+    puts = {p["url"]: set(p["names"]) for p in upload_stubs["puts"]}
+    assert puts == {
+        "https://r2.test/put/resource_pack": {
+            "pack.mcmeta",
+            "assets/somemod/lang/ko_kr.json",
+        },
+        "https://r2.test/put/overrides": {
+            "kubejs/assets/test/lang/ko_kr.json",
+        },
     }
 
     # TranslationPackCreate payload mapped from the pipeline result.
@@ -420,7 +449,11 @@ def test_upload_job_success_with_token(
     assert payload["source_lang"] == "en_us"
     assert payload["engine_version"] == __version__
     assert payload["files"] == [
-        {"kind": "resource_pack", "object_key": "packs/abc.zip"}
+        {
+            "kind": "resource_pack",
+            "object_key": "translations/test/resource_pack.zip",
+        },
+        {"kind": "overrides", "object_key": "translations/test/overrides.zip"},
     ]
     assert payload["stats"] == {
         "total_entries": 10,
@@ -432,6 +465,33 @@ def test_upload_job_success_with_token(
         "model": "openai/gpt-4o-mini",
         "duration_seconds": 12.5,
     }
+
+
+def test_upload_job_overrides_only_registers_single_file(
+    client: TestClient,
+    tmp_path: Path,
+    upload_stubs: dict[str, Any],
+) -> None:
+    """A run with no resource-pack tree uploads only the overrides zip."""
+    record = _install_translate_record(client, tmp_path, include_pack=False)
+    response = _start_upload(
+        client,
+        {"translate_job_id": record.id, "modpack_name": "Overrides Only"},
+    )
+    assert response.status_code == 201
+    final = _wait_for_job(client, response.json()["id"])
+    assert final["status"] == "done", final["error"]
+
+    assert [spec["kind"] for spec in upload_stubs["slots"]["files"]] == [
+        "overrides"
+    ]
+    puts = {p["url"]: set(p["names"]) for p in upload_stubs["puts"]}
+    assert puts == {
+        "https://r2.test/put/overrides": {"kubejs/assets/test/lang/ko_kr.json"}
+    }
+    assert upload_stubs["register"]["payload"]["files"] == [
+        {"kind": "overrides", "object_key": "translations/test/overrides.zip"}
+    ]
 
 
 def test_export_job_builds_pack_and_overrides_zips(
@@ -515,11 +575,24 @@ def test_upload_job_without_token_uses_defaults(
 
     frame = _terminal_frame(client, final["id"])
     assert frame["url"] == "https://moru.gg/packs/pk_123"
-    # No token -> no Authorization header is attached and the default
-    # web_url is used (the real web platform rejects such calls with 401).
+    # No token -> no Authorization header is attached, the default web_url
+    # is used, and the web platform admits the call via the desktop client
+    # marker (anonymous upload, attributed to no account).
     assert upload_stubs["slots"]["api_token"] is None
     assert upload_stubs["register"]["api_token"] is None
     assert upload_stubs["slots"]["web_url"] == "https://moru.gg"
+
+
+def test_upload_headers_carry_desktop_client_marker() -> None:
+    """The X-Moru-Client marker is what lets anonymous desktop uploads
+    through the web platform (web-api.yaml contract v3)."""
+    anonymous = _auth_headers(None)
+    assert anonymous["X-Moru-Client"] == f"moru-engine/{__version__}"
+    assert "Authorization" not in anonymous
+
+    authed = _auth_headers("desktop-api-token")
+    assert authed["Authorization"] == "Bearer desktop-api-token"
+    assert authed["X-Moru-Client"] == f"moru-engine/{__version__}"
 
 
 def test_upload_job_missing_params_is_422(client: TestClient) -> None:
@@ -569,8 +642,8 @@ def test_upload_job_web_failure_marks_job_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def failing_slots(
-        web_url: str, api_token: str | None, size: int, sha256: str
-    ) -> dict[str, Any]:
+        web_url: str, api_token: str | None, files: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
         raise WebUploadError(
             "upload slot request failed: HTTP 503 - storage down"
         )

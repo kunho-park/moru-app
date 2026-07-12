@@ -3,8 +3,8 @@
  * One export job produces both installable artifacts: the resource pack
  * zip and the overrides zip (kubejs/config/ftbquests files a resource
  * pack cannot carry). Web upload runs an engine upload job against
- * moru.gg; uploading requires a signed-in moru.gg account, and the pack
- * is attributed to that account.
+ * moru.gg; signed-in uploads are attributed to the moru.gg account,
+ * anonymous uploads to no account (allowed for the desktop app only).
  */
 
 import { useState } from "react";
@@ -177,13 +177,13 @@ export function W6Export() {
     }
   }
 
-  /* ---- upload: engine job -> moru.gg (requires a signed-in account) ---- */
+  /* ---- upload: engine job -> moru.gg (anonymous allowed; a signed-in
+     account attributes the pack and earns contributor score) ---- */
   async function handleUpload(): Promise<void> {
     if (
       wizard.translateJobId === null ||
       upload.kind === "running" ||
-      confirmedPack === null ||
-      account.status !== "connected"
+      confirmedPack === null
     )
       return;
     setUpload({ kind: "running" });
@@ -791,8 +791,7 @@ export function W6Export() {
                   disabled={
                     upload.kind === "running" ||
                     wizard.translateJobId === null ||
-                    confirmedPack === null ||
-                    account.status !== "connected"
+                    confirmedPack === null
                   }
                   onClick={() => void handleUpload()}
                 >
@@ -820,7 +819,7 @@ export function W6Export() {
                 )}
                 {account.status !== "connected" && (
                   <div className="mt-[6px] text-center font-mono text-[10px] text-text3">
-                    {t("w6.share.loginRequired")}
+                    {t("w6.share.anonUploadHint")}
                   </div>
                 )}
               </div>

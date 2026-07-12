@@ -379,7 +379,14 @@ def test_scan_result_payload_carries_identity(tmp_path: Path) -> None:
 
 # -- upload payload plumbing -----------------------------------------------------
 
-_SLOT = {"kind": "resource_pack", "url": "https://r2.test/put", "object_key": "packs/x.zip"}
+#: _pack_payload slots argument: {kind: slot} for every uploaded archive.
+_SLOT = {
+    "resource_pack": {
+        "kind": "resource_pack",
+        "url": "https://r2.test/put",
+        "object_key": "packs/x.zip",
+    }
+}
 
 
 def _translate_record(tmp_path: Path) -> JobRecord:

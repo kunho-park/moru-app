@@ -36,7 +36,7 @@
   },
   "share": {
     "heading": "커뮤니티에 공유",
-    "guestSub": "업로드하려면 로그인하세요",
+    "guestSub": "비로그인 업로드는 익명으로 공유돼요 — 로그인하면 기여로 기록돼요",
     "badgeConnected": "연결됨",
     "login": "로그인",
     "packLabel": "공유할 모드팩",
@@ -64,7 +64,8 @@
     "cfVersionLabel": "버전",
     "cfVersionPlaceholder": "예: 1.2.0",
     "cfRequired": "커스포지 모드팩을 선택해야 업로드할 수 있어요",
-    "loginRequired": "업로드하려면 Discord 로그인이 필요해요"
+    "loginRequired": "업로드하려면 Discord 로그인이 필요해요",
+    "anonUploadHint": "게스트로 업로드돼요 — 로그인하면 팩이 내 계정으로 등록되고 기여자 점수가 올라가요"
   },
   "actions": {
     "backToReview": "검수로 돌아가기",

@@ -6,10 +6,12 @@ info:
     moru-web keeps a copy at docs/web-api.yaml synchronized by the
     contract_version tag. Prefer additive changes (new fields, new
     endpoints) because auto-update lag keeps old desktop builds alive.
-    Contract v2: uploads require authentication; anonymous uploads
-    (contract v1) are rejected with 401.
-  version: "0.3.0"
-  x-contract-version: 2
+    Contract v3: uploads accept either an authenticated caller (session
+    cookie or desktop API token) or an anonymous desktop-engine call
+    carrying the X-Moru-Client marker header; browser-anonymous calls
+    (no session, no marker) are rejected with 401.
+  version: "0.4.0"
+  x-contract-version: 3
 servers:
   - url: "https://moru.gg"
 paths:
@@ -17,10 +19,11 @@ paths:
     post:
       summary: Issue presigned R2 upload URLs for pack archives
       description: >
-        Authentication is required: a signed-in web session or a desktop
-        API token sent as a Bearer header. The desktop app obtains its
-        token via /auth/desktop-login. Unauthenticated calls are rejected
-        with 401.
+        Signed-in callers (web session or desktop API Bearer token) always
+        pass. Anonymous callers pass only when the request carries the
+        desktop client marker header `X-Moru-Client: moru-engine/<version>`
+        — the website upload form stays sign-in only. Other anonymous
+        calls are rejected with 401.
       security: [{ apiToken: [] }]
       requestBody:
         required: true
@@ -65,10 +68,11 @@ paths:
     post:
       summary: Register uploaded pack metadata (after presigned upload completes)
       description: >
-        Authentication is required: a signed-in web session or a desktop
-        API token sent as a Bearer header. The desktop app obtains its
-        token via /auth/desktop-login. Unauthenticated calls are rejected
-        with 401; the pack is registered under the calling user.
+        Same authentication policy as /api/upload-url: web session,
+        desktop API Bearer token, or the anonymous desktop-engine call
+        with the X-Moru-Client marker. Signed-in packs are registered
+        under the calling user; anonymous desktop packs are attributed
+        to no account.
       security: [{ apiToken: [] }]
       requestBody:
         required: true

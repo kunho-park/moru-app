@@ -36,7 +36,7 @@
   },
   "share": {
     "heading": "Share with community",
-    "guestSub": "Sign in to upload",
+    "guestSub": "Uploads are shared anonymously — sign in to get credit",
     "badgeConnected": "Connected",
     "login": "Sign in",
     "packLabel": "Modpack to share",
@@ -64,7 +64,8 @@
     "cfVersionLabel": "Version",
     "cfVersionPlaceholder": "e.g. 1.2.0",
     "cfRequired": "Pick a CurseForge modpack to enable upload",
-    "loginRequired": "Sign in with Discord to upload"
+    "loginRequired": "Sign in with Discord to upload",
+    "anonUploadHint": "Uploading as guest — sign in to attribute the pack and earn contributor score"
   },
   "actions": {
     "backToReview": "Back to review",

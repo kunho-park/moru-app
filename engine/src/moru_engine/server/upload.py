@@ -4,7 +4,9 @@ Talks to the moru.gg web API (contracts in moru-app/contracts/web-api.yaml):
 presigned-slot request, archive PUT, and pack registration. Module-level
 coroutines (same pattern as live_models.py) so tests can monkeypatch each
 step of the sequence independently. ``api_token`` is forwarded as a
-Bearer header; the web platform rejects unauthenticated uploads (401).
+Bearer header when present; every call carries the ``X-Moru-Client``
+marker, which the web platform accepts in place of an account for
+anonymous desktop uploads.
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
+
+from .. import __version__
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,7 +32,11 @@ class WebUploadError(Exception):
 
 
 def _auth_headers(api_token: str | None) -> dict[str, str]:
-    return {"Authorization": f"Bearer {api_token}"} if api_token else {}
+    """Desktop client marker plus optional Bearer auth."""
+    headers = {"X-Moru-Client": f"moru-engine/{__version__}"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    return headers
 
 
 async def _ensure_ok(resp: aiohttp.ClientResponse, step: str) -> None:
@@ -53,30 +61,32 @@ async def _ensure_ok(resp: aiohttp.ClientResponse, step: str) -> None:
 
 
 async def request_upload_slots(
-    web_url: str, api_token: str | None, size: int, sha256: str
-) -> dict[str, Any]:
-    """POST /api/upload-url; return the resource_pack slot {url, object_key}."""
+    web_url: str, api_token: str | None, files: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """POST /api/upload-url; return one ``{url, object_key}`` slot per kind.
+
+    ``files`` entries are ``{kind, size, sha256}`` specs (web-api.yaml).
+    A response missing a usable slot for any requested kind is an error.
+    """
     async with aiohttp.ClientSession(timeout=_API_TIMEOUT) as session:
         async with session.post(
             f"{web_url}/api/upload-url",
-            json={
-                "files": [
-                    {"kind": "resource_pack", "size": size, "sha256": sha256}
-                ]
-            },
+            json={"files": files},
             headers=_auth_headers(api_token),
         ) as resp:
             await _ensure_ok(resp, "upload slot request")
             payload = await resp.json()
     uploads = payload.get("uploads") or []
-    slot = next(
-        (u for u in uploads if u.get("kind") == "resource_pack"), None
-    )
-    if not slot or not slot.get("url") or not slot.get("object_key"):
-        raise WebUploadError(
-            "upload slot request returned no usable resource_pack slot"
-        )
-    return slot
+    slots = {
+        u["kind"]: u for u in uploads if isinstance(u, dict) and u.get("kind")
+    }
+    for spec in files:
+        slot = slots.get(spec["kind"])
+        if not slot or not slot.get("url") or not slot.get("object_key"):
+            raise WebUploadError(
+                f"upload slot request returned no usable {spec['kind']} slot"
+            )
+    return slots
 
 
 async def put_archive(url: str, zip_path: Path) -> None:

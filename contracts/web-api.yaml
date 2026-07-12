@@ -189,6 +189,7 @@ components:
               kind: { type: string, enum: [resource_pack, overrides] }
               object_key: { type: string }
         engine_version: { type: string }
+        is_manual_translation: { type: boolean, description: 'Explicit manual/auto flag; server falls back to engine_version == "web-manual".' }
         artifact_id:
           type: string
           description: which compiled DSPy artifact produced this pack

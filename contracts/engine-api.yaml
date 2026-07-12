@@ -85,8 +85,9 @@ paths:
         glossary_extracted {new_terms},
         and a single terminal frame {type: done|failed|cancelled, status}
         after which the socket closes with code 1000. Done and user-cancelled
-        translate frames carry {stats}; done export frames carry
-        {zip_path (resource pack, null when the run shipped no
+        translate frames carry {stats}; stats.categories maps web-facing
+        category keys to non-failed entry counts (an empty map means none);
+        done export frames carry {zip_path (resource pack, null when the run shipped no
         resource-pack files), overrides_zip_path (kubejs/config/ftbquests
         overrides, null when none), file_count}; done upload frames carry
         {pack_id, url}.
@@ -355,7 +356,9 @@ components:
             scan: {modpack_path, source_locale?, target_locale?}.
             translate: engine PipelineConfig surface - {modpack_path,
             output_dir?, source_locale?, target_locale?, model?, api_key?,
-            api_base?, temperature?, batch_size?, max_concurrent?,
+            api_base?, temperature?, reasoning_effort? (low|medium|high;
+            LiteLLM thinking-effort passthrough, overriding the Ollama
+            auto-disable), batch_size?, max_concurrent?,
             file_workers? (default: max_concurrent), max_refine?, use_tm?,
             use_vanilla_glossary?
             (include the server-synced origin=vanilla glossary store rows;

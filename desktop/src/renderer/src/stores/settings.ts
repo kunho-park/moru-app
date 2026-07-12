@@ -18,6 +18,10 @@ interface SettingsStore {
   batchSize: number;
   maxConcurrent: number;
   maxRefine: number;
+  /** Send litellm reasoning_effort so reasoning-capable models think. */
+  thinkingEnabled: boolean;
+  /** Effort level sent when thinking is enabled. */
+  thinkingEffort: "low" | "medium" | "high";
   useTm: boolean;
   useVanillaGlossary: boolean;
   extractGlossary: boolean;
@@ -46,6 +50,8 @@ export const useSettings = create<SettingsStore>()(
       batchSize: 30,
       maxConcurrent: 15,
       maxRefine: 2,
+      thinkingEnabled: false,
+      thinkingEffort: "medium",
       useTm: true,
       useVanillaGlossary: true,
       extractGlossary: true,

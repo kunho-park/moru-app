@@ -7,7 +7,7 @@
 import { create } from "zustand";
 
 import { moru } from "@/lib/bridge";
-import { WEB_URL } from "@/lib/web";
+import { WEB_URL, WebApiError, web } from "@/lib/web";
 
 const TOKEN_KEY = "web:token";
 const NAME_KEY = "web:name";
@@ -36,10 +36,23 @@ export const useAccount = create<AccountStore>()((set, get) => ({
       moru.secrets.get(TOKEN_KEY),
       moru.secrets.get(NAME_KEY),
     ]);
-    if (token !== null && token.length > 0) {
-      set({ status: "connected", token, name: name ?? "" });
-    } else {
+    if (token === null || token.length === 0) {
       set({ status: "guest", token: null, name: null });
+      return;
+    }
+    set({ status: "connected", token, name: name ?? "" });
+    // The keychain can miss the name (older logins) and it can change on
+    // the web, so refresh it from the profile API. 401 means the token was
+    // revoked -> back to guest; network failures keep the cached name.
+    try {
+      const profile = await web.me(token);
+      if (get().token !== token) return; // logged out mid-flight
+      await moru.secrets.set(NAME_KEY, profile.name);
+      set({ name: profile.name });
+    } catch (error) {
+      if (error instanceof WebApiError && error.status === 401) {
+        await get().logout();
+      }
     }
   },
 

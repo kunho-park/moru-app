@@ -309,6 +309,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
       batch_size: settings.batchSize,
       max_concurrent: settings.maxConcurrent,
       max_refine: settings.maxRefine,
+      reasoning_effort: settings.thinkingEnabled ? settings.thinkingEffort : undefined,
       use_tm: settings.useTm,
       use_vanilla_glossary: settings.useVanillaGlossary,
       extract_glossary: settings.extractGlossary,

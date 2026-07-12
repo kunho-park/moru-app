@@ -7,7 +7,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { LocaleFlag } from "@/components/LocaleFlag";
@@ -36,6 +36,13 @@ const ORIGIN_STYLE: Record<GlossaryOrigin, string> = {
 const ORIGINS: GlossaryOrigin[] = ["vanilla", "extracted", "manual", "community"];
 
 const GRID = "grid grid-cols-[1.2fr_1.2fr_100px_90px] gap-3";
+
+/* Windowed list rendering: synced glossaries reach tens of thousands of
+ * rows, which stalls the DOM if mounted at once. Rows are fixed-height so
+ * only the visible slice (plus overscan) is rendered. */
+const ROW_HEIGHT = 44;
+const LIST_MAX_HEIGHT = 540;
+const OVERSCAN = 12;
 
 /** Minimal quoted-CSV parser: handles "" escapes, commas/newlines in quotes, CRLF. */
 function parseCsv(text: string): string[][] {
@@ -174,6 +181,8 @@ export function GlossaryScreen() {
   });
   const [originFilter, setOriginFilter] = useState<"all" | GlossaryOrigin>("all");
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+  const [scrollTop, setScrollTop] = useState(0);
   const [adding, setAdding] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [draftSource, setDraftSource] = useState("");
@@ -182,6 +191,7 @@ export function GlossaryScreen() {
 
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const targetMeta = TARGET_LOCALES.find((l) => l.code === targetLang) ?? TARGET_LOCALES[0];
 
@@ -251,6 +261,13 @@ export function GlossaryScreen() {
     setOriginFilter("all");
   }, [targetLang]);
 
+  // Filter changes reshuffle row indices; stale scroll offsets would show
+  // a blank window, so snap back to the top.
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: 0 });
+    setScrollTop(0);
+  }, [targetLang, originFilter, deferredSearch]);
+
   const counts = useMemo(() => {
     const acc: Record<GlossaryOrigin, number> = { vanilla: 0, extracted: 0, manual: 0, community: 0 };
     for (const term of terms) acc[term.origin] += 1;
@@ -258,7 +275,7 @@ export function GlossaryScreen() {
   }, [terms]);
 
   const visible = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     return terms
       .map((term, index) => ({ term, index }))
       .filter(({ term }) => originFilter === "all" || term.origin === originFilter)
@@ -266,7 +283,14 @@ export function GlossaryScreen() {
         ({ term }) =>
           q === "" || term.source.toLowerCase().includes(q) || term.target.toLowerCase().includes(q),
       );
-  }, [terms, originFilter, search]);
+  }, [terms, originFilter, deferredSearch]);
+
+  const windowStart = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+  const windowEnd = Math.min(
+    visible.length,
+    Math.ceil((scrollTop + LIST_MAX_HEIGHT) / ROW_HEIGHT) + OVERSCAN,
+  );
+  const windowed = visible.slice(windowStart, windowEnd);
 
   const beginEdit = (index: number): void => {
     setAdding(false);
@@ -279,6 +303,9 @@ export function GlossaryScreen() {
     setEditIndex(null);
     setDraftSource("");
     setDraftTarget("");
+    // The add row mounts at the top of the list; surface it.
+    listRef.current?.scrollTo({ top: 0 });
+    setScrollTop(0);
     setAdding(true);
   };
 
@@ -525,7 +552,11 @@ export function GlossaryScreen() {
         )}
 
         {/* Rows */}
-        <div className="max-h-[540px] overflow-y-auto">
+        <div
+          ref={listRef}
+          onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+          className="max-h-[540px] overflow-y-auto"
+        >
           {/* Add row */}
           {adding && (
             <div
@@ -612,81 +643,93 @@ export function GlossaryScreen() {
             </div>
           )}
 
-          {/* Term rows */}
-          {!query.isPending &&
-            !query.isError &&
-            visible.map(({ term, index }) =>
-              editIndex === index ? (
-                <div
-                  key={`${term.source}-${index}`}
-                  className={`${GRID} items-center border-b border-line border-l-[3px] border-l-accent bg-[rgba(61,220,132,0.03)] px-3.5 py-3`}
-                >
-                  <RowInput
-                    value={draftSource}
-                    onChange={setDraftSource}
-                    placeholder={t("glossary.sourcePlaceholder")}
-                    mono
-                    autoFocus
-                    onEnter={commitEdit}
-                    onEscape={cancelRow}
-                  />
-                  <RowInput
-                    value={draftTarget}
-                    onChange={setDraftTarget}
-                    placeholder={t("glossary.targetPlaceholder")}
-                    onEnter={commitEdit}
-                    onEscape={cancelRow}
-                  />
-                  <div>
-                    <OriginBadge origin={term.origin} />
-                  </div>
-                  <RowActionButtons
-                    onSave={commitEdit}
-                    onCancel={cancelRow}
-                    disabled={busy}
-                    saveLabel={t("glossary.rowSave")}
-                    cancelLabel={t("glossary.rowCancel")}
-                  />
-                </div>
-              ) : (
-                <div
-                  key={`${term.source}-${index}`}
-                  className={`${GRID} group items-center border-b border-line px-3.5 py-3 hover:bg-raised-hover`}
-                >
-                  <div className="font-mono text-[13px] font-semibold text-text">{term.source}</div>
-                  <div className="text-[13px] text-text">{term.target}</div>
-                  <div>
-                    <OriginBadge origin={term.origin} />
-                  </div>
-                  {term.origin === "manual" ? (
-                    <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100">
-                      <button
-                        onClick={() => beginEdit(index)}
-                        disabled={busy}
-                        title={t("glossary.rowEdit")}
-                        className="p-1 text-text3 hover:text-text disabled:opacity-40"
-                      >
-                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
-                          <path d="M8.5 1.5 L10.5 3.5 L4 10 L1.5 10.5 L2 8 Z" />
-                        </svg>
-                      </button>
-                      <button
-                        onClick={() => removeTerm(index)}
-                        disabled={busy}
-                        title={t("glossary.rowDelete")}
-                        className="p-1 text-text3 hover:text-red disabled:opacity-40"
-                      >
-                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
-                          <path d="M2 3 H10 M4 3 V1.5 H8 V3 M3 3 L3.5 10.5 H8.5 L9 3" />
-                        </svg>
-                      </button>
+          {/* Term rows — only the scrolled-to window is mounted; spacer
+              padding keeps the scrollbar sized for the full list. */}
+          {!query.isPending && !query.isError && visible.length > 0 && (
+            <div
+              style={{
+                paddingTop: windowStart * ROW_HEIGHT,
+                paddingBottom: (visible.length - windowEnd) * ROW_HEIGHT,
+              }}
+            >
+              {windowed.map(({ term, index }) =>
+                editIndex === index ? (
+                  <div
+                    key={`${term.source}-${index}`}
+                    className={`${GRID} h-11 items-center border-b border-line border-l-[3px] border-l-accent bg-[rgba(61,220,132,0.03)] px-3.5`}
+                  >
+                    <RowInput
+                      value={draftSource}
+                      onChange={setDraftSource}
+                      placeholder={t("glossary.sourcePlaceholder")}
+                      mono
+                      autoFocus
+                      onEnter={commitEdit}
+                      onEscape={cancelRow}
+                    />
+                    <RowInput
+                      value={draftTarget}
+                      onChange={setDraftTarget}
+                      placeholder={t("glossary.targetPlaceholder")}
+                      onEnter={commitEdit}
+                      onEscape={cancelRow}
+                    />
+                    <div>
+                      <OriginBadge origin={term.origin} />
                     </div>
-                  ) : (
-                    <div className="text-right font-mono text-[10px] text-text4">{t("glossary.readonly")}</div>
-                  )}
-                </div>
-              ),
-            )}
+                    <RowActionButtons
+                      onSave={commitEdit}
+                      onCancel={cancelRow}
+                      disabled={busy}
+                      saveLabel={t("glossary.rowSave")}
+                      cancelLabel={t("glossary.rowCancel")}
+                    />
+                  </div>
+                ) : (
+                  <div
+                    key={`${term.source}-${index}`}
+                    className={`${GRID} group h-11 items-center border-b border-line px-3.5 hover:bg-raised-hover`}
+                  >
+                    <div className="truncate font-mono text-[13px] font-semibold text-text" title={term.source}>
+                      {term.source}
+                    </div>
+                    <div className="truncate text-[13px] text-text" title={term.target}>
+                      {term.target}
+                    </div>
+                    <div>
+                      <OriginBadge origin={term.origin} />
+                    </div>
+                    {term.origin === "manual" ? (
+                      <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100">
+                        <button
+                          onClick={() => beginEdit(index)}
+                          disabled={busy}
+                          title={t("glossary.rowEdit")}
+                          className="p-1 text-text3 hover:text-text disabled:opacity-40"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                            <path d="M8.5 1.5 L10.5 3.5 L4 10 L1.5 10.5 L2 8 Z" />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={() => removeTerm(index)}
+                          disabled={busy}
+                          title={t("glossary.rowDelete")}
+                          className="p-1 text-text3 hover:text-red disabled:opacity-40"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                            <path d="M2 3 H10 M4 3 V1.5 H8 V3 M3 3 L3.5 10.5 H8.5 L9 3" />
+                          </svg>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="text-right font-mono text-[10px] text-text4">{t("glossary.readonly")}</div>
+                    )}
+                  </div>
+                ),
+              )}
+            </div>
+          )}
 
           {/* Search / filter no-match */}
           {!query.isPending && !query.isError && terms.length > 0 && visible.length === 0 && (

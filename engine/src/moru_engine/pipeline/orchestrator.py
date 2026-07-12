@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
 from enum import Enum
 from pathlib import Path
@@ -57,6 +58,42 @@ ENTRY_TICKER_INTERVAL = 5
 #: Ticker frames truncate source/translated text to this many characters.
 TICKER_TEXT_LIMIT = 120
 
+_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_./:-]+")
+_DOTTED_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
+_CATEGORY_BUCKET_BY_FILE_TYPE = {
+    "ftbquests": "quests",
+    "the_vault_quest": "quests",
+    "patchouli": "guidebook",
+    "kubejs": "scripts",
+    "mod": "lang",
+    "resources": "lang",
+    "resourcepacks": "lang",
+    "datapacks": "lang",
+    "config": "json",
+}
+
+
+def looks_like_identifier(text: str) -> bool:
+    """Detect Patchouli/lang-key references that should not reach the LLM.
+
+    Patchouli page text can itself be another language key. Translating that
+    reference invents prose instead of preserving the lookup; dotted numeric
+    versions have the same untranslatable shape and are intentionally included.
+    """
+    value = text.strip()
+    if not value or _IDENTIFIER_RE.fullmatch(value) is None:
+        return False
+    if "." not in value and ":" not in value:
+        return False
+    has_letter = any(
+        "A" <= character <= "Z" or "a" <= character <= "z"
+        for character in value
+    )
+    if not has_letter and _DOTTED_VERSION_RE.fullmatch(value) is None:
+        return False
+    segments = re.split(r"[./:]+", value)
+    return len(segments) >= 2 and all(segments)
+
 
 class RetranslateError(Exception):
     """Single-entry retranslation produced no acceptable output."""
@@ -89,6 +126,7 @@ class PipelineStats(BaseModel):
     failed_entries: int = 0
     tm_hits: int = 0
     skipped_entries: int = 0
+    categories: dict[str, int] = Field(default_factory=dict)
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
@@ -118,6 +156,9 @@ class PipelineConfig(BaseModel):
     api_key: str | None = None
     api_base: str | None = None
     temperature: float = 0.3
+    #: LiteLLM reasoning_effort passthrough for reasoning-capable providers;
+    #: an explicit value overrides build_lm's Ollama auto-disable.
+    reasoning_effort: str | None = None
 
     batch_size: int = 30
     max_batch_chars: int = 8000
@@ -174,6 +215,33 @@ class PipelineResult(BaseModel):
         return [e for e in self.entries if e.status == EntryStatus.FAILED]
 
 
+def category_stats(result: PipelineResult) -> dict[str, int]:
+    """Count non-failed entries by their web-facing file-type bucket."""
+    if result.scan_result is None:
+        return {}
+
+    modpack_path = result.config.modpack_path.resolve()
+    file_type_by_path: dict[str, str] = {}
+    for translation_file in result.scan_result.translation_files:
+        input_path = Path(translation_file.input_path)
+        try:
+            relative = input_path.resolve().relative_to(modpack_path).as_posix()
+        except ValueError:
+            relative = input_path.as_posix()
+        file_type_by_path[relative] = translation_file.file_type
+
+    categories: dict[str, int] = {}
+    for entry in result.entries:
+        if entry.status is EntryStatus.FAILED:
+            continue
+        file_type = file_type_by_path.get(entry.file)
+        if file_type is None:
+            continue
+        category = _CATEGORY_BUCKET_BY_FILE_TYPE.get(file_type, file_type)
+        categories[category] = categories.get(category, 0) + 1
+    return categories
+
+
 class TranslationPipeline:
     """Orchestrates one translation session over a scanned modpack."""
 
@@ -190,11 +258,15 @@ class TranslationPipeline:
         self.cancel_check = cancel_check
         self.registry = create_default_registry()
         # `lm` injection is a test/embedding seam; production builds from config.
+        lm_extra: dict[str, object] = {}
+        if config.reasoning_effort is not None:
+            lm_extra["reasoning_effort"] = config.reasoning_effort
         self.lm = lm if lm is not None else build_lm(
             config.model,
             api_key=config.api_key,
             api_base=config.api_base,
             temperature=config.temperature,
+            **lm_extra,
         )
         self.translator, self.artifact_id = load_translator(
             config.model,
@@ -604,7 +676,11 @@ class TranslationPipeline:
                     )
                     continue
                 protected = protector.protect(text)
-                if protector.is_only_placeholders(protected) or not text.strip():
+                if (
+                    protector.is_only_placeholders(protected)
+                    or not text.strip()
+                    or looks_like_identifier(text)
+                ):
                     final[key] = text
                     file_entries.append(
                         EntryResult(
@@ -921,6 +997,7 @@ class TranslationPipeline:
             for e in result.entries
             if e.status in (EntryStatus.PASSED, EntryStatus.WARNING)
         )
+        stats.categories = category_stats(result)
         stats.prompt_tokens = usage["prompt_tokens"]
         stats.completion_tokens = usage["completion_tokens"]
         stats.cached_tokens = usage["cached_tokens"]
@@ -1048,6 +1125,7 @@ class TranslationPipeline:
             if e.status
             in (EntryStatus.PASSED, EntryStatus.WARNING, EntryStatus.MODIFIED)
         )
+        stats.categories = category_stats(result)
         stats.finalize()
 
     def close(self) -> None:

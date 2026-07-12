@@ -32,7 +32,7 @@
   },
   "advanced": {
     "title": "Advanced settings",
-    "hint": "— temperature, batching, concurrency, term extraction, custom model",
+    "hint": "— temperature, batching, concurrency, reasoning, term extraction, custom model",
     "changed": "{{n}} changed",
     "model": "Model",
     "temperature": "Temperature",
@@ -41,6 +41,13 @@
     "maxRefine": "Refine passes",
     "glossaryMaxTerms": "Max extracted terms",
     "unlimited": "No limit",
+    "thinking": "Thinking (reasoning)",
+    "thinkingOn": "On",
+    "thinkingOff": "Off",
+    "thinking_low": "Low",
+    "thinking_medium": "Medium",
+    "thinking_high": "High",
+    "thinkingHint": "Enables reasoning on capable models (Claude, o-series, OpenRouter reasoning) — better quality, slower and pricier",
     "loading": "Loading providers…",
     "loadError": "Could not load the provider list",
     "refresh": "Refresh",
@@ -61,9 +68,10 @@
     "testing": "Testing…",
     "ollamaTitle": "Ollama · no API key needed",
     "ollamaSub": "Completely free · runs locally",
-    "compatTitle": "OpenAI-compatible server · no API key needed",
-    "compatSub": "LM Studio · llama.cpp · vLLM — include /v1 in the address",
-    "baseUrl": "BASE URL"
+    "compatTitle": "OpenAI-compatible server",
+    "compatSub": "LM Studio · llama.cpp · vLLM — include /v1 in the address; key only if your server requires one",
+    "baseUrl": "BASE URL",
+    "apiKey": "API KEY"
   },
   "options": {
     "glossaryTitle": "Use glossary",

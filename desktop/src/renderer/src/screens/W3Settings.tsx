@@ -146,6 +146,7 @@ export function W3Settings() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [editingKey, setEditingKey] = useState(false);
   const [keyInput, setKeyInput] = useState("");
+  const [compatKeyInput, setCompatKeyInput] = useState("");
 
   /* migration guard: persisted state may predate the `provider` field */
   const providerId = PROVIDER_ORDER.includes(settings.provider)
@@ -312,11 +313,31 @@ export function W3Settings() {
     resetKeyTest();
   }, [providerId, resetKeyTest]);
 
+  /* OpenAI-compatible servers can require a key (vLLM --api-key, remote
+     gateways); saving here mirrors the settings-screen CompatCard. */
+  const invalidateCompatKeyCaches = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["secret", "openai-compatible"] });
+    await queryClient.invalidateQueries({ queryKey: ["secrets"] });
+    await queryClient.invalidateQueries({ queryKey: ["provider-models"] });
+  };
+  const saveCompatKey = async () => {
+    const key = compatKeyInput.trim();
+    if (key.length === 0) return;
+    await moru.secrets.set("apikey:openai-compatible", key);
+    setCompatKeyInput("");
+    await invalidateCompatKeyCaches();
+  };
+  const removeCompatKey = async () => {
+    await moru.secrets.delete("apikey:openai-compatible");
+    await invalidateCompatKeyCaches();
+  };
+
   const changedCount =
     (Object.keys(ADVANCED_DEFAULTS) as (keyof typeof ADVANCED_DEFAULTS)[]).filter(
       (k) => settings[k] !== ADVANCED_DEFAULTS[k],
     ).length +
     (settings.glossaryMaxTerms !== DEFAULT_GLOSSARY_MAX_TERMS ? 1 : 0) +
+    (settings.thinkingEnabled ? 1 : 0) +
     (settings.preset === "custom" ? 1 : 0);
 
   const presetName =
@@ -475,22 +496,63 @@ export function W3Settings() {
               {t(isCompat ? "w3.key.compatSub" : "w3.key.ollamaSub")}
             </div>
           </div>
-          <label className="flex items-center gap-2">
-            <span className="font-mono text-[10px] text-text3">{t("w3.key.baseUrl")}</span>
-            <input
-              type="text"
-              value={isCompat ? settings.openaiCompatBaseUrl : settings.ollamaBaseUrl}
-              placeholder={isCompat ? "http://localhost:1234/v1" : "http://localhost:11434"}
-              onChange={(e) =>
-                settings.set(
-                  isCompat
-                    ? { openaiCompatBaseUrl: e.target.value }
-                    : { ollamaBaseUrl: e.target.value },
-                )
-              }
-              className="w-[220px] border border-edge bg-ink px-[10px] py-[6px] font-mono text-[11px] text-text"
-            />
-          </label>
+          <div className="flex flex-col items-end gap-2">
+            <label className="flex items-center gap-2">
+              <span className="font-mono text-[10px] text-text3">{t("w3.key.baseUrl")}</span>
+              <input
+                type="text"
+                value={isCompat ? settings.openaiCompatBaseUrl : settings.ollamaBaseUrl}
+                placeholder={isCompat ? "http://localhost:1234/v1" : "http://localhost:11434"}
+                onChange={(e) =>
+                  settings.set(
+                    isCompat
+                      ? { openaiCompatBaseUrl: e.target.value }
+                      : { ollamaBaseUrl: e.target.value },
+                  )
+                }
+                className="w-[220px] border border-edge bg-ink px-[10px] py-[6px] font-mono text-[11px] text-text"
+              />
+            </label>
+            {isCompat && (
+              <label className="flex items-center gap-2">
+                <span className="font-mono text-[10px] text-text3">{t("w3.key.apiKey")}</span>
+                {compatKey !== null ? (
+                  <div className="flex w-[220px] items-center gap-[6px]">
+                    <span className="min-w-0 flex-1 truncate border border-edge bg-ink px-[10px] py-[6px] font-mono text-[11px] text-text">
+                      {maskKey(compatKey)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void removeCompatKey()}
+                      className="shrink-0 cursor-pointer border border-edge bg-transparent px-2 py-[6px] text-[11px] font-semibold text-text2 hover:border-red hover:text-red"
+                    >
+                      {t("common.action.delete")}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex w-[220px] items-center gap-[6px]">
+                    <input
+                      type="password"
+                      value={compatKeyInput}
+                      spellCheck={false}
+                      autoComplete="off"
+                      placeholder={t("settings.models.compatKeyPlaceholder")}
+                      onChange={(e) => setCompatKeyInput(e.target.value)}
+                      className="min-w-0 flex-1 border border-edge bg-ink px-[10px] py-[6px] font-mono text-[11px] text-text placeholder:text-text4"
+                    />
+                    <button
+                      type="button"
+                      disabled={compatKeyInput.trim().length === 0}
+                      onClick={() => void saveCompatKey()}
+                      className="shrink-0 cursor-pointer border border-edge bg-transparent px-2 py-[6px] text-[11px] font-semibold text-text2 hover:border-edge2 hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {t("common.action.save")}
+                    </button>
+                  </div>
+                )}
+              </label>
+            )}
+          </div>
         </div>
       ) : keyLoading ? (
         <div className="mb-5 animate-pxpulse border border-line2 bg-raised px-[18px] py-4 font-mono text-[11px] text-text3">
@@ -856,6 +918,45 @@ export function W3Settings() {
                     {t("w3.advanced.unlimited")}
                   </button>
                 </div>
+              </div>
+              <div className="col-span-2">
+                <span className="mb-[6px] block font-mono text-[11px] text-text3">
+                  {t("w3.advanced.thinking")}
+                </span>
+                <div className="flex gap-[6px]">
+                  <button
+                    type="button"
+                    aria-pressed={settings.thinkingEnabled}
+                    onClick={() => settings.set({ thinkingEnabled: !settings.thinkingEnabled })}
+                    className={
+                      settings.thinkingEnabled
+                        ? "cursor-pointer border border-accent bg-accent/10 px-3 py-[7px] font-mono text-[11px] text-accent"
+                        : "cursor-pointer border border-edge bg-ink px-3 py-[7px] font-mono text-[11px] text-text3 hover:border-edge2 hover:text-text"
+                    }
+                  >
+                    {settings.thinkingEnabled
+                      ? t("w3.advanced.thinkingOn")
+                      : t("w3.advanced.thinkingOff")}
+                  </button>
+                  {(["low", "medium", "high"] as const).map((level) => (
+                    <button
+                      key={level}
+                      type="button"
+                      disabled={!settings.thinkingEnabled}
+                      onClick={() => settings.set({ thinkingEffort: level })}
+                      className={
+                        settings.thinkingEnabled && settings.thinkingEffort === level
+                          ? "flex-1 cursor-pointer border border-accent bg-accent/10 px-2 py-[7px] font-mono text-[11px] text-accent"
+                          : "flex-1 cursor-pointer border border-edge bg-ink px-2 py-[7px] font-mono text-[11px] text-text3 hover:border-edge2 hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
+                      }
+                    >
+                      {t(`w3.advanced.thinking_${level}`)}
+                    </button>
+                  ))}
+                </div>
+                <span className="mt-[6px] block font-mono text-[10px] text-text3">
+                  {t("w3.advanced.thinkingHint")}
+                </span>
               </div>
             </div>
           </div>

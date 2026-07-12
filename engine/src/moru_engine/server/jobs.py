@@ -712,6 +712,8 @@ class JobManager:
                 "duration_seconds": stats.duration_seconds,
             },
         }
+        if stats.categories:
+            payload["stats"]["categories"] = stats.categories
         if result.artifact_id:
             payload["artifact_id"] = result.artifact_id
         for key in ("modpack_version", "description", "changelog"):

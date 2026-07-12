@@ -136,6 +136,8 @@ export interface PipelineStats {
   duration_seconds: number;
   coverage_percent: number;
   quality_score: number;
+  /** translated-entry counts per content bucket (quests, guidebook, ...) */
+  categories?: Record<string, number>;
 }
 
 /** Params for POST /jobs {type: "translate"} - engine PipelineConfig surface. */
@@ -152,6 +154,8 @@ export interface TranslateParams {
   max_concurrent?: number;
   file_workers?: number;
   max_refine?: number;
+  /** litellm reasoning_effort: thinking effort for reasoning-capable models */
+  reasoning_effort?: "low" | "medium" | "high";
   use_tm?: boolean;
   use_vanilla_glossary?: boolean;
   extract_glossary?: boolean;

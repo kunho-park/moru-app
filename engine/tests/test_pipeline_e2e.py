@@ -7,6 +7,7 @@ The DSPy module itself is covered separately with DummyLM.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
@@ -43,6 +44,43 @@ class FakeTranslator:
         return dspy.Prediction(translations=translations, failed={})
 
 
+class ConcurrentTranslator(FakeTranslator):
+    """Tracks actual overlap while returning deterministic translations."""
+
+    def __init__(self, delay: float = 0.02) -> None:
+        super().__init__()
+        self.delay = delay
+        self.active = 0
+        self.max_active = 0
+
+    async def acall(self, **kwargs):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(self.delay)
+            return await super().acall(**kwargs)
+        finally:
+            self.active -= 1
+
+
+class PartiallyBlockingTranslator(FakeTranslator):
+    """Completes two batches, then blocks until the pipeline is cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.blocked = asyncio.Event()
+
+    async def acall(self, *, source_lang, target_lang, context, glossary, entries):
+        self.calls += 1
+        if self.calls > 2:
+            self.blocked.set()
+            await asyncio.Event().wait()
+        return dspy.Prediction(
+            translations={key: f"KO {text}" for key, text in entries.items()},
+            failed={},
+        )
+
+
 @pytest.fixture
 def modpack(tmp_path: Path) -> Path:
     target = tmp_path / "modpack"
@@ -59,6 +97,12 @@ def _config(modpack: Path, tmp_path: Path) -> PipelineConfig:
         glossary_store_dir=tmp_path / "glossaries",
         use_vanilla_glossary=False,  # drop synced vanilla rows; toggle covered below
     )
+
+
+def test_default_glossary_candidate_budget_is_3000(tmp_path: Path) -> None:
+    config = PipelineConfig(modpack_path=tmp_path)
+    assert config.glossary_max_terms == 3000
+    assert config.glossary_chunk_size == 50
 
 
 async def _run(
@@ -288,6 +332,67 @@ async def test_events_include_ticker_and_token_frames(
 
 
 @pytest.mark.asyncio
+async def test_max_concurrent_controls_real_provider_overlap(
+    modpack: Path, tmp_path: Path
+) -> None:
+    config = _config(modpack, tmp_path)
+    config.use_tm = False
+    config.batch_size = 1
+    config.max_concurrent = 5
+    config.file_workers = 1
+    fake = ConcurrentTranslator()
+    events: list[tuple[str, dict]] = []
+
+    await _run(config, fake, on_event=lambda e, p: events.append((e, p)))
+
+    assert fake.max_active == 5
+    active: set[int] = set()
+    max_event_active = 0
+    for event, payload in events:
+        if event == "batch_started":
+            active.add(payload["request_id"])
+            max_event_active = max(max_event_active, len(active))
+        elif event == "batch_finished":
+            active.discard(payload["request_id"])
+    assert max_event_active == 5
+    assert not active
+
+
+@pytest.mark.asyncio
+async def test_task_cancellation_returns_reviewable_partial_result(
+    modpack: Path, tmp_path: Path
+) -> None:
+    config = _config(modpack, tmp_path)
+    config.use_tm = False
+    config.batch_size = 1
+    config.max_concurrent = 3
+    config.file_workers = 1
+    fake = PartiallyBlockingTranslator()
+    first_translation = asyncio.Event()
+    pipeline = TranslationPipeline(
+        config,
+        lm=dspy.utils.DummyLM([]),
+        on_event=lambda event, _: (
+            first_translation.set() if event == "entry_done" else None
+        ),
+    )
+    pipeline.translator = fake
+    task = asyncio.create_task(pipeline.run())
+    try:
+        await asyncio.wait_for(fake.blocked.wait(), timeout=2)
+        await asyncio.wait_for(first_translation.wait(), timeout=2)
+        task.cancel()
+        result = await asyncio.wait_for(task, timeout=2)
+    finally:
+        pipeline.close()
+
+    assert result.entries
+    assert result.stats.translated_entries > 0
+    assert result.stats.total_entries == len(result.entries)
+    assert result.output_files
+
+
+@pytest.mark.asyncio
 async def test_retranslate_entry_fixes_failed_entry(
     modpack: Path, tmp_path: Path
 ) -> None:
@@ -502,6 +607,11 @@ async def test_glossary_chunk_progress_events(
         if e == "glossary_progress"
     ]
     assert steps == [(0, 2, 0), (1, 2, 1), (2, 2, 2)]
+    first_batch = next(i for i, (event, _) in enumerate(events) if event == "batch_started")
+    glossary_token_frames = [
+        payload for event, payload in events[:first_batch] if event == "tokens"
+    ]
+    assert len(glossary_token_frames) == 2
 
 
 @pytest.mark.asyncio

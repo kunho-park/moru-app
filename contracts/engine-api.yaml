@@ -73,20 +73,23 @@ paths:
         entry_done {key, source, translated} (sampled every ~5th freshly
         translated entry, texts truncated to 120 chars - GUI live ticker),
         tokens {prompt_tokens, completion_tokens, total_tokens, cached_tokens}
-        (emitted after each translated batch; cached_tokens = cumulative
-        prompt tokens served from the provider cache),
+        (cumulative usage, emitted after each glossary-curation attempt and
+        each translated batch; cached_tokens = cumulative prompt tokens
+        served from the provider cache),
+        batch_started {request_id, file, key, entries, started_at} and
+        batch_finished {request_id} (live provider-request slot tracking),
         glossary_progress {done, total, new_terms, attempt?, error?, skipped?}
         (extraction chunk progress; attempt/error present when a
         schema-invalid LLM response is being retried with the error fed
         back, skipped=true when a chunk gave up after retries),
         glossary_extracted {new_terms},
         and a single terminal frame {type: done|failed|cancelled, status}
-        after which the socket closes with code 1000. On done the frame
-        also carries the job's result payload: translate {stats}, export
+        after which the socket closes with code 1000. Done and user-cancelled
+        translate frames carry {stats}; done export frames carry
         {zip_path (resource pack, null when the run shipped no
         resource-pack files), overrides_zip_path (kubejs/config/ftbquests
-        overrides, null when none), file_count},
-        upload {pack_id, url}.
+        overrides, null when none), file_count}; done upload frames carry
+        {pack_id, url}.
       parameters: [{ $ref: "#/components/parameters/JobId" }]
       responses:
         "101": { description: switching protocols }
@@ -357,15 +360,16 @@ components:
             no bundled vanilla data), extract_glossary?,
             include_categories?}. include_categories
             limits translation to the named scan categories (default all).
-            export: {translate_job_id, output_zip?}.
+            export: {translate_job_id, output_zip?}; accepts a completed or
+            user-cancelled translate job whose partial result is available.
             upload: {translate_job_id, modpack_name, web_url? (default
             https://moru.gg), api_token (Bearer token for the web platform;
             uploads without it are rejected with 401),
             modpack_version?, description?, changelog?, curseforge_id?
             (positive integer; forwarded verbatim so the web platform can
             link the pack to its CurseForge project)} - publishes the
-            completed translate job's reviewed zip to the moru web
-            platform (see contracts/web-api.yaml); the terminal done
+            completed or user-cancelled translate job's reviewed zip to the
+            moru web platform (see contracts/web-api.yaml); the terminal done
             frame carries {pack_id, url}.
     Job:
       type: object

@@ -255,7 +255,7 @@ class JobManager:
     def _resolve_translate_source(
         self, params: Mapping[str, Any], purpose: str
     ) -> JobRecord:
-        """Resolve params.translate_job_id to a completed translate job."""
+        """Resolve a completed or user-cancelled translate job with results."""
         translate_job_id = params.get("translate_job_id")
         if not translate_job_id:
             raise JobParamsError("params.translate_job_id is required")
@@ -264,7 +264,7 @@ class JobManager:
             raise JobStateError(
                 f"job {source.id} is a {source.type.value} job, not translate"
             )
-        if source.status is not JobStatus.DONE or not isinstance(
+        if source.status not in (JobStatus.DONE, JobStatus.CANCELLED) or not isinstance(
             source.result, PipelineResult
         ):
             raise JobStateError(
@@ -384,8 +384,8 @@ class JobManager:
             else:
                 record.status = JobStatus.DONE
                 terminal_type, terminal = "done", {"status": "done"}
-                if record.done_payload:
-                    terminal.update(record.done_payload)
+            if record.done_payload:
+                terminal.update(record.done_payload)
         self._emit(record, terminal_type, terminal)
         record.finished = True
         for queue in record.subscribers:
@@ -469,9 +469,13 @@ class JobManager:
         def cancel_check() -> bool:
             return record.cancel_requested
 
-        return await run_pipeline(
+        result = await run_pipeline(
             config, on_event=on_event, cancel_check=cancel_check
         )
+        # Normal and partial-cancelled results expose the same cumulative
+        # counters to the desktop terminal frame.
+        record.done_payload = {"stats": result.stats.model_dump()}
+        return result
 
     async def _apply_review_edits(
         self, source: JobRecord, stage: str

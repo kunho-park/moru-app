@@ -19,6 +19,7 @@ import {
   modelDisplayName,
   providerIdOf,
 } from "@/lib/models";
+import { resolveProviderSecret } from "@/lib/providerSecrets";
 import { costUsd, priceForModel, usePricingTable } from "@/lib/pricing";
 import { useRouter } from "@/stores/router";
 import { useSettings } from "@/stores/settings";
@@ -164,6 +165,8 @@ export function W3Settings() {
   const secretQuery = useQuery({
     queryKey: ["secret", providerId],
     queryFn: () => moru.secrets.get(`apikey:${providerId}`),
+    staleTime: 0,
+    refetchOnMount: "always",
   });
   const glossaryQuery = useQuery({
     queryKey: ["glossary", wizard.sourceLocale, wizard.targetLocale],
@@ -179,6 +182,8 @@ export function W3Settings() {
   const secretsQuery = useQuery({
     queryKey: ["secrets", providerIds],
     enabled: providerIds.length > 0,
+    staleTime: 0,
+    refetchOnMount: "always",
     queryFn: async () =>
       Object.fromEntries(
         await Promise.all(
@@ -206,7 +211,16 @@ export function W3Settings() {
 
   const provider = providersQuery.data?.find((p) => p.id === providerId);
   const providerName = provider?.name ?? PROVIDER_LABELS[providerId] ?? providerId;
-  const hasLocalKey = typeof secretQuery.data === "string" && secretQuery.data.length > 0;
+  const selectedSecret = resolveProviderSecret(
+    providerId,
+    secretQuery.data,
+    secretsQuery.data,
+  );
+  const hasLocalKey = selectedSecret !== null;
+  const keyLoading =
+    !isOllama &&
+    !hasLocalKey &&
+    (secretQuery.isPending || secretQuery.isFetching || secretsQuery.isFetching);
   const hasKey = hasLocalKey || provider?.has_key === true;
   const modelMatches = providerIdOf(settings.model) === providerId;
   const canStart = isOllama ? modelMatches : hasKey && modelMatches;
@@ -231,7 +245,7 @@ export function W3Settings() {
     queryFn: () =>
       api.providerModels(
         providerId,
-        hasLocalKey ? (secretQuery.data ?? undefined) : undefined,
+        hasLocalKey ? (selectedSecret ?? undefined) : undefined,
         isOllama ? settings.ollamaBaseUrl : undefined,
       ),
   });
@@ -435,7 +449,7 @@ export function W3Settings() {
             />
           </label>
         </div>
-      ) : secretQuery.isPending ? (
+      ) : keyLoading ? (
         <div className="mb-5 animate-pxpulse border border-line2 bg-raised px-[18px] py-4 font-mono text-[11px] text-text3">
           {t("w3.key.checking")}
         </div>
@@ -452,8 +466,8 @@ export function W3Settings() {
               {t("w3.key.confirmed", { provider: providerName })}
             </div>
             <div className="font-mono text-[11px] text-text2">
-              {hasLocalKey && secretQuery.data !== null && secretQuery.data !== undefined
-                ? `${maskKey(secretQuery.data)} · ${t("w3.key.savedLocal")}`
+              {hasLocalKey && selectedSecret !== null
+                ? `${maskKey(selectedSecret)} · ${t("w3.key.savedLocal")}`
                 : t("w3.key.engineManaged")}
             </div>
           </div>

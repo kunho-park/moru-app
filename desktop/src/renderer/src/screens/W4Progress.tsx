@@ -15,6 +15,8 @@ import { useSettings } from "@/stores/settings";
 import { selectedScanTotals, useWizard } from "@/stores/wizard";
 import type { FileProgress, GlossaryProgress, LogLine } from "@/stores/wizard";
 
+import { ActiveBatchPanel } from "./ActiveBatchPanel";
+
 const RING_CIRCUMFERENCE = 263.9; // 2 * PI * r(42) - the progress ring's dasharray base
 
 const LOG_LEVEL: Record<LogLine["level"], { label: string; className: string }> = {
@@ -218,12 +220,14 @@ function GlossaryRow({ progress }: { progress: GlossaryProgress }) {
   );
 }
 
+
 export function W4Progress() {
   const { t, i18n } = useTranslation();
   const lang: "ko" | "en" = i18n.language === "en" ? "en" : "ko";
   const go = useRouter((s) => s.go);
   const model = useSettings((s) => s.model);
   const batchSize = useSettings((s) => s.batchSize);
+  const maxConcurrent = useSettings((s) => s.maxConcurrent);
   const useVanillaGlossary = useSettings((s) => s.useVanillaGlossary);
   const extractGlossary = useSettings((s) => s.extractGlossary);
   const pricingTable = usePricingTable();
@@ -236,6 +240,7 @@ export function W4Progress() {
     doneEntries,
     fileProgress,
     glossaryProgress,
+    activeBatches,
     failedKeys,
     promptTokens,
     completionTokens,
@@ -340,6 +345,13 @@ export function W4Progress() {
   const failedCount = Object.keys(failedKeys).length;
 
   const latestTick = ticker[0];
+  const activeBatchList = Object.values(activeBatches).sort(
+    (a, b) => a.requestId - b.requestId,
+  );
+  const glossaryActive =
+    glossaryProgress !== null &&
+    glossaryProgress.total > 0 &&
+    glossaryProgress.done < glossaryProgress.total;
 
   /* ---- cancel dialog ---- */
   const [showCancel, setShowCancel] = useState(false);
@@ -594,6 +606,14 @@ export function W4Progress() {
 
         {/* Live stats + ticker */}
         <div className="flex flex-col gap-3">
+          {running && (
+            <ActiveBatchPanel
+              batches={activeBatchList}
+              limit={maxConcurrent}
+              now={now}
+              glossaryActive={glossaryActive}
+            />
+          )}
           {/* Ticker */}
           <div className="relative overflow-hidden border border-line2 bg-raised px-5 py-4">
             <div className="mb-2 flex items-center gap-1.5">

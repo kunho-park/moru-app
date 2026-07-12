@@ -25,6 +25,13 @@
     "waiting": "번역 결과를 기다리는 중…",
     "empty": "번역이 시작되면 결과가 여기에 흐릅니다"
   },
+  "concurrent": {
+    "title": "동시 번역 요청",
+    "slots": "{{active}} / {{limit}} 활성",
+    "waiting": "번역 요청이 실행 슬롯에 들어가기를 기다리는 중…",
+    "glossary": "용어사전 요청 처리 중…",
+    "entries": "{{count}}개 엔트리"
+  },
   "stats": {
     "rate": "엔트리/초",
     "tokens": "토큰 사용",

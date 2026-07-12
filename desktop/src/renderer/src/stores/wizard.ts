@@ -25,6 +25,14 @@ export interface TickerPair {
   translated: string;
 }
 
+export interface ActiveBatch {
+  requestId: number;
+  file: string;
+  key: string;
+  entries: number;
+  startedAt: number;
+}
+
 export interface FileProgress {
   file: string;
   done: number;
@@ -80,6 +88,7 @@ interface WizardStore {
   /** prompt tokens served from the provider cache (subset of promptTokens) */
   cachedTokens: number;
   ticker: TickerPair[];
+  activeBatches: Record<number, ActiveBatch>;
   log: LogLine[];
   stats: PipelineStats | null;
 
@@ -150,6 +159,7 @@ const initialJobState = {
   completionTokens: 0,
   cachedTokens: 0,
   ticker: [],
+  activeBatches: {},
   log: [],
   stats: null,
   exportJobId: null,
@@ -314,6 +324,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
       completionTokens: 0,
       cachedTokens: 0,
       ticker: [],
+      activeBatches: {},
       log: [],
       stats: null,
     });
@@ -369,7 +380,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
       patch: Partial<WizardStore> = {},
     ): void => {
       moru.setBusy(false);
-      set({ runState, finishedAt: Date.now(), ...patch });
+      set({ runState, finishedAt: Date.now(), activeBatches: {}, ...patch });
       const current = get();
       useSessions.getState().patch(sessionId, {
         status: runState,
@@ -406,6 +417,27 @@ export const useWizard = create<WizardStore>((set, get) => ({
             }
             break;
           }
+          case "batch_started":
+            set((prev) => ({
+              activeBatches: {
+                ...prev.activeBatches,
+                [frame.request_id]: {
+                  requestId: frame.request_id,
+                  file: frame.file,
+                  key: frame.key,
+                  entries: frame.entries,
+                  startedAt: Date.now(),
+                },
+              },
+            }));
+            break;
+          case "batch_finished":
+            set((prev) => {
+              const activeBatches = { ...prev.activeBatches };
+              delete activeBatches[frame.request_id];
+              return { activeBatches };
+            });
+            break;
           case "tokens":
             set({
               promptTokens: frame.prompt_tokens,
@@ -462,8 +494,8 @@ export const useWizard = create<WizardStore>((set, get) => ({
             finish("failed", { runError: frame.error ?? "translate failed" });
             break;
           case "cancelled":
-            get().appendLog("warn", "translate cancelled");
-            finish("cancelled");
+            get().appendLog("warn", "translate cancelled; partial result preserved");
+            finish("cancelled", { stats: frame.stats ?? null });
             break;
         }
       });

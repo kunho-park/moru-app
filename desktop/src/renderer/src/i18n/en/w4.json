@@ -25,6 +25,13 @@
     "waiting": "Waiting for translations…",
     "empty": "Results will stream here once translation starts"
   },
+  "concurrent": {
+    "title": "Concurrent translation requests",
+    "slots": "{{active}} / {{limit}} active",
+    "waiting": "Waiting for translation requests to enter an execution slot…",
+    "glossary": "Processing glossary requests…",
+    "entries": "{{count}} entries"
+  },
   "stats": {
     "rate": "Entries/sec",
     "tokens": "Tokens used",

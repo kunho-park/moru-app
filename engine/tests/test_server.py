@@ -440,6 +440,37 @@ def test_export_job_builds_pack_and_overrides_zips(
         assert zf.namelist() == ["kubejs/assets/test/lang/ko_kr.json"]
 
 
+def test_cancelled_translate_result_can_be_reviewed_and_exported(
+    client: TestClient, done_translate_job: JobRecord, tmp_path: Path
+) -> None:
+    done_translate_job.status = JobStatus.CANCELLED
+
+    review = client.get(
+        f"/translate/{done_translate_job.id}/entries",
+        headers=AUTH,
+    )
+    assert review.status_code == 200
+    assert review.json()["total"] == len(done_translate_job.result.entries)
+
+    target = tmp_path / "exports" / "partial.zip"
+    response = client.post(
+        "/jobs",
+        json={
+            "type": "export",
+            "params": {
+                "translate_job_id": done_translate_job.id,
+                "output_zip": str(target),
+            },
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 201
+    final = _wait_for_job(client, response.json()["id"])
+    assert final["status"] == "done", final["error"]
+    assert target.exists()
+    assert target.with_name("partial_overrides.zip").exists()
+
+
 def test_upload_job_without_token_uses_defaults(
     client: TestClient,
     done_translate_job: JobRecord,

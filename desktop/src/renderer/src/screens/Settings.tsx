@@ -185,7 +185,7 @@ function ProviderCard({
     mutationFn: (apiKey?: string) => api.testProvider(provider.id, apiKey),
   });
 
-  const connected = savedKey !== null || provider.has_key;
+  const connected = (typeof savedKey === "string" && savedKey.length > 0) || provider.has_key;
   /* live model list once a key is usable; static catalog line otherwise */
   const liveModels = useQuery({
     queryKey: ["provider-models", provider.id, savedKey !== null ? "key" : "nokey", ""],

@@ -209,6 +209,19 @@ export interface EntryDoneFrame {
   translated: string;
 }
 
+export interface BatchStartedFrame {
+  type: "batch_started";
+  request_id: number;
+  file: string;
+  key: string;
+  entries: number;
+}
+
+export interface BatchFinishedFrame {
+  type: "batch_finished";
+  request_id: number;
+}
+
 export interface TokensFrame {
   type: "tokens";
   prompt_tokens: number;
@@ -255,6 +268,8 @@ export type JobEventFrame =
   | EntryFailedFrame
   | EntryDoneFrame
   | TokensFrame
+  | BatchStartedFrame
+  | BatchFinishedFrame
   | GlossaryProgressFrame
   | GlossaryExtractedFrame
   | TerminalFrame;

@@ -110,14 +110,59 @@ class CurateGlossaryTerms(dspy.Signature):
 
 
 class JudgeTranslationQuality(dspy.Signature):
-    """Judge the fluency and adequacy of a game-text translation.
+    """Score one candidate translation of a game-UI string against the
+    official reference translation.
 
-    Score 1.0 = fluent, natural, faithful; 0.0 = unusable. Judge meaning
-    and register, not formatting tokens (those are checked elsewhere).
+    - 1.0: same meaning and terminology as the reference; equally natural
+      (or better) phrasing for the target language.
+    - 0.7-0.9: correct meaning; minor terminology or register deviations.
+    - 0.4-0.6: understandable but wrong terminology, awkward phrasing, or
+      partially untranslated.
+    - 0.1-0.3: substantial meaning errors or mostly untranslated.
+    - 0.0: empty, unrelated, or corrupted output.
+    The candidate need not match the reference word-for-word: a different
+    but equally correct and natural phrasing scores high. Ignore {{...}}
+    placeholder tokens; they are validated elsewhere.
     """
 
     source_text: str = dspy.InputField()
-    translated_text: str = dspy.InputField()
+    reference_translation: str = dspy.InputField(
+        desc="official vanilla translation (gold standard)"
+    )
+    candidate_translation: str = dspy.InputField()
     target_lang: str = dspy.InputField()
     score: float = dspy.OutputField(desc="0.0 to 1.0")
-    issues: str = dspy.OutputField(desc="short list of fluency/adequacy issues")
+    issues: str = dspy.OutputField(
+        desc="short list of quality issues; empty when none"
+    )
+
+
+class JudgeTranslationPair(dspy.Signature):
+    """Compare two anonymized candidate translations (A and B) of one
+    game-UI string against the official reference translation, then score
+    each candidate independently on a 0-10 integer scale.
+
+    - 10: matches the reference's meaning and terminology; equally natural
+      (or better) phrasing for the target language.
+    - 7-9: correct meaning; minor terminology or register deviations.
+    - 4-6: understandable but wrong terminology, awkward phrasing, or
+      partially untranslated.
+    - 1-3: substantial meaning errors or mostly untranslated.
+    - 0: empty, unrelated, or corrupted output.
+    Candidate order carries no information — judge each on its own merits;
+    identical candidates must receive identical scores. Ignore {{...}}
+    placeholder tokens; they are validated elsewhere.
+    """
+
+    source_text: str = dspy.InputField()
+    reference_translation: str = dspy.InputField(
+        desc="official vanilla translation (gold standard)"
+    )
+    target_lang: str = dspy.InputField()
+    translation_a: str = dspy.InputField()
+    translation_b: str = dspy.InputField()
+    verdict: str = dspy.OutputField(
+        desc="one short sentence comparing A and B against the reference"
+    )
+    score_a: int = dspy.OutputField(desc="integer 0-10")
+    score_b: int = dspy.OutputField(desc="integer 0-10")

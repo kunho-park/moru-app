@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import dspy
 from pydantic import BaseModel, ConfigDict, Field
 
+from .. import batching
 from ..community import (
     default_glossary_store_dir,
     load_user_glossary_terms,
@@ -160,8 +161,8 @@ class PipelineConfig(BaseModel):
     #: an explicit value overrides build_lm's Ollama auto-disable.
     reasoning_effort: str | None = None
 
-    batch_size: int = 30
-    max_batch_chars: int = 8000
+    batch_size: int = batching.DEFAULT_BATCH_SIZE
+    max_batch_chars: int = batching.DEFAULT_MAX_BATCH_CHARS
     max_concurrent: int = Field(default=15, ge=1)
     #: Files prepared concurrently. None derives max_concurrent so enough
     #: batches exist to fill every LLM slot; a small fixed value starves
@@ -553,22 +554,11 @@ class TranslationPipeline:
     # -- batching ----------------------------------------------------------
 
     def _make_batches(self, entries: Mapping[str, str]) -> list[dict[str, str]]:
-        batches: list[dict[str, str]] = []
-        current: dict[str, str] = {}
-        current_chars = 0
-        for key, text in entries.items():
-            if current and (
-                len(current) >= self.config.batch_size
-                or current_chars + len(text) > self.config.max_batch_chars
-            ):
-                batches.append(current)
-                current = {}
-                current_chars = 0
-            current[key] = text
-            current_chars += len(text)
-        if current:
-            batches.append(current)
-        return batches
+        return batching.pack_batches(
+            entries,
+            batch_size=self.config.batch_size,
+            max_batch_chars=self.config.max_batch_chars,
+        )
 
     async def _translate_batch(
         self,

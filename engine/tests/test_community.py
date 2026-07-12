@@ -12,7 +12,6 @@ import pytest
 from aiohttp import web
 
 from moru_engine.community import (
-    SHARED_TM_VERSION,
     load_user_glossary_terms,
     merge_extracted_terms,
     sync_community,

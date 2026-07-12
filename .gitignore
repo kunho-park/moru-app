@@ -30,6 +30,9 @@ Thumbs.db
 *.zip_extracted/
 engine/evalset_snapshot.json
 
+# GEPA optimization run outputs (checkpoints, reports) — operator-local
+engine/runs/
+
 # runtime artifacts when running against the repo fixture
 moru_output/
 

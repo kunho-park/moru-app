@@ -11,7 +11,7 @@ import pytest
 
 import moru_engine.dspy_modules.lm as lm_module
 import moru_engine.pipeline.orchestrator as orchestrator
-from moru_engine.models import Glossary, LanguageFilePair
+from moru_engine.models import LanguageFilePair
 from moru_engine.pipeline.orchestrator import (
     EntryResult,
     EntryStatus,

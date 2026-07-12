@@ -387,6 +387,30 @@ async def test_max_concurrent_controls_real_provider_overlap(
     assert not active
 
 
+def test_file_workers_defaults_to_max_concurrent(tmp_path: Path) -> None:
+    """Unset file_workers derives from max_concurrent: the GUI only sends
+    max_concurrent, and a small fixed file limit would starve the provider
+    semaphore on packs with many small files."""
+    config = _config(tmp_path, tmp_path)
+    config.max_concurrent = 7
+    assert config.file_workers is None
+    pipeline = TranslationPipeline(config, lm=dspy.utils.DummyLM([]))
+    try:
+        assert pipeline._file_semaphore._value == 7
+        assert pipeline._llm_semaphore._value == 7
+    finally:
+        pipeline.close()
+
+    explicit = _config(tmp_path, tmp_path / "explicit")
+    explicit.max_concurrent = 7
+    explicit.file_workers = 2
+    pipeline = TranslationPipeline(explicit, lm=dspy.utils.DummyLM([]))
+    try:
+        assert pipeline._file_semaphore._value == 2
+    finally:
+        pipeline.close()
+
+
 @pytest.mark.asyncio
 async def test_task_cancellation_returns_reviewable_partial_result(
     modpack: Path, tmp_path: Path

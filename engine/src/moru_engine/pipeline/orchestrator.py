@@ -122,7 +122,10 @@ class PipelineConfig(BaseModel):
     batch_size: int = 30
     max_batch_chars: int = 8000
     max_concurrent: int = Field(default=15, ge=1)
-    file_workers: int = 3
+    #: Files prepared concurrently. None derives max_concurrent so enough
+    #: batches exist to fill every LLM slot; a small fixed value starves
+    #: the request semaphore when the pack has many small files.
+    file_workers: int | None = Field(default=None, ge=1)
     max_refine: int = 2
 
     use_tm: bool = True
@@ -202,7 +205,11 @@ class TranslationPipeline:
         )
         self.tm = LocalTM(config.tm_db_path) if config.use_tm else None
         self._llm_semaphore = asyncio.Semaphore(config.max_concurrent)
-        self._file_semaphore = asyncio.Semaphore(config.file_workers)
+        self._file_semaphore = asyncio.Semaphore(
+            config.file_workers
+            if config.file_workers is not None
+            else config.max_concurrent
+        )
         #: Monotonic count of freshly translated entries, drives the sampled
         #: entry_done ticker frames (every ENTRY_TICKER_INTERVAL-th entry).
         self._entry_counter = 0

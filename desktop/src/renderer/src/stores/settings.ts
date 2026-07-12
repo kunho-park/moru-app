@@ -24,6 +24,8 @@ interface SettingsStore {
   /** Maximum mined candidates sent to glossary curation; null means unlimited. */
   glossaryMaxTerms: number | null;
   ollamaBaseUrl: string;
+  /** OpenAI-compatible server (LM Studio, llama.cpp, vLLM) base URL incl. /v1 */
+  openaiCompatBaseUrl: string;
   targetLocale: string;
   recentFolders: string[];
 
@@ -49,6 +51,7 @@ export const useSettings = create<SettingsStore>()(
       extractGlossary: true,
       glossaryMaxTerms: 3000,
       ollamaBaseUrl: "http://localhost:11434",
+      openaiCompatBaseUrl: "http://localhost:1234/v1",
       targetLocale: "ko_kr",
       recentFolders: [],
 

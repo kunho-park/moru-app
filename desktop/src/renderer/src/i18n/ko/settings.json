@@ -32,6 +32,10 @@
     "ollamaModelsUnknown": "설치된 모델은 연결 테스트로 확인하세요",
     "ollamaModelCount": "{{n}} 모델",
     "baseUrlLabel": "Base URL",
+    "compatTitle": "OpenAI 호환 서버",
+    "compatChip": "LM Studio · llama.cpp",
+    "compatModelsUnknown": "서버 미연결 — 주소를 확인해 주세요 (예: http://localhost:1234/v1)",
+    "compatKeyPlaceholder": "(선택) 서버가 API 키를 요구할 때만 입력",
     "loading": "프로바이더 목록 불러오는 중…",
     "loadError": "프로바이더 목록을 불러오지 못했습니다",
     "empty": "사용 가능한 프로바이더가 없습니다"

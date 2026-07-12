@@ -2,7 +2,8 @@
  * Model pricing from OpenRouter plus the static direct-provider table.
  * Direct-provider models use the lower known rate for each token class so
  * displayed costs may be low but are not inflated by OpenRouter markup.
- * OpenRouter-selected models use their live OpenRouter row. Ollama is free.
+ * OpenRouter-selected models use their live OpenRouter row. Local
+ * providers (Ollama, OpenAI-compatible servers) are free.
  *
  * All rates are normalized to USD per 1M tokens.
  */
@@ -10,7 +11,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { moru } from "./bridge";
-import { MODEL_PRICES, providerIdOf, type ModelPrice } from "./models";
+import { LOCAL_PROVIDERS, MODEL_PRICES, providerIdOf, type ModelPrice } from "./models";
 
 const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
 const CACHE_KEY = "moru:openrouter-pricing";
@@ -168,7 +169,7 @@ export function usePricingTable(): PricingTable | null {
  * the OpenRouter row for every token class; unknown paid models return null.
  */
 export function priceForModel(table: PricingTable | null, model: string): LivePrice | null {
-  if (providerIdOf(model) === "ollama") {
+  if (LOCAL_PROVIDERS.has(providerIdOf(model))) {
     return { input: 0, output: 0, cacheRead: 0, source: "free" };
   }
   const orId = openRouterId(model);

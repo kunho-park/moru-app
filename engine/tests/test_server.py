@@ -116,10 +116,15 @@ def test_valid_token_is_200(client: TestClient) -> None:
     response = client.get("/providers", headers=AUTH)
     assert response.status_code == 200
     providers = {p["id"]: p for p in response.json()}
-    assert {"openai", "anthropic", "ollama"} <= providers.keys()
+    assert {"openai", "anthropic", "ollama", "openai-compatible"} <= providers.keys()
     assert providers["ollama"]["has_key"] is True
+    # No key requirement and no static catalog: models come live from the
+    # user's own server (LM Studio, llama.cpp, ...).
+    assert providers["openai-compatible"]["has_key"] is True
+    assert providers["openai-compatible"]["models"] == []
     for provider in providers.values():
-        assert provider["models"], provider["id"]
+        if provider["id"] != "openai-compatible":
+            assert provider["models"], provider["id"]
         assert isinstance(provider["has_key"], bool)
 
 
@@ -895,8 +900,79 @@ def test_fetch_live_models_rejects_missing_key_and_unknown_provider() -> None:
     for provider in ("openai", "anthropic", "gemini", "deepseek", "xai"):
         with pytest.raises(ValueError, match="api key required"):
             asyncio.run(fetch_live_models(provider))
+    with pytest.raises(ValueError, match="api base required"):
+        asyncio.run(fetch_live_models("openai-compatible"))
     with pytest.raises(ValueError, match="unknown provider"):
         asyncio.run(fetch_live_models("nope"))
+
+
+def test_fetch_openai_compatible_lists_hosted_vllm_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Base URL is joined with /models and ids map to hosted_vllm/ —
+    LiteLLM's generic OpenAI-compatible route."""
+    seen: dict[str, Any] = {}
+
+    async def fake_get_json(
+        url: str, headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        seen["url"] = url
+        seen["headers"] = headers
+        return {"data": [{"id": "qwen2.5-7b-instruct"}, {"id": "llama-3.2-3b"}]}
+
+    monkeypatch.setattr("moru_engine.server.live_models._get_json", fake_get_json)
+    models = asyncio.run(
+        fetch_live_models("openai-compatible", api_base="http://localhost:1234/v1/")
+    )
+    assert models == [
+        "hosted_vllm/qwen2.5-7b-instruct",
+        "hosted_vllm/llama-3.2-3b",
+    ]
+    assert seen["url"] == "http://localhost:1234/v1/models"
+    assert seen["headers"] is None  # keyless local server -> no auth header
+
+
+def test_providers_test_passes_api_base_to_lm(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    class FakeLM:
+        def __call__(self, prompt: str) -> str:
+            return "pong"
+
+    def fake_build_lm(model: str, **kwargs: Any) -> FakeLM:
+        seen["model"] = model
+        seen["kwargs"] = kwargs
+        return FakeLM()
+
+    monkeypatch.setattr("moru_engine.server.app.build_lm", fake_build_lm)
+    response = client.post(
+        "/providers/test",
+        headers=AUTH,
+        json={
+            "provider": "openai-compatible",
+            "model": "hosted_vllm/qwen2.5-7b-instruct",
+            "api_base": "http://localhost:1234/v1",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "error": None}
+    assert seen["model"] == "hosted_vllm/qwen2.5-7b-instruct"
+    assert seen["kwargs"]["api_base"] == "http://localhost:1234/v1"
+
+
+def test_providers_test_without_model_needs_static_catalog(
+    client: TestClient,
+) -> None:
+    """openai-compatible has no static models, so a model is mandatory."""
+    response = client.post(
+        "/providers/test", headers=AUTH, json={"provider": "openai-compatible"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert "pass a model" in body["error"]
 
 
 # -- shutdown -----------------------------------------------------------------------

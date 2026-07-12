@@ -14,6 +14,7 @@ import type {
 } from "../../../shared/engine";
 import type { ModpackProbe } from "../../../shared/bridge";
 import { api, openJobEvents } from "../lib/api";
+import { providerIdOf } from "../lib/models";
 import { moru } from "../lib/bridge";
 import { WEB_URL } from "../lib/web";
 import { useSessions } from "./sessions";
@@ -289,15 +290,21 @@ export const useWizard = create<WizardStore>((set, get) => ({
     const settings = useSettings.getState();
     closeTranslateEvents?.();
 
-    const providerId = settings.model.split("/")[0].replace("ollama_chat", "ollama");
+    const providerId = providerIdOf(settings.model);
     const apiKey = (await moru.secrets.get(`apikey:${providerId}`)) ?? undefined;
+    const apiBase =
+      providerId === "ollama"
+        ? settings.ollamaBaseUrl
+        : providerId === "openai-compatible"
+          ? settings.openaiCompatBaseUrl
+          : undefined;
     const params: TranslateParams = {
       modpack_path: state.modpackPath,
       source_locale: state.sourceLocale,
       target_locale: state.targetLocale,
       model: settings.model,
       api_key: apiKey,
-      api_base: settings.model.startsWith("ollama") ? settings.ollamaBaseUrl : undefined,
+      api_base: apiBase,
       temperature: settings.temperature,
       batch_size: settings.batchSize,
       max_concurrent: settings.maxConcurrent,

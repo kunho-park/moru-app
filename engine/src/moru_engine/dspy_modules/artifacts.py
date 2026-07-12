@@ -28,9 +28,12 @@ TIERS = ("default", "local")
 def resolve_tier(model: str) -> str:
     """Map a LiteLLM model string to an artifact tier.
 
-    "local" for Ollama-served models, "default" for everything hosted.
+    "local" for locally served models (Ollama, OpenAI-compatible servers
+    like LM Studio / llama.cpp via the hosted_vllm/ route), "default" for
+    everything hosted.
     """
-    return "local" if model.startswith(("ollama_chat/", "ollama/")) else "default"
+    local_prefixes = ("ollama_chat/", "ollama/", "hosted_vllm/")
+    return "local" if model.startswith(local_prefixes) else "default"
 
 
 def artifacts_dir() -> Path:

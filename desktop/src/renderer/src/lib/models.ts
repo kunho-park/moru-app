@@ -46,7 +46,21 @@ export const PROVIDER_ORDER: readonly string[] = [
   "xai",
   "openrouter",
   "ollama",
+  "openai-compatible",
 ];
+
+/**
+ * Providers served from the user's machine: no API key requirement, a
+ * base-URL setting, live model lists instead of preset tiers, and zero
+ * per-token cost.
+ */
+export const LOCAL_PROVIDERS: ReadonlySet<string> = new Set(["ollama", "openai-compatible"]);
+
+/** LiteLLM model-string prefixes that differ from our provider ids. */
+const PREFIX_TO_PROVIDER: Record<string, string> = {
+  ollama_chat: "ollama",
+  hosted_vllm: "openai-compatible",
+};
 
 /**
  * 제공자별 프리셋 3종 (빠른 / 균형 / 최고 품질). The user picks the provider
@@ -91,7 +105,8 @@ export const PRESET_IDS: readonly PresetId[] = ["fast", "balanced", "best"];
 
 /** Provider id a LiteLLM model string belongs to ("ollama_chat/x" -> "ollama"). */
 export function providerIdOf(model: string): string {
-  return model.split("/")[0].replace("ollama_chat", "ollama");
+  const prefix = model.split("/")[0];
+  return PREFIX_TO_PROVIDER[prefix] ?? prefix;
 }
 
 /** Short display name: "anthropic/claude-haiku-4-5" -> "Claude Haiku 4.5". */

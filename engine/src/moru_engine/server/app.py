@@ -129,6 +129,16 @@ _PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
             "ollama_chat/gemma3:12b",
         ],
     },
+    {
+        # Any OpenAI-compatible server: LM Studio, llama.cpp, vLLM, ...
+        # No static models — the lineup is whatever the user's server
+        # loaded; the desktop lists it live via POST /providers/models
+        # with the server's base URL.
+        "id": "openai-compatible",
+        "name": "OpenAI Compatible",
+        "env": None,
+        "models": [],
+    },
 )
 
 
@@ -163,6 +173,7 @@ class ProviderTestRequest(BaseModel):
     provider: str
     api_key: str | None = None
     model: str | None = None
+    api_base: str | None = None
 
 
 class ProviderModelsRequest(BaseModel):
@@ -597,17 +608,24 @@ def create_app(
         model = body.model
         if model is None:
             entry = catalog.get(body.provider)
-            if entry is None:
+            if entry is None or not entry["models"]:
                 return {
                     "ok": False,
-                    "error": f"unknown provider: {body.provider} (pass a model)",
+                    "error": f"no default model for provider: {body.provider}"
+                    " (pass a model)",
                 }
             model = entry["models"][0]
 
         def probe() -> None:
             # Minimal 1-token completion; cache off so a cached success can
             # never mask a revoked key.
-            lm = build_lm(model, api_key=body.api_key, max_tokens=1, cache=False)
+            lm = build_lm(
+                model,
+                api_key=body.api_key,
+                api_base=body.api_base,
+                max_tokens=1,
+                cache=False,
+            )
             lm("ping")
 
         try:

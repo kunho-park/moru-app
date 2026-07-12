@@ -19,7 +19,9 @@
     "unreachable": "Not connected",
     "ollamaModelsTitle": "Installed local models",
     "ollamaModelsLoading": "Checking local models…",
-    "ollamaEmpty": "No models found — make sure Ollama is running"
+    "ollamaEmpty": "No models found — make sure Ollama is running",
+    "compatModelsTitle": "Models loaded on the server",
+    "compatEmpty": "No models found — check the server is running and the address (e.g. http://localhost:1234/v1)"
   },
   "preset": {
     "recommended": "Best pick",
@@ -59,6 +61,8 @@
     "testing": "Testing…",
     "ollamaTitle": "Ollama · no API key needed",
     "ollamaSub": "Completely free · runs locally",
+    "compatTitle": "OpenAI-compatible server · no API key needed",
+    "compatSub": "LM Studio · llama.cpp · vLLM — include /v1 in the address",
     "baseUrl": "BASE URL"
   },
   "options": {

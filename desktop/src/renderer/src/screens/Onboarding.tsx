@@ -13,7 +13,7 @@ import { useTranslation } from "react-i18next";
 import { MoruLogo } from "@/components/MoruLogo";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
-import { PROVIDER_TIERS } from "@/lib/models";
+import { LOCAL_PROVIDERS, PROVIDER_TIERS } from "@/lib/models";
 import { useAccount } from "@/stores/account";
 import { useRouter } from "@/stores/router";
 import { useSettings } from "@/stores/settings";
@@ -100,8 +100,9 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
   const [savedIds, setSavedIds] = useState<ReadonlySet<string>>(new Set());
 
   const providersQuery = useQuery({ queryKey: ["providers"], queryFn: api.providers });
-  // Ollama needs no key; it stays a Settings-only concern during onboarding.
-  const providers = (providersQuery.data ?? []).filter((p) => p.id !== "ollama");
+  // Local providers (Ollama, OpenAI-compatible servers) need no key; they
+  // stay a Settings-only concern during onboarding.
+  const providers = (providersQuery.data ?? []).filter((p) => !LOCAL_PROVIDERS.has(p.id));
   const selected = providers.find((p) => p.id === selectedId);
 
   const keyTest = useMutation({

@@ -269,6 +269,7 @@ paths:
                 provider: { type: string }
                 api_key: { type: string }
                 model: { type: string }
+                api_base: { type: string, nullable: true }
       responses:
         "200":
           content:

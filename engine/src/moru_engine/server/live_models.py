@@ -119,6 +119,25 @@ async def _fetch_ollama(api_key: str | None, api_base: str | None) -> list[str]:
     return [f"ollama_chat/{m['name']}" for m in payload["models"]]
 
 
+async def _fetch_openai_compatible(
+    api_key: str | None, api_base: str | None
+) -> list[str]:
+    """Any OpenAI-compatible server (LM Studio, llama.cpp, vLLM, ...).
+
+    api_base is the OpenAI-style base including /v1 (e.g.
+    http://localhost:1234/v1); the key is optional — most local servers
+    ignore auth. Ids come back "hosted_vllm/"-prefixed: LiteLLM's generic
+    OpenAI-compatible route, which honors api_base and substitutes a fake
+    key when none is given.
+    """
+    if not api_base:
+        raise ValueError("api base required")
+    base = api_base.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    payload = await _get_json(f"{base}/models", headers=headers)
+    return [f"hosted_vllm/{m['id']}" for m in payload["data"]]
+
+
 _FETCHERS: dict[str, Callable[[str | None, str | None], Awaitable[list[str]]]] = {
     "openai": _fetch_openai,
     "anthropic": _fetch_anthropic,
@@ -127,6 +146,7 @@ _FETCHERS: dict[str, Callable[[str | None, str | None], Awaitable[list[str]]]] =
     "xai": _fetch_xai,
     "openrouter": _fetch_openrouter,
     "ollama": _fetch_ollama,
+    "openai-compatible": _fetch_openai_compatible,
 }
 
 

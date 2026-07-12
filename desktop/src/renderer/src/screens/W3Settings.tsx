@@ -12,6 +12,7 @@ import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
 import { formatCompact, formatInt, formatUsd } from "@/lib/format";
 import {
+  LOCAL_PROVIDERS,
   PRESET_IDS,
   PROVIDER_ORDER,
   PROVIDER_TIERS,
@@ -66,6 +67,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   xai: "xAI",
   openrouter: "OpenRouter",
   ollama: "Ollama",
+  "openai-compatible": "OpenAI Compatible",
 };
 
 const ADVANCED_DEFAULTS = { temperature: 0.3, batchSize: 30, maxConcurrent: 15, maxRefine: 2 };
@@ -150,6 +152,8 @@ export function W3Settings() {
     ? settings.provider
     : providerIdOf(settings.model);
   const isOllama = providerId === "ollama";
+  const isCompat = providerId === "openai-compatible";
+  const isLocal = LOCAL_PROVIDERS.has(providerId);
   const tiers = PROVIDER_TIERS[providerId];
 
   const totals = selectedScanTotals(wizard);
@@ -197,19 +201,40 @@ export function W3Settings() {
     queryKey: ["provider-models", "ollama", "nokey", settings.ollamaBaseUrl],
     queryFn: () => api.providerModels("ollama", undefined, settings.ollamaBaseUrl),
   });
+  const compatKey = secretsQuery.data?.["openai-compatible"] ?? null;
+  const compatModelsQuery = useQuery({
+    queryKey: [
+      "provider-models",
+      "openai-compatible",
+      compatKey !== null ? "key" : "nokey",
+      settings.openaiCompatBaseUrl,
+    ],
+    queryFn: () =>
+      api.providerModels(
+        "openai-compatible",
+        compatKey ?? undefined,
+        settings.openaiCompatBaseUrl,
+      ),
+  });
 
   const ollamaModels =
     ollamaModelsQuery.data?.source === "live" ? ollamaModelsQuery.data.models : [];
+  const compatModels =
+    compatModelsQuery.data?.source === "live" ? compatModelsQuery.data.models : [];
+  /* the selected local provider's query/list, for the model grid */
+  const localModelsQuery = isCompat ? compatModelsQuery : ollamaModelsQuery;
+  const localModels = isCompat ? compatModels : ollamaModels;
   const connected = useMemo(() => {
     const set = new Set<string>();
     for (const p of providersQuery.data ?? []) {
-      if (p.id === "ollama") continue;
+      if (LOCAL_PROVIDERS.has(p.id)) continue;
       if (p.has_key || (secretsQuery.data?.[p.id] ?? null) !== null) set.add(p.id);
     }
     if (ollamaModels.length > 0) set.add("ollama");
+    if (compatModels.length > 0) set.add("openai-compatible");
     return set;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providersQuery.data, secretsQuery.data, ollamaModelsQuery.data]);
+  }, [providersQuery.data, secretsQuery.data, ollamaModelsQuery.data, compatModelsQuery.data]);
 
   const provider = providersQuery.data?.find((p) => p.id === providerId);
   const providerName = provider?.name ?? PROVIDER_LABELS[providerId] ?? providerId;
@@ -220,35 +245,40 @@ export function W3Settings() {
   );
   const hasLocalKey = selectedSecret !== null;
   const keyLoading =
-    !isOllama &&
+    !isLocal &&
     !hasLocalKey &&
     (secretQuery.isPending || secretQuery.isFetching || secretsQuery.isFetching);
   const hasKey = hasLocalKey || provider?.has_key === true;
   const modelMatches = providerIdOf(settings.model) === providerId;
-  const canStart = isOllama ? modelMatches : hasKey && modelMatches;
+  const canStart = isLocal ? modelMatches : hasKey && modelMatches;
 
   /* self-heal: the stored model must belong to the selected provider */
   useEffect(() => {
-    if (isOllama || modelMatches || tiers === undefined) return;
+    if (isLocal || modelMatches || tiers === undefined) return;
     const tier = settings.preset === "custom" ? "balanced" : settings.preset;
     settings.set({ model: tiers[tier] });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOllama, modelMatches, tiers, settings.preset]);
+  }, [isLocal, modelMatches, tiers, settings.preset]);
 
   /* live model list for the advanced select (static catalog as fallback) */
+  const localBaseUrl = isOllama
+    ? settings.ollamaBaseUrl
+    : isCompat
+      ? settings.openaiCompatBaseUrl
+      : undefined;
   const liveModelsQuery = useQuery({
     queryKey: [
       "provider-models",
       providerId,
       hasLocalKey ? "key" : "nokey",
-      isOllama ? settings.ollamaBaseUrl : "",
+      localBaseUrl ?? "",
     ],
     enabled: advancedOpen,
     queryFn: () =>
       api.providerModels(
         providerId,
         hasLocalKey ? (selectedSecret ?? undefined) : undefined,
-        isOllama ? settings.ollamaBaseUrl : undefined,
+        localBaseUrl,
       ),
   });
   const modelOptions =
@@ -392,7 +422,7 @@ export function W3Settings() {
               providersQuery.data?.find((p) => p.id === id)?.name ?? PROVIDER_LABELS[id] ?? id;
             const status = isConnected
               ? t("w3.provider.connected")
-              : id === "ollama"
+              : LOCAL_PROVIDERS.has(id)
                 ? t("w3.provider.unreachable")
                 : t("w3.provider.needsKey");
             return (
@@ -429,7 +459,7 @@ export function W3Settings() {
       </div>
 
       {/* Key / connection state for the selected provider */}
-      {isOllama ? (
+      {isOllama || isCompat ? (
         <div className="mb-5 flex items-center gap-[14px] border border-purple bg-hover px-[18px] py-4">
           <div
             className="flex h-8 w-8 items-center justify-center"
@@ -439,16 +469,25 @@ export function W3Settings() {
           </div>
           <div className="flex-1">
             <div className="mb-[2px] text-[13px] font-bold text-text">
-              {t("w3.key.ollamaTitle")}
+              {t(isCompat ? "w3.key.compatTitle" : "w3.key.ollamaTitle")}
             </div>
-            <div className="font-mono text-[11px] text-text2">{t("w3.key.ollamaSub")}</div>
+            <div className="font-mono text-[11px] text-text2">
+              {t(isCompat ? "w3.key.compatSub" : "w3.key.ollamaSub")}
+            </div>
           </div>
           <label className="flex items-center gap-2">
             <span className="font-mono text-[10px] text-text3">{t("w3.key.baseUrl")}</span>
             <input
               type="text"
-              value={settings.ollamaBaseUrl}
-              onChange={(e) => settings.set({ ollamaBaseUrl: e.target.value })}
+              value={isCompat ? settings.openaiCompatBaseUrl : settings.ollamaBaseUrl}
+              placeholder={isCompat ? "http://localhost:1234/v1" : "http://localhost:11434"}
+              onChange={(e) =>
+                settings.set(
+                  isCompat
+                    ? { openaiCompatBaseUrl: e.target.value }
+                    : { ollamaBaseUrl: e.target.value },
+                )
+              }
               className="w-[220px] border border-edge bg-ink px-[10px] py-[6px] font-mono text-[11px] text-text"
             />
           </label>
@@ -535,18 +574,18 @@ export function W3Settings() {
       )}
 
       {/* Quality tiers / local models */}
-      {isOllama ? (
+      {isLocal ? (
         <div className="mb-6 border border-line2 bg-raised">
           <div className="flex items-center gap-2 border-b border-line2 px-[18px] py-3">
             <span className="text-[13px] font-bold text-text">
-              {t("w3.provider.ollamaModelsTitle")}
+              {t(isCompat ? "w3.provider.compatModelsTitle" : "w3.provider.ollamaModelsTitle")}
             </span>
-            <span className="font-mono text-[10px] text-text3">{settings.ollamaBaseUrl}</span>
+            <span className="font-mono text-[10px] text-text3">{localBaseUrl}</span>
             <div className="flex-1" />
             <button
               type="button"
-              onClick={() => void ollamaModelsQuery.refetch()}
-              disabled={ollamaModelsQuery.isFetching}
+              onClick={() => void localModelsQuery.refetch()}
+              disabled={localModelsQuery.isFetching}
               className="flex cursor-pointer items-center gap-1 text-[10px] text-text3 hover:text-text disabled:cursor-default"
             >
               <svg
@@ -556,24 +595,24 @@ export function W3Settings() {
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="1.5"
-                className={ollamaModelsQuery.isFetching ? "animate-pxspin" : undefined}
+                className={localModelsQuery.isFetching ? "animate-pxspin" : undefined}
               >
                 <path d="M8.5 5 A3.5 3.5 0 1 1 5 1.5 M5 1.5 H8 M5 1.5 V4.5" />
               </svg>
               {t("w3.advanced.refresh")}
             </button>
           </div>
-          {ollamaModelsQuery.isPending ? (
+          {localModelsQuery.isPending ? (
             <div className="animate-pxpulse px-[18px] py-4 font-mono text-[11px] text-text3">
               {t("w3.provider.ollamaModelsLoading")}
             </div>
-          ) : ollamaModels.length === 0 ? (
+          ) : localModels.length === 0 ? (
             <div className="px-[18px] py-4 font-mono text-[11px] text-text3">
-              {t("w3.provider.ollamaEmpty")}
+              {t(isCompat ? "w3.provider.compatEmpty" : "w3.provider.ollamaEmpty")}
             </div>
           ) : (
             <div className="grid grid-cols-3 gap-[6px] p-3">
-              {ollamaModels.map((m) => {
+              {localModels.map((m) => {
                 const selected = settings.model === m;
                 return (
                   <button

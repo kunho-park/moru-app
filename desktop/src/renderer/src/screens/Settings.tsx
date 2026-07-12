@@ -12,7 +12,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
 import { formatInt } from "@/lib/format";
-import { modelDisplayName } from "@/lib/models";
+import { LOCAL_PROVIDERS, modelDisplayName } from "@/lib/models";
 import { WEB_URL, WebApiError, web } from "@/lib/web";
 import { useAccount } from "@/stores/account";
 import { useRouter } from "@/stores/router";
@@ -32,6 +32,7 @@ const PROVIDER_DECOR: Record<string, { bg: string; ink?: string; initial?: strin
   gemini: { bg: "#4285F4", keyPrefix: "AIza..." },
   openrouter: { bg: "#6366F1", keyPrefix: "sk-or-..." },
   ollama: { bg: "#A78BFA", ink: "#0A100D", initial: "L" },
+  "openai-compatible": { bg: "#38BDF8", ink: "#0A100D", initial: "C" },
 };
 
 function providerDecor(provider: Provider): { bg: string; ink: string; initial: string; keyPrefix?: string } {
@@ -309,8 +310,6 @@ function OllamaCard({ provider }: { provider: Provider | undefined }) {
   const ollamaBaseUrl = useSettings((s) => s.ollamaBaseUrl);
   const set = useSettings((s) => s.set);
 
-  const test = useMutation({ mutationFn: () => api.testProvider("ollama") });
-
   const liveModels = useQuery({
     queryKey: ["provider-models", "ollama", "nokey", ollamaBaseUrl],
     queryFn: () => api.providerModels("ollama", undefined, ollamaBaseUrl),
@@ -321,6 +320,10 @@ function OllamaCard({ provider }: { provider: Provider | undefined }) {
     models.length > 0
       ? models.map(modelDisplayName).join(", ")
       : t("settings.models.ollamaModelsUnknown");
+
+  const test = useMutation({
+    mutationFn: () => api.testProvider("ollama", undefined, models[0], ollamaBaseUrl),
+  });
 
   return (
     <div className="relative mb-3 overflow-hidden border border-purple bg-raised">
@@ -370,6 +373,157 @@ function OllamaCard({ provider }: { provider: Provider | undefined }) {
         >
           {t("settings.models.test")}
         </button>
+      </div>
+
+      <TestStatusLine status={testStatusOf(test)} />
+    </div>
+  );
+}
+
+/**
+ * OpenAI-compatible server card (LM Studio, llama.cpp, vLLM, ...): base
+ * URL + optional API key. Models come live from the server; the test call
+ * uses the first one since there is no static catalog.
+ */
+function CompatCard({
+  savedKey,
+  onSavedKeyChange,
+}: {
+  savedKey: string | null;
+  onSavedKeyChange: (key: string | null) => void;
+}) {
+  const { t } = useTranslation();
+  const baseUrl = useSettings((s) => s.openaiCompatBaseUrl);
+  const set = useSettings((s) => s.set);
+  const [keyInput, setKeyInput] = useState("");
+
+  const queryClient = useQueryClient();
+  const invalidateKeyCaches = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["secret", "openai-compatible"] });
+    await queryClient.invalidateQueries({ queryKey: ["secrets"] });
+    await queryClient.invalidateQueries({ queryKey: ["provider-models"] });
+  };
+
+  const liveModels = useQuery({
+    queryKey: ["provider-models", "openai-compatible", savedKey !== null ? "key" : "nokey", baseUrl],
+    queryFn: () => api.providerModels("openai-compatible", savedKey ?? undefined, baseUrl),
+  });
+  const models = liveModels.data?.source === "live" ? liveModels.data.models : [];
+  const modelsLine =
+    models.length > 0
+      ? models.map(modelDisplayName).join(", ")
+      : t("settings.models.compatModelsUnknown");
+
+  const test = useMutation({
+    mutationFn: () =>
+      api.testProvider(
+        "openai-compatible",
+        savedKey ?? (keyInput.trim().length > 0 ? keyInput.trim() : undefined),
+        models[0],
+        baseUrl,
+      ),
+  });
+
+  const saveKey = async () => {
+    const key = keyInput.trim();
+    if (key.length === 0) return;
+    await moru.secrets.set("apikey:openai-compatible", key);
+    onSavedKeyChange(key);
+    setKeyInput("");
+    await invalidateKeyCaches();
+  };
+
+  const removeKey = async () => {
+    await moru.secrets.delete("apikey:openai-compatible");
+    onSavedKeyChange(null);
+    test.reset();
+    await invalidateKeyCaches();
+  };
+
+  return (
+    <div className="relative mb-3 overflow-hidden border border-[#38BDF8] bg-raised">
+      <div
+        className="absolute -top-2 -right-2 h-[60px] w-[60px] opacity-20"
+        style={{
+          backgroundImage: "radial-gradient(circle at 2px 2px, #38BDF8 1px, transparent 1px)",
+          backgroundSize: "6px 6px",
+        }}
+      />
+      <div className="flex items-center gap-[14px] border-b border-line2 px-5 py-4">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center bg-[#38BDF8] font-mono text-sm font-bold text-[#0A100D]">
+          C
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="mb-[2px] flex items-center gap-2">
+            <span className="text-sm font-bold text-text">
+              {t("settings.models.compatTitle")}
+            </span>
+            <span className="bg-[rgba(56,189,248,0.08)] px-[5px] py-[2px] font-mono text-[10px] text-[#38BDF8]">
+              {t("settings.models.compatChip")}
+            </span>
+          </div>
+          <div className="truncate font-mono text-[11px] text-text3">{modelsLine}</div>
+        </div>
+        <div className="shrink-0 text-right">
+          {models.length > 0 && (
+            <div className="font-mono text-xs font-bold text-[#38BDF8]">
+              {t("settings.models.ollamaModelCount", { n: models.length })}
+            </div>
+          )}
+          <div className="font-mono text-[10px] text-text3">{baseUrl}</div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-[90px_1fr_auto] items-center gap-[10px] px-5 py-4">
+        <div className="text-xs font-semibold text-text2">{t("settings.models.baseUrlLabel")}</div>
+        <input
+          type="text"
+          value={baseUrl}
+          spellCheck={false}
+          placeholder="http://localhost:1234/v1"
+          onChange={(e) => set({ openaiCompatBaseUrl: e.target.value })}
+          className="min-w-0 border border-edge bg-card px-3 py-2 font-mono text-xs text-text placeholder:text-text4 focus:border-edge2"
+        />
+        <button
+          className="border border-accent bg-transparent px-3 py-2 text-[11px] font-semibold text-accent hover:bg-[rgba(61,220,132,0.08)] disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={test.isPending || models.length === 0}
+          onClick={() => test.mutate()}
+        >
+          {t("settings.models.test")}
+        </button>
+
+        <div className="text-xs font-semibold text-text2">{t("settings.models.keyLabel")}</div>
+        {savedKey !== null ? (
+          <div className="flex min-w-0 items-center justify-between border border-edge bg-card px-3 py-2 font-mono text-xs text-text">
+            <span className="truncate">{maskKey(savedKey)}</span>
+          </div>
+        ) : (
+          <input
+            type="password"
+            value={keyInput}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder={t("settings.models.compatKeyPlaceholder")}
+            onChange={(e) => setKeyInput(e.target.value)}
+            className="min-w-0 border border-edge bg-card px-3 py-2 font-mono text-xs text-text placeholder:text-text4 focus:border-edge2"
+          />
+        )}
+        {savedKey !== null ? (
+          <button
+            className="border border-edge bg-transparent px-3 py-2 text-[11px] font-semibold text-text2 hover:border-red hover:text-red"
+            onClick={() => void removeKey()}
+          >
+            {t("settings.models.remove")}
+          </button>
+        ) : (
+          <button
+            className="border border-edge bg-transparent px-3 py-2 text-[11px] font-semibold text-text2 hover:border-edge2 hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={keyInput.trim().length === 0}
+            onClick={() => void saveKey()}
+          >
+            {t("settings.models.save")}
+          </button>
+        )}
       </div>
 
       <TestStatusLine status={testStatusOf(test)} />
@@ -444,7 +598,7 @@ function ModelsTab() {
             </div>
           )}
           {providers
-            .filter((p) => p.id !== "ollama")
+            .filter((p) => !LOCAL_PROVIDERS.has(p.id))
             .map((p) => (
               <ProviderCard
                 key={p.id}
@@ -454,6 +608,12 @@ function ModelsTab() {
               />
             ))}
           <OllamaCard provider={providers.find((p) => p.id === "ollama")} />
+          <CompatCard
+            savedKey={savedKeys["openai-compatible"] ?? null}
+            onSavedKeyChange={(key) =>
+              setSavedKeys((prev) => ({ ...prev, "openai-compatible": key }))
+            }
+          />
         </>
       )}
     </>

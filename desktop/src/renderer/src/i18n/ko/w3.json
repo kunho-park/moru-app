@@ -19,7 +19,9 @@
     "unreachable": "미연결",
     "ollamaModelsTitle": "설치된 로컬 모델",
     "ollamaModelsLoading": "로컬 모델 확인 중…",
-    "ollamaEmpty": "모델을 찾지 못했어요 — Ollama가 실행 중인지 확인해 주세요"
+    "ollamaEmpty": "모델을 찾지 못했어요 — Ollama가 실행 중인지 확인해 주세요",
+    "compatModelsTitle": "서버에 로드된 모델",
+    "compatEmpty": "모델을 찾지 못했어요 — 서버 실행 여부와 주소를 확인해 주세요 (예: http://localhost:1234/v1)"
   },
   "preset": {
     "recommended": "추천",
@@ -59,6 +61,8 @@
     "testing": "확인 중…",
     "ollamaTitle": "Ollama · API 키 필요 없음",
     "ollamaSub": "완전 무료 · 로컬 실행",
+    "compatTitle": "OpenAI 호환 서버 · API 키 필요 없음",
+    "compatSub": "LM Studio · llama.cpp · vLLM — 주소에 /v1 포함",
     "baseUrl": "BASE URL"
   },
   "options": {

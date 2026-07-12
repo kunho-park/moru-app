@@ -15,6 +15,8 @@ from moru_engine.dspy_modules import (
 def test_resolve_tier_local_vs_hosted() -> None:
     assert resolve_tier("ollama_chat/qwen3:8b") == "local"
     assert resolve_tier("ollama/llama3") == "local"
+    # OpenAI-compatible local servers (LM Studio, llama.cpp) via LiteLLM.
+    assert resolve_tier("hosted_vllm/qwen2.5-7b-instruct") == "local"
     assert resolve_tier("openai/gpt-4o-mini") == "default"
     assert resolve_tier("anthropic/claude-sonnet-4-5") == "default"
     assert resolve_tier("openrouter/anthropic/claude-sonnet-4.5") == "default"

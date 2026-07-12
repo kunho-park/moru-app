@@ -110,10 +110,10 @@ export const api = {
       }),
     }),
   providers: () => request<Provider[]>("/providers"),
-  testProvider: (provider: string, apiKey?: string, model?: string) =>
+  testProvider: (provider: string, apiKey?: string, model?: string, apiBase?: string) =>
     request<ProviderTestResult>("/providers/test", {
       method: "POST",
-      body: JSON.stringify({ provider, api_key: apiKey, model }),
+      body: JSON.stringify({ provider, api_key: apiKey, model, api_base: apiBase }),
     }),
   providerModels: (provider: string, apiKey?: string, apiBase?: string) =>
     request<ProviderModels>("/providers/models", {

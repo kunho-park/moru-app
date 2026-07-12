@@ -18,12 +18,19 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-__all__ = ["TermCandidate", "mine_candidates"]
+__all__ = [
+    "NAME_KEY_RE",
+    "TermCandidate",
+    "clean_text",
+    "is_name_value",
+    "mine_candidates",
+]
 
-#: Lang-key prefixes whose values name game content.
-_NAME_KEY_RE = re.compile(
+#: Lang-key prefixes whose values name game content. Group 1 captures the
+#: matched prefix word (e.g. "item") for category mapping in pair_harvester.
+NAME_KEY_RE = re.compile(
     r"(?:^|[./:])"
-    r"(?:item|block|entity|effect|enchantment|biome|material|fluid|spell"
+    r"(item|block|entity|effect|enchantment|biome|material|fluid|spell"
     r"|structure|dimension|attribute)s?[./:]",
     re.IGNORECASE,
 )
@@ -69,12 +76,13 @@ class TermCandidate:
         return f"{self.term} (x{self.count}){ctx}"
 
 
-def _clean(value: str) -> str:
+def clean_text(value: str) -> str:
+    """Strip formatting codes/placeholders and collapse whitespace."""
     return " ".join(_NOISE_RE.sub(" ", value).split())
 
 
-def _is_name_value(value: str) -> bool:
-    """Short noun-phrase check for name-key values."""
+def is_name_value(value: str) -> bool:
+    """Short noun-phrase check for (cleaned) name-key values."""
     if not value or len(value) > _MAX_NAME_CHARS:
         return False
     if not _WORD_RE.search(value):
@@ -120,13 +128,13 @@ def mine_candidates(
             cand.contexts.append(cleaned_value[:_MAX_CONTEXT_CHARS])
 
     for entry_key, raw in entries.items():
-        value = _clean(raw)
+        value = clean_text(raw)
         if not value:
             continue
         # One bump per term per entry - a name-key value that also matches
         # the phrase regex must not double-count.
         found: dict[str, bool] = {}
-        if _NAME_KEY_RE.search(entry_key) and _is_name_value(value):
+        if NAME_KEY_RE.search(entry_key) and is_name_value(value):
             found[value] = True
         for match in _CAP_PHRASE_RE.finditer(value):
             words = match.group(0).split()

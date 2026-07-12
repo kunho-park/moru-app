@@ -11,7 +11,7 @@ import pytest
 
 import moru_engine.dspy_modules.lm as lm_module
 import moru_engine.pipeline.orchestrator as orchestrator
-from moru_engine.models import LanguageFilePair
+from moru_engine.models import Glossary, LanguageFilePair, TermRule
 from moru_engine.pipeline.orchestrator import (
     EntryResult,
     EntryStatus,
@@ -118,6 +118,165 @@ async def test_identifier_source_is_skipped_before_the_llm(
     assert entry.translated_text == identifier
     assert translator.batches == [{"normal": "Hello world"}]
     assert result.stats.categories == {"scripts": 2}
+
+
+class GlossaryRecordingTranslator:
+    """Record the (glossary, entries) pair every LLM batch received."""
+
+    def __init__(self) -> None:
+        self.batches: list[tuple[str, dict[str, str]]] = []
+
+    async def acall(
+        self,
+        *,
+        source_lang: str,
+        target_lang: str,
+        context: str,
+        glossary: str,
+        entries: dict[str, str],
+    ) -> dspy.Prediction:
+        self.batches.append((glossary, dict(entries)))
+        return dspy.Prediction(
+            translations={key: f"KO {text}" for key, text in entries.items()},
+            failed={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_mod_translations_feed_glossary_and_copies_retranslate(
+    tmp_path: Path,
+) -> None:
+    """Paired mod lang files seed the glossary; en_us copies re-translate.
+
+    The ko_kr file ships one real translation (reused verbatim AND
+    harvested as a term rule for the rest of the pack) and one untouched
+    English copy (which must reach the LLM instead of being skipped).
+    """
+    modpack_path = tmp_path / "modpack"
+    lang_dir = modpack_path / "kubejs/assets/farm/lang"
+    lang_dir.mkdir(parents=True)
+    (lang_dir / "en_us.json").write_text(
+        json.dumps(
+            {
+                "item.farm.copper_hoe": "Copper Hoe",
+                "item.farm.copper_axe": "Copper Axe",
+                "gui.farm.greeting": "Sharpen your Copper Hoe",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (lang_dir / "ko_kr.json").write_text(
+        json.dumps(
+            {
+                "item.farm.copper_hoe": "구리 괭이",
+                "item.farm.copper_axe": "Copper Axe",
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = LanguageFilePair(
+        source_path=lang_dir / "en_us.json",
+        target_path=lang_dir / "ko_kr.json",
+    )
+    scan_result = ScanResult(
+        modpack_path=modpack_path,
+        paired_files=[pair],
+        translation_files=[
+            TranslationFile(
+                input_path=str(lang_dir / "en_us.json"), file_type="kubejs"
+            )
+        ],
+    )
+    config = PipelineConfig(
+        modpack_path=modpack_path,
+        output_dir=tmp_path / "out",
+        use_tm=False,
+        use_user_glossary=False,
+        use_vanilla_glossary=False,
+    )
+    translator = GlossaryRecordingTranslator()
+    pipeline = TranslationPipeline(config, lm=dspy.utils.DummyLM([]))
+    pipeline.translator = translator
+    try:
+        result = await pipeline.run(scan_result)
+    finally:
+        pipeline.close()
+
+    # Harvested rule captured on the result for retry/retranslate reuse.
+    assert result.glossary is not None
+    rule = next(
+        r for r in result.glossary.term_rules if r.aliases == ["Copper Hoe"]
+    )
+    assert rule.term_ko == "구리 괭이"
+
+    # Real existing translation reused verbatim.
+    hoe = next(e for e in result.entries if e.key == "item.farm.copper_hoe")
+    assert hoe.status is EntryStatus.SKIPPED
+    assert hoe.translated_text == "구리 괭이"
+
+    # The en_us copy is NOT treated as an existing translation.
+    axe = next(e for e in result.entries if e.key == "item.farm.copper_axe")
+    assert axe.status is not EntryStatus.SKIPPED
+    assert axe.translated_text == "KO Copper Axe"
+
+    # Batches whose text mentions the term get the harvested rule in the
+    # prompt glossary.
+    greeting_glossaries = [
+        glossary
+        for glossary, entries in translator.batches
+        if "gui.farm.greeting" in entries
+    ]
+    assert greeting_glossaries
+    assert all("구리 괭이" in text for text in greeting_glossaries)
+
+
+@pytest.mark.asyncio
+async def test_retranslate_entry_reuses_stored_run_glossary(
+    tmp_path: Path,
+) -> None:
+    """retranslate_entry must see the run's own glossary, not a rebuild.
+
+    Harvested mod terms are run-scoped: with the user store disabled, the
+    only way the term below can reach the prompt is via result.glossary.
+    """
+    config = PipelineConfig(
+        modpack_path=tmp_path,
+        use_tm=False,
+        use_user_glossary=False,
+        use_vanilla_glossary=False,
+    )
+    result = PipelineResult(
+        config=config,
+        glossary=Glossary(
+            term_rules=[
+                TermRule(
+                    term_ko="구리 괭이",
+                    preferred_style="용어 고정",
+                    aliases=["Copper Hoe"],
+                )
+            ]
+        ),
+        entries=[
+            EntryResult(
+                key="gui.farm.greeting",
+                file="kubejs/assets/farm/lang/en_us.json",
+                source_text="Sharpen your Copper Hoe",
+                status=EntryStatus.FAILED,
+                errors=["boom"],
+            )
+        ],
+    )
+    translator = GlossaryRecordingTranslator()
+    pipeline = TranslationPipeline(config, lm=dspy.utils.DummyLM([]))
+    pipeline.translator = translator
+    try:
+        entry = await pipeline.retranslate_entry(result, "gui.farm.greeting")
+    finally:
+        pipeline.close()
+
+    assert entry.status is EntryStatus.MODIFIED
+    assert entry.translated_text == "KO Sharpen your Copper Hoe"
+    assert any("구리 괭이" in glossary for glossary, _ in translator.batches)
 
 
 def test_category_stats_bucket_refresh_and_upload_payload(

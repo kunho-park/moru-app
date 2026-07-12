@@ -29,6 +29,12 @@ from ..community import (
 )
 from ..dspy_modules import GlossaryExtractor, build_lm, load_translator
 from ..dspy_modules.lm import token_usage
+from ..glossary.pair_harvester import (
+    TranslatedTerm,
+    build_term_rules,
+    collect_translated_terms,
+    is_untranslated_copy,
+)
 from ..glossary.term_miner import TermCandidate, mine_candidates
 from ..handlers.base import create_default_registry
 from ..models import Glossary, TermRule, ValidationSeverity
@@ -181,6 +187,12 @@ class PipelineConfig(BaseModel):
     #: shared platformdirs location used by the sidecar server.
     use_user_glossary: bool = True
     glossary_store_dir: Path | None = None
+    #: Harvest terminology from lang files the pack's mods already ship in
+    #: the configured target locale alongside the source locale (e.g.
+    #: en_us + ko_kr side by side). Deterministic and LLM-free; only
+    #: unanimous source→target pairs become rules, and the user glossary
+    #: store always wins on overlap.
+    use_mod_translations: bool = True
     extract_glossary: bool = False
     #: Cap on mined term candidates sent to the curation LLM. Candidates
     #: come from a deterministic whole-corpus scan (term_miner), not from
@@ -210,6 +222,11 @@ class PipelineResult(BaseModel):
     output_files: list[Path] = Field(default_factory=list)
     stats: PipelineStats = Field(default_factory=PipelineStats)
     artifact_id: str | None = None
+    #: Effective glossary of the full run. retry_failed/retranslate_entry
+    #: reuse it so post-run fixes see the exact same rules - harvested mod
+    #: terms and LLM-curated terms are run-scoped and would be lost by a
+    #: bare rebuild.
+    glossary: Glossary | None = None
 
     @property
     def failed(self) -> list[EntryResult]:
@@ -305,7 +322,10 @@ class TranslationPipeline:
     # -- glossary ----------------------------------------------------------
 
     async def _build_glossary(
-        self, pairs: list[LanguageFilePair]
+        self,
+        pairs: list[LanguageFilePair],
+        *,
+        harvest_pairs: list[LanguageFilePair] | None = None,
     ) -> tuple[Glossary, str]:
         glossary = Glossary(
             locale_source=self.config.source_locale,
@@ -322,6 +342,17 @@ class TranslationPipeline:
                 )
             )
 
+        if self.config.use_mod_translations and harvest_pairs:
+            harvested = await self._harvest_mod_terms(harvest_pairs, glossary)
+            if harvested:
+                glossary = glossary.merge_with(
+                    Glossary(
+                        locale_source=self.config.source_locale,
+                        locale_target=self.config.target_locale,
+                        term_rules=harvested,
+                    )
+                )
+
         if self.config.extract_glossary and pairs:
             corpus: dict[str, str] = {}
             for pair in pairs:
@@ -334,7 +365,7 @@ class TranslationPipeline:
                     data = {
                         key: value
                         for key, value in data.items()
-                        if not existing.get(key, "").strip()
+                        if is_untranslated_copy(value, existing.get(key, ""))
                     }
                 for key, value in data.items():
                     corpus[f"{pair.source_path}:{key}"] = value
@@ -432,6 +463,50 @@ class TranslationPipeline:
             ).encode("utf-8")
         ).hexdigest()[:12]
         return glossary, fingerprint
+
+    async def _harvest_mod_terms(
+        self, pairs: list[LanguageFilePair], glossary: Glossary
+    ) -> list[TermRule]:
+        """Deterministic terms from lang files mods ship in the target
+        locale (see pair_harvester). Harvest scope is every paired file in
+        the scan - independent of the translate scope, since evidence from
+        an excluded category is still evidence. Best-effort: one broken
+        file skips that file only."""
+
+        async def harvest_one(pair: LanguageFilePair) -> list[TranslatedTerm]:
+            handler = self.registry.get_handler(pair.source_path)
+            if handler is None or pair.target_path is None:
+                return []
+            try:
+                # File-semaphore bound: a large pack can pair hundreds of
+                # lang files, and an unbounded gather would exhaust fds.
+                async with self._file_semaphore:
+                    source_data = await handler.extract(pair.source_path)
+                    target_data = await handler.extract(pair.target_path)
+            except Exception:  # noqa: BLE001 — enhancement path, never fatal
+                logger.warning(
+                    "Mod translation harvest failed for %s",
+                    pair.source_path,
+                    exc_info=True,
+                )
+                return []
+            return collect_translated_terms(source_data, target_data)
+
+        candidates = [p for p in pairs if p.has_existing_translation]
+        if not candidates:
+            return []
+        per_file = await asyncio.gather(*(harvest_one(p) for p in candidates))
+        rules = build_term_rules(
+            (term for terms in per_file for term in terms),
+            {alias for rule in glossary.term_rules for alias in rule.aliases},
+        )
+        if rules:
+            logger.info(
+                "Mod translation harvest: %d terms from %d translated lang files",
+                len(rules),
+                len(candidates),
+            )
+        return rules
 
     def _persist_extracted_terms(self, rules: list[TermRule]) -> None:
         """Extracted terms land in the user glossary store so the hub's
@@ -641,8 +716,14 @@ class TranslationPipeline:
             existing: dict[str, str] = {}
             if pair.target_path is not None and pair.target_path.exists():
                 existing = dict(await handler.extract(pair.target_path))
+            # Reuse only REAL existing translations. Mods routinely copy the
+            # source-locale file into other locales (wholly or partially);
+            # identical values are untranslated filler that must reach the
+            # LLM.
             existing_keys = {
-                key for key in source_data if existing.get(key, "").strip()
+                key
+                for key, text in source_data.items()
+                if not is_untranslated_copy(text, existing.get(key, ""))
             }
             work_total = len(source_data) - len(existing_keys)
 
@@ -927,7 +1008,13 @@ class TranslationPipeline:
             result.stats.total_files = len(pairs)
 
             self._emit("progress", {"stage": "glossary", "done": 0, "total": 1})
-            glossary, glossary_version = await self._build_glossary(pairs)
+            # Harvest scope = every paired file in the scan, regardless of
+            # the include_categories translate scope: existing translations
+            # in an excluded category are still terminology evidence.
+            glossary, glossary_version = await self._build_glossary(
+                pairs, harvest_pairs=scan_result.paired_files
+            )
+            result.glossary = glossary
             validator = TranslationValidator(
                 glossary if glossary.has_rules else None
             )
@@ -1012,7 +1099,9 @@ class TranslationPipeline:
         failed = result.failed
         if not failed:
             return result
-        glossary, glossary_version = await self._build_glossary([])
+        glossary = result.glossary
+        if glossary is None:  # result predates run-scoped glossary storage
+            glossary, _ = await self._build_glossary([])
         validator = TranslationValidator(glossary if glossary.has_rules else None)
 
         by_file: dict[str, list[EntryResult]] = {}
@@ -1062,7 +1151,9 @@ class TranslationPipeline:
         entry = next((e for e in result.entries if e.key == key), None)
         if entry is None:
             raise KeyError(key)
-        glossary, _ = await self._build_glossary([])
+        glossary = result.glossary
+        if glossary is None:  # result predates run-scoped glossary storage
+            glossary, _ = await self._build_glossary([])
         validator = TranslationValidator(glossary if glossary.has_rules else None)
 
         protector = PlaceholderProtector()

@@ -145,6 +145,7 @@ async def _cmd_translate(args: argparse.Namespace) -> int:
         api_base=args.api_base,
         use_tm=not args.no_tm,
         extract_glossary=args.extract_glossary,
+        use_mod_translations=not args.no_mod_terms,
         max_refine=args.max_refine,
         temperature=args.temperature,
     )
@@ -204,6 +205,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--extract-glossary",
         action="store_true",
         help="LLM glossary term extraction before translating",
+    )
+    translate.add_argument(
+        "--no-mod-terms",
+        action="store_true",
+        help="skip harvesting terms from mods' own target-locale lang files",
     )
     translate.add_argument("--max-refine", type=int, default=2)
     translate.add_argument(

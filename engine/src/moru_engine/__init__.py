@@ -23,7 +23,7 @@ from .placeholder import PlaceholderError, PlaceholderProtector
 from .scanner import ModpackScanner, ScanResult, scan_modpack
 from .validator import TranslationValidator
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 
 __all__ = [
     "BatchTranslator",

@@ -9,7 +9,9 @@ Object.defineProperty(globalThis, "window", {
   },
 });
 
-const { estimateUsage } = await import("./models.ts?usage-estimate-test");
+const { estimateUsage, healedModel, PROVIDER_TIERS } = await import(
+  "./models.ts?usage-estimate-test"
+);
 const { costUsd, priceForModel } = await import("./pricing.ts?usage-estimate-test");
 
 afterAll(() => {
@@ -72,4 +74,26 @@ test("uses lower known direct-provider rates but preserves OpenRouter pricing", 
     ...live,
     source: "openrouter",
   });
+});
+
+test("healedModel repairs stale tier models after catalog refreshes", () => {
+  const tiers = PROVIDER_TIERS.gemini;
+  // retired recommendation persisted from an older build
+  expect(
+    healedModel({ preset: "balanced", model: "gemini/gemini-2.5-flash" }, "gemini", tiers),
+  ).toBe(tiers.balanced);
+  // model from another provider falls back to the tier (balanced for custom)
+  expect(
+    healedModel({ preset: "custom", model: "openai/gpt-5.6-luna" }, "gemini", tiers),
+  ).toBe(tiers.balanced);
+  // aligned tier selection stays untouched
+  expect(healedModel({ preset: "fast", model: tiers.fast }, "gemini", tiers)).toBe(null);
+  // custom model of the right provider is user intent - never overridden
+  expect(
+    healedModel({ preset: "custom", model: "gemini/gemini-2.5-pro" }, "gemini", tiers),
+  ).toBe(null);
+  // providers without tiers (local) never heal
+  expect(
+    healedModel({ preset: "balanced", model: "ollama_chat/qwen3:8b" }, "ollama", undefined),
+  ).toBe(null);
 });

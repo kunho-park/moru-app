@@ -18,6 +18,7 @@ import {
   PROVIDER_TIERS,
   estimateUsage,
   modelDisplayName,
+  healedModel,
   providerIdOf,
 } from "@/lib/models";
 import { resolveProviderSecret } from "@/lib/providerSecrets";
@@ -253,13 +254,15 @@ export function W3Settings() {
   const modelMatches = providerIdOf(settings.model) === providerId;
   const canStart = isLocal ? modelMatches : hasKey && modelMatches;
 
-  /* self-heal: the stored model must belong to the selected provider */
+  /* self-heal: keep the persisted model consistent with the provider and,
+     for tier presets, with the tier's current recommendation (catalog
+     refreshes retire old models; see healedModel). */
   useEffect(() => {
-    if (isLocal || modelMatches || tiers === undefined) return;
-    const tier = settings.preset === "custom" ? "balanced" : settings.preset;
-    settings.set({ model: tiers[tier] });
+    if (isLocal) return;
+    const healed = healedModel(settings, providerId, tiers);
+    if (healed !== null) settings.set({ model: healed });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLocal, modelMatches, tiers, settings.preset]);
+  }, [isLocal, providerId, tiers, settings.preset, settings.model]);
 
   /* live model list for the advanced select (static catalog as fallback) */
   const localBaseUrl = isOllama

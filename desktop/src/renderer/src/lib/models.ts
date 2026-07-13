@@ -119,6 +119,30 @@ export function providerIdOf(model: string): string {
   return PREFIX_TO_PROVIDER[prefix] ?? prefix;
 }
 
+/**
+ * Self-heal for persisted model settings. Returns the model to store, or
+ * null when the stored selection is valid: the model must belong to the
+ * selected provider, and a tier preset must track the tier's CURRENT
+ * model - catalog refreshes retire old recommendations, and a stale
+ * persisted model would keep running a dead model while the tier card
+ * shows the new one as selected. A custom model of the right provider is
+ * user intent and is never overridden.
+ */
+export function healedModel(
+  settings: { preset: PresetId | "custom"; model: string },
+  providerId: string,
+  tiers: Record<PresetId, string> | undefined,
+): string | null {
+  if (tiers === undefined) return null;
+  if (providerIdOf(settings.model) !== providerId) {
+    return tiers[settings.preset === "custom" ? "balanced" : settings.preset];
+  }
+  if (settings.preset !== "custom" && settings.model !== tiers[settings.preset]) {
+    return tiers[settings.preset];
+  }
+  return null;
+}
+
 /** Short display name: "anthropic/claude-haiku-4-5" -> "Claude Haiku 4.5". */
 export function modelDisplayName(model: string): string {
   const bare = model.split("/").at(-1) ?? model;

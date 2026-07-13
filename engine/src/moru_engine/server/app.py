@@ -68,11 +68,11 @@ _PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "OpenAI",
         "env": "OPENAI_API_KEY",
         "models": [
+            "openai/gpt-5.6-sol",
+            "openai/gpt-5.6-terra",
+            "openai/gpt-5.6-luna",
             "openai/gpt-4.1",
             "openai/gpt-4.1-mini",
-            "openai/gpt-4o",
-            "openai/gpt-4o-mini",
-            "openai/o4-mini",
         ],
     },
     {
@@ -80,9 +80,9 @@ _PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "Anthropic",
         "env": "ANTHROPIC_API_KEY",
         "models": [
-            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-sonnet-4-6",
             "anthropic/claude-haiku-4-5",
-            "anthropic/claude-opus-4-1",
+            "anthropic/claude-opus-4-8",
         ],
     },
     {
@@ -90,9 +90,9 @@ _PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "Google Gemini",
         "env": "GEMINI_API_KEY",
         "models": [
-            "gemini/gemini-2.5-pro",
-            "gemini/gemini-2.5-flash",
-            "gemini/gemini-2.5-flash-lite",
+            "gemini/gemini-3.1-pro-preview",
+            "gemini/gemini-3.5-flash",
+            "gemini/gemini-3.1-flash-lite",
         ],
     },
     {
@@ -112,10 +112,10 @@ _PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "OpenRouter",
         "env": "OPENROUTER_API_KEY",
         "models": [
-            "openrouter/anthropic/claude-sonnet-4.5",
+            "openrouter/anthropic/claude-sonnet-4.6",
             "openrouter/anthropic/claude-haiku-4.5",
-            "openrouter/openai/gpt-4o-mini",
-            "openrouter/google/gemini-2.5-flash",
+            "openrouter/openai/gpt-5.6-luna",
+            "openrouter/google/gemini-3.5-flash",
             "openrouter/deepseek/deepseek-chat-v3-0324",
         ],
     },

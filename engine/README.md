@@ -18,7 +18,7 @@ uv sync
 uv run python -m moru_engine.cli scan ./test/modpack
 
 # 번역 실행
-uv run python -m moru_engine.cli translate ./test/modpack --model openai/gpt-4o-mini
+uv run python -m moru_engine.cli translate ./test/modpack --model openai/gpt-5.6-luna
 ```
 
 `--source`/`--target`으로 로케일(기본 `en_us` → `ko_kr`), `--api-base`로

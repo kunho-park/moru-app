@@ -195,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     translate.add_argument("--target", default="ko_kr", help="target locale (xx_yy)")
     translate.add_argument(
         "--model",
-        default="openai/gpt-4o-mini",
+        default="openai/gpt-5.6-luna",
         help="LiteLLM model string (API key via provider env var)",
     )
     translate.add_argument("--api-base", default=None, help="override base URL (Ollama)")

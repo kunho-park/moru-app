@@ -159,7 +159,7 @@ class PipelineConfig(BaseModel):
     #: pack.mcmeta pack_format for the generated resource pack.
     pack_format: int = DEFAULT_PACK_FORMAT
 
-    model: str = "openai/gpt-4o-mini"
+    model: str = "openai/gpt-5.6-luna"
     api_key: str | None = None
     api_base: str | None = None
     temperature: float = 0.3

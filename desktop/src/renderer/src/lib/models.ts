@@ -19,22 +19,32 @@ export interface ModelPrice {
 }
 
 export const MODEL_PRICES: Record<string, ModelPrice> = {
+  "openai/gpt-5.6-sol": { input: 5.0, output: 30.0, cacheRead: 0.5 },
+  "openai/gpt-5.6-terra": { input: 2.5, output: 15.0, cacheRead: 0.25 },
+  "openai/gpt-5.6-luna": { input: 1.0, output: 6.0, cacheRead: 0.1 },
   "openai/gpt-4.1": { input: 2.0, output: 8.0, cacheRead: 0.5 },
   "openai/gpt-4.1-mini": { input: 0.4, output: 1.6, cacheRead: 0.1 },
-  "openai/gpt-4o": { input: 2.5, output: 10.0, cacheRead: 1.25 },
-  "openai/gpt-4o-mini": { input: 0.15, output: 0.6, cacheRead: 0.075 },
-  "openai/o4-mini": { input: 1.1, output: 4.4, cacheRead: 0.275 },
-  "anthropic/claude-sonnet-4-5": { input: 3.0, output: 15.0, cacheRead: 0.3 },
+  "anthropic/claude-opus-4-8": { input: 5.0, output: 25.0, cacheRead: 0.5 },
+  "anthropic/claude-sonnet-4-6": { input: 3.0, output: 15.0, cacheRead: 0.3 },
   "anthropic/claude-haiku-4-5": { input: 1.0, output: 5.0, cacheRead: 0.1 },
-  "anthropic/claude-opus-4-1": { input: 15.0, output: 75.0, cacheRead: 1.5 },
-  "gemini/gemini-2.5-pro": { input: 1.25, output: 10.0, cacheRead: 0.31 },
-  "gemini/gemini-2.5-flash": { input: 0.3, output: 2.5, cacheRead: 0.075 },
-  "gemini/gemini-2.5-flash-lite": { input: 0.1, output: 0.4, cacheRead: 0.025 },
+  "gemini/gemini-3.1-pro-preview": { input: 2.0, output: 12.0, cacheRead: 0.2 },
+  "gemini/gemini-3.5-flash": { input: 1.5, output: 9.0, cacheRead: 0.15 },
+  "gemini/gemini-3.1-flash-lite": { input: 0.25, output: 1.5, cacheRead: 0.025 },
   "deepseek/deepseek-chat": { input: 0.27, output: 1.1, cacheRead: 0.07 },
   "deepseek/deepseek-reasoner": { input: 0.55, output: 2.19, cacheRead: 0.14 },
   "xai/grok-4": { input: 3.0, output: 15.0, cacheRead: 0.75 },
   "xai/grok-3": { input: 3.0, output: 15.0, cacheRead: 0.75 },
   "xai/grok-3-mini": { input: 0.3, output: 0.5, cacheRead: 0.075 },
+  // Retired/legacy models: no longer offered, kept so History still
+  // prices old sessions when the OpenRouter live table is unavailable.
+  "openai/gpt-4o": { input: 2.5, output: 10.0, cacheRead: 1.25 },
+  "openai/gpt-4o-mini": { input: 0.15, output: 0.6, cacheRead: 0.075 },
+  "openai/o4-mini": { input: 1.1, output: 4.4, cacheRead: 0.275 },
+  "anthropic/claude-sonnet-4-5": { input: 3.0, output: 15.0, cacheRead: 0.3 },
+  "anthropic/claude-opus-4-1": { input: 15.0, output: 75.0, cacheRead: 1.5 },
+  "gemini/gemini-2.5-pro": { input: 1.25, output: 10.0, cacheRead: 0.31 },
+  "gemini/gemini-2.5-flash": { input: 0.3, output: 2.5, cacheRead: 0.075 },
+  "gemini/gemini-2.5-flash-lite": { input: 0.1, output: 0.4, cacheRead: 0.025 },
 };
 
 /** Provider display order for the W3 provider selector. */
@@ -70,19 +80,19 @@ const PREFIX_TO_PROVIDER: Record<string, string> = {
  */
 export const PROVIDER_TIERS: Record<string, Record<PresetId, string>> = {
   openai: {
-    fast: "openai/gpt-4o-mini",
-    balanced: "openai/gpt-4.1-mini",
-    best: "openai/gpt-4.1",
+    fast: "openai/gpt-5.6-luna",
+    balanced: "openai/gpt-5.6-terra",
+    best: "openai/gpt-5.6-sol",
   },
   anthropic: {
     fast: "anthropic/claude-haiku-4-5",
-    balanced: "anthropic/claude-sonnet-4-5",
-    best: "anthropic/claude-opus-4-1",
+    balanced: "anthropic/claude-sonnet-4-6",
+    best: "anthropic/claude-opus-4-8",
   },
   gemini: {
-    fast: "gemini/gemini-2.5-flash-lite",
-    balanced: "gemini/gemini-2.5-flash",
-    best: "gemini/gemini-2.5-pro",
+    fast: "gemini/gemini-3.1-flash-lite",
+    balanced: "gemini/gemini-3.5-flash",
+    best: "gemini/gemini-3.1-pro-preview",
   },
   deepseek: {
     fast: "deepseek/deepseek-chat",
@@ -95,9 +105,9 @@ export const PROVIDER_TIERS: Record<string, Record<PresetId, string>> = {
     best: "xai/grok-4",
   },
   openrouter: {
-    fast: "openrouter/openai/gpt-4o-mini",
+    fast: "openrouter/openai/gpt-5.6-luna",
     balanced: "openrouter/anthropic/claude-haiku-4.5",
-    best: "openrouter/anthropic/claude-sonnet-4.5",
+    best: "openrouter/anthropic/claude-sonnet-4.6",
   },
 };
 

@@ -116,7 +116,7 @@ def main() -> int:
     parser.add_argument("--api-base", default=None, help="override base URL for the model under optimization (Ollama)")
     parser.add_argument(
         "--reflection-model",
-        default="anthropic/claude-sonnet-4-5",
+        default="anthropic/claude-sonnet-4-6",
         help="large model for GEPA reflection",
     )
     parser.add_argument("--reflection-api-base", default=None)

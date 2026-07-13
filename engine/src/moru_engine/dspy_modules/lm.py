@@ -1,7 +1,7 @@
 """LM factory and engine-wide DSPy configuration.
 
 Any provider is addressed by a single LiteLLM model string
-("openai/gpt-4o-mini", "anthropic/...", "ollama_chat/qwen3:8b", ...);
+("openai/gpt-5.6-luna", "anthropic/...", "ollama_chat/qwen3:8b", ...);
 no per-provider adapter code is needed.
 """
 
@@ -30,7 +30,7 @@ def build_lm(
     """Build a dspy.LM from a LiteLLM model string.
 
     Args:
-        model: LiteLLM model identifier, e.g. "openai/gpt-4o-mini" or
+        model: LiteLLM model identifier, e.g. "openai/gpt-5.6-luna" or
             "ollama_chat/qwen3:8b".
         api_key: Provider API key; falls back to provider env vars.
         api_base: Override base URL (Ollama, proxies).

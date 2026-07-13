@@ -25,12 +25,12 @@ Exit codes: 0 = every pair adopted, 2 = some, 1 = none.
 
 Usage:
     # iterate freely on the validation split
-    uv run python tools/gate.py --model openrouter/openai/gpt-4o-mini \
+    uv run python tools/gate.py --model openrouter/openai/gpt-5.6-luna \
         --candidate edited.json --pairs en_us:ko_kr \
         --judge-model openrouter/google/gemini-3.5-flash
 
     # single confirmatory decision, then install on adoption
-    uv run python tools/gate.py --model openrouter/openai/gpt-4o-mini \
+    uv run python tools/gate.py --model openrouter/openai/gpt-5.6-luna \
         --candidate edited.json --pairs en_us:ko_kr \
         --judge-model openrouter/google/gemini-3.5-flash --final --apply
 """

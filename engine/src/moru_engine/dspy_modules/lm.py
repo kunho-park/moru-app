@@ -44,6 +44,14 @@ def build_lm(
         "max_tokens": max_tokens,
         "cache": cache,
     }
+    # GPT-5-family models (direct "openai/gpt-5*" or via OpenRouter) accept
+    # only the default temperature: LiteLLM's gpt-5 transformation raises
+    # UnsupportedParamsError for temperature != 1 on ids missing from its
+    # bundled model map (e.g. the 5.6 family). temperature=None is never
+    # forwarded (dspy keeps the key, LiteLLM skips None), so the provider
+    # default applies.
+    if model.rsplit("/", 1)[-1].lower().startswith("gpt-5"):
+        kwargs["temperature"] = None
     if model.startswith("ollama") and "reasoning_effort" not in extra:
         # Local thinking models (qwen3 family) burn the whole completion
         # budget on reasoning_content and return empty text. Translation

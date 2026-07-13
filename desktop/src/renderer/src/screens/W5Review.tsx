@@ -259,7 +259,8 @@ export function W5Review() {
   const scanState = useWizard((s) => s.scanState);
   const sourceLocale = useWizard((s) => s.sourceLocale);
   const targetLocale = useWizard((s) => s.targetLocale);
-  const model = useSettings((s) => s.model);
+  const settingsModel = useSettings((s) => s.model);
+  const model = useWizard((s) => s.model) ?? settingsModel;
   const queryClient = useQueryClient();
 
   const [filter, setFilter] = useState<EntryFilter>("all");

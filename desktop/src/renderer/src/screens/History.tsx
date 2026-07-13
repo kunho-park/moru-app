@@ -14,7 +14,7 @@ import { costUsd, priceForModel, usePricingTable, type PricingTable } from "@/li
 import { useRouter } from "@/stores/router";
 import { useSessions, type SessionRecord } from "@/stores/sessions";
 import { useSettings } from "@/stores/settings";
-import { useWizard } from "@/stores/wizard";
+import { useSessionJobs, useWizard } from "@/stores/wizard";
 
 type StatusFilter = "all" | "done" | "running" | "stopped";
 
@@ -22,6 +22,10 @@ const PAGE_SIZE = 20;
 
 const GRID =
   "grid grid-cols-[44px_1fr_120px_100px_100px_100px_120px_150px] gap-3";
+
+/** Overflow-menu item; reopenable rows fold folder/retry/delete behind ⋯. */
+const MENU_ITEM =
+  "block w-full px-3 py-1.5 text-left font-mono text-[10px] font-semibold text-text2 hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40";
 
 /** Estimated USD spend of a finished session (pricing table x final token counts). */
 function sessionCostUsd(s: SessionRecord, table: PricingTable | null): number {
@@ -78,14 +82,29 @@ function StatusBadge({ status }: { status: SessionRecord["status"] }): React.JSX
 interface SessionRowProps {
   s: SessionRecord;
   isCurrent: boolean;
+  /** engine still holds this session's translate job (this app run) */
+  canReopen: boolean;
   lang: "ko" | "en";
   onView: () => void;
+  onReview: () => void;
+  onExport: () => void;
   onRetry: () => void;
   onDelete: () => void;
 }
 
-function SessionRow({ s, isCurrent, lang, onView, onRetry, onDelete }: SessionRowProps) {
+function SessionRow({
+  s,
+  isCurrent,
+  canReopen,
+  lang,
+  onView,
+  onReview,
+  onExport,
+  onRetry,
+  onDelete,
+}: SessionRowProps) {
   const { t } = useTranslation();
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const initials = packInitials(s.modpackName);
   const running = s.status === "running";
@@ -153,7 +172,11 @@ function SessionRow({ s, isCurrent, lang, onView, onRetry, onDelete }: SessionRo
         {formatRelative(s.finishedAt ?? s.createdAt, lang)}
       </div>
 
-      <div className="flex items-center justify-end gap-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+      <div
+        className={`relative flex items-center justify-end gap-1.5 transition-opacity focus-within:opacity-100 group-hover:opacity-100 ${
+          menuOpen ? "opacity-100" : "opacity-0"
+        }`}
+      >
         {running && isCurrent && (
           <button
             className={`${actionBase} border-accent bg-[rgba(61,220,132,0.08)] text-accent hover:bg-[rgba(61,220,132,0.15)]`}
@@ -162,31 +185,98 @@ function SessionRow({ s, isCurrent, lang, onView, onRetry, onDelete }: SessionRo
             {t("history.action.view")}
           </button>
         )}
-        {s.status === "done" && (
-          <button
-            className={`${actionBase} border-edge text-text2 hover:border-edge2 hover:text-text disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-edge disabled:hover:text-text2`}
-            disabled={s.exportZipPath === null}
-            onClick={() => {
-              if (s.exportZipPath !== null) void moru.showItemInFolder(s.exportZipPath);
-            }}
-          >
-            {t("common.action.openFolder")}
-          </button>
+        {canReopen ? (
+          <>
+            <button
+              className={`${actionBase} border-edge text-text2 hover:border-edge2 hover:text-text`}
+              onClick={onReview}
+            >
+              {t("history.action.review")}
+            </button>
+            <button
+              className={`${actionBase} border-edge text-text2 hover:border-edge2 hover:text-text`}
+              onClick={onExport}
+            >
+              {t("history.action.export")}
+            </button>
+            <div className="relative">
+              <button
+                className={`${actionBase} border-edge text-text2 hover:border-edge2 hover:text-text`}
+                aria-label={t("history.action.more")}
+                onClick={() => setMenuOpen((v) => !v)}
+              >
+                ⋯
+              </button>
+              {menuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
+                  <div className="absolute top-full right-0 z-20 mt-1 w-[150px] border border-edge bg-raised py-1">
+                    {s.status === "done" && (
+                      <button
+                        className={`${MENU_ITEM} hover:text-text`}
+                        disabled={s.exportZipPath === null}
+                        onClick={() => {
+                          setMenuOpen(false);
+                          if (s.exportZipPath !== null) void moru.showItemInFolder(s.exportZipPath);
+                        }}
+                      >
+                        {t("common.action.openFolder")}
+                      </button>
+                    )}
+                    {stopped && (
+                      <button
+                        className={`${MENU_ITEM} hover:text-text`}
+                        onClick={() => {
+                          setMenuOpen(false);
+                          onRetry();
+                        }}
+                      >
+                        {t("common.action.retry")}
+                      </button>
+                    )}
+                    <button
+                      className={`${MENU_ITEM} hover:text-red`}
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onDelete();
+                      }}
+                    >
+                      {t("common.action.delete")}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            {s.status === "done" && (
+              <button
+                className={`${actionBase} border-edge text-text2 hover:border-edge2 hover:text-text disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-edge disabled:hover:text-text2`}
+                disabled={s.exportZipPath === null}
+                onClick={() => {
+                  if (s.exportZipPath !== null) void moru.showItemInFolder(s.exportZipPath);
+                }}
+              >
+                {t("common.action.openFolder")}
+              </button>
+            )}
+            {stopped && (
+              <button
+                className={`${actionBase} border-edge text-text2 hover:border-edge2 hover:text-text`}
+                onClick={onRetry}
+              >
+                {t("common.action.retry")}
+              </button>
+            )}
+            <button
+              className={`${actionBase} border-edge text-text3 hover:border-red hover:text-red`}
+              onClick={onDelete}
+            >
+              {t("common.action.delete")}
+            </button>
+          </>
         )}
-        {stopped && (
-          <button
-            className={`${actionBase} border-edge text-text2 hover:border-edge2 hover:text-text`}
-            onClick={onRetry}
-          >
-            {t("common.action.retry")}
-          </button>
-        )}
-        <button
-          className={`${actionBase} border-edge text-text3 hover:border-red hover:text-red`}
-          onClick={onDelete}
-        >
-          {t("common.action.delete")}
-        </button>
       </div>
     </div>
   );
@@ -199,6 +289,8 @@ export function HistoryScreen(): React.JSX.Element {
   const remove = useSessions((s) => s.remove);
   const wizardSessionId = useWizard((s) => s.sessionId);
   const resumeSession = useWizard((s) => s.resumeSession);
+  const reopenSession = useWizard((s) => s.reopenSession);
+  const sessionJobs = useSessionJobs((s) => s.jobs);
   const lang = useSettings((s) => s.uiLanguage);
   const pricingTable = usePricingTable();
 
@@ -206,6 +298,7 @@ export function HistoryScreen(): React.JSX.Element {
   const [query, setQuery] = useState("");
   const [visible, setVisible] = useState(PAGE_SIZE);
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const counts = useMemo(() => {
     let done = 0;
@@ -246,6 +339,15 @@ export function HistoryScreen(): React.JSX.Element {
     { id: "running", label: t("history.filter.running"), count: counts.running },
     { id: "stopped", label: t("history.filter.stopped"), count: counts.stopped },
   ];
+
+  const reopen = async (sessionId: string, screen: "w5" | "w6"): Promise<void> => {
+    const result = await reopenSession(sessionId);
+    if (result === "ok") {
+      go(screen);
+      return;
+    }
+    setNotice(t(result === "busy" ? "history.reopen.busy" : "history.reopen.gone"));
+  };
 
   return (
     <div className="animate-fade-in-up px-10 py-8">
@@ -294,6 +396,18 @@ export function HistoryScreen(): React.JSX.Element {
           ))}
         </div>
       </div>
+
+      {notice !== null && (
+        <div className="mb-4 flex items-center justify-between gap-3 border border-amber/50 bg-amber/[0.08] px-3 py-2">
+          <span className="font-mono text-[11px] text-amber">{notice}</span>
+          <button
+            className="font-mono text-[11px] text-text3 hover:text-text"
+            onClick={() => setNotice(null)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {sessions.length === 0 ? (
         <div className="flex flex-col items-center border border-line2 bg-raised px-8 py-16">
@@ -351,8 +465,14 @@ export function HistoryScreen(): React.JSX.Element {
                 key={s.id}
                 s={s}
                 isCurrent={s.id === wizardSessionId}
+                canReopen={
+                  (s.status === "done" || s.status === "cancelled") &&
+                  sessionJobs[s.id] !== undefined
+                }
                 lang={lang}
                 onView={() => go("w4")}
+                onReview={() => void reopen(s.id, "w5")}
+                onExport={() => void reopen(s.id, "w6")}
                 onRetry={() => {
                   if (resumeSession(s.id)) go("w1");
                 }}

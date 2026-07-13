@@ -10,7 +10,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { UploadParams } from "../../../shared/engine";
+import type { JobEventFrame, UploadParams } from "../../../shared/engine";
 import { api, openJobEvents } from "@/lib/api";
 import { moru } from "@/lib/bridge";
 import { formatCompact, formatDuration, formatInt, formatUsd, packInitials } from "@/lib/format";
@@ -27,6 +27,30 @@ type UploadPhase =
   | { kind: "running" }
   | { kind: "done"; url: string | null }
   | { kind: "failed"; message: string };
+
+/**
+ * Terminal-frame handler for an upload job. Exported for tests: the share
+ * link must land on the session that STARTED the upload - by completion
+ * time the wizard may have been reset or reopened onto another session.
+ */
+export function makeUploadFrameHandler(
+  sourceSessionId: string | null,
+  setUpload: (phase: UploadPhase) => void,
+): (frame: JobEventFrame) => void {
+  return (frame) => {
+    if (frame.type === "done") {
+      const url = frame.url ?? null;
+      setUpload({ kind: "done", url });
+      // Persist the share link so Home/History "share link" buttons stay
+      // live after the wizard moves on.
+      if (sourceSessionId !== null && url !== null) {
+        useSessions.getState().patch(sourceSessionId, { sharedUrl: url });
+      }
+    } else if (frame.type === "failed" || frame.type === "cancelled") {
+      setUpload({ kind: "failed", message: frame.error ?? "upload failed" });
+    }
+  };
+}
 
 type SearchPhase =
   | { kind: "idle" }
@@ -50,7 +74,9 @@ export function W6Export() {
   const { t, i18n } = useTranslation();
   const go = useRouter((s) => s.go);
   const wizard = useWizard();
-  const model = useSettings((s) => s.model);
+  const settingsModel = useSettings((s) => s.model);
+  // Cost math must price the run's model, not whatever settings now hold.
+  const model = wizard.model ?? settingsModel;
   const account = useAccount();
   const pricingTable = usePricingTable();
   const [upload, setUpload] = useState<UploadPhase>({ kind: "idle" });
@@ -186,6 +212,9 @@ export function W6Export() {
       confirmedPack === null
     )
       return;
+    // Pin attribution now: reopenSession/reset may switch the wizard's
+    // session while the upload job runs.
+    const sourceSessionId = wizard.sessionId;
     setUpload({ kind: "running" });
     try {
       const job = await api.startUpload({
@@ -196,20 +225,7 @@ export function W6Export() {
         web_url: WEB_URL,
         ...(account.token !== null ? { api_token: account.token } : {}),
       } satisfies UploadParams);
-      openJobEvents(job.id, (frame) => {
-        if (frame.type === "done") {
-          const url = frame.url ?? null;
-          setUpload({ kind: "done", url });
-          // Persist the share link on the session record so Home/History
-          // "share link" buttons stay live after the wizard is reset.
-          const sessionId = useWizard.getState().sessionId;
-          if (sessionId !== null && url !== null) {
-            useSessions.getState().patch(sessionId, { sharedUrl: url });
-          }
-        } else if (frame.type === "failed" || frame.type === "cancelled") {
-          setUpload({ kind: "failed", message: frame.error ?? "upload failed" });
-        }
-      });
+      openJobEvents(job.id, makeUploadFrameHandler(sourceSessionId, setUpload));
     } catch (error) {
       setUpload({
         kind: "failed",

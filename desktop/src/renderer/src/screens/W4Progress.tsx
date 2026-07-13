@@ -232,7 +232,8 @@ export function W4Progress() {
   const { t, i18n } = useTranslation();
   const lang: "ko" | "en" = i18n.language === "en" ? "en" : "ko";
   const go = useRouter((s) => s.go);
-  const model = useSettings((s) => s.model);
+  const settingsModel = useSettings((s) => s.model);
+  const model = useWizard((s) => s.model) ?? settingsModel;
   const batchSize = useSettings((s) => s.batchSize);
   const maxConcurrent = useSettings((s) => s.maxConcurrent);
   const useVanillaGlossary = useSettings((s) => s.useVanillaGlossary);

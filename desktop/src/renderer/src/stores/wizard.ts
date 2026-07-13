@@ -56,6 +56,32 @@ export interface LogLine {
   text: string;
 }
 
+/**
+ * Runtime map of session id -> engine translate job id.
+ * Engine jobs live only as long as the sidecar process, so this map is
+ * deliberately NOT persisted: after an app/engine restart no reopen
+ * affordance is offered for jobs the engine no longer holds.
+ * wizard.reset() keeps it; a failed reopen probe prunes the mapping.
+ */
+interface SessionJobsStore {
+  jobs: Record<string, string>;
+  register: (sessionId: string, jobId: string) => void;
+  unregister: (sessionId: string) => void;
+}
+
+export const useSessionJobs = create<SessionJobsStore>((set) => ({
+  jobs: {},
+  register: (sessionId, jobId) =>
+    set((state) => ({ jobs: { ...state.jobs, [sessionId]: jobId } })),
+  unregister: (sessionId) =>
+    set((state) => {
+      if (!(sessionId in state.jobs)) return state;
+      const jobs = { ...state.jobs };
+      delete jobs[sessionId];
+      return { jobs };
+    }),
+}));
+
 interface WizardStore {
   /* W1 */
   sessionId: string | null;
@@ -76,6 +102,8 @@ interface WizardStore {
 
   /* W4 */
   translateJobId: string | null;
+  /** Model the run was started with; settings.model may drift afterwards. */
+  model: string | null;
   runState: "idle" | "running" | "done" | "failed" | "cancelled";
   runError: string | null;
   startedAt: number | null;
@@ -105,6 +133,8 @@ interface WizardStore {
   /* actions */
   startSession: (path: string, probe: ModpackProbe) => void;
   resumeSession: (sessionId: string) => boolean;
+  /** Reopens a finished session on W5/W6 after verifying the engine job. */
+  reopenSession: (sessionId: string) => Promise<"ok" | "busy" | "gone">;
   setTargetLocale: (locale: string) => void;
   toggleCategory: (name: string, included: boolean) => void;
   setCategories: (names: string[], included: boolean) => void;
@@ -150,6 +180,7 @@ const initialJobState = {
   scanResult: null,
   excludedCategories: [],
   translateJobId: null,
+  model: null,
   runState: "idle" as const,
   runError: null,
   startedAt: null,
@@ -213,6 +244,76 @@ export const useWizard = create<WizardStore>((set, get) => ({
       ...initialJobState,
     });
     return true;
+  },
+
+  reopenSession: async (sessionId) => {
+    const state = get();
+    // The sidecar can restart (dropping every job) under a live renderer,
+    // so even the wizard's own finished session is probed before "ok".
+    const liveJobId =
+      state.sessionId === sessionId &&
+      (state.runState === "done" || state.runState === "cancelled")
+        ? state.translateJobId
+        : null;
+    if (liveJobId !== null) {
+      try {
+        await api.entries(liveJobId, "all", 1, 1);
+      } catch {
+        useSessionJobs.getState().unregister(sessionId);
+        return "gone";
+      }
+      // Keep the richer in-run state (scan identity, failed keys, log).
+      return "ok";
+    }
+    // One wizard session at a time - never clobber a run in flight.
+    if (
+      state.scanState === "running" ||
+      state.runState === "running" ||
+      state.exportState === "running"
+    ) {
+      return "busy";
+    }
+    const record = useSessions.getState().sessions.find((s) => s.id === sessionId);
+    const jobId = useSessionJobs.getState().jobs[sessionId];
+    if (
+      record === undefined ||
+      jobId === undefined ||
+      (record.status !== "done" && record.status !== "cancelled")
+    ) {
+      return "gone";
+    }
+    // Engine jobs are process-scoped, and a cancelled-early job has no
+    // PipelineResult. One entries probe verifies existence, type, state,
+    // and result presence before the wizard state is replaced.
+    try {
+      await api.entries(jobId, "all", 1, 1);
+    } catch {
+      useSessionJobs.getState().unregister(sessionId);
+      return "gone";
+    }
+    closeScanEvents?.();
+    closeTranslateEvents?.();
+    closeExportEvents?.();
+    set({
+      sessionId: record.id,
+      modpackPath: record.modpackPath,
+      modpackName: record.modpackName,
+      probe: null,
+      sourceLocale: record.sourceLocale,
+      targetLocale: record.targetLocale,
+      ...initialJobState,
+      translateJobId: jobId,
+      model: record.model,
+      runState: record.status,
+      startedAt: record.createdAt,
+      finishedAt: record.finishedAt,
+      doneEntries: record.doneEntries,
+      stats: record.stats,
+      exportState: record.exportZipPath !== null ? ("done" as const) : ("idle" as const),
+      exportZipPath: record.exportZipPath,
+      exportOverridesZipPath: record.exportOverridesZipPath,
+    });
+    return "ok";
   },
 
   setTargetLocale: (locale) => {
@@ -325,6 +426,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
 
     set({
       runState: "running",
+      model: settings.model,
       runError: null,
       startedAt: Date.now(),
       translationStartedAt: null,
@@ -407,6 +509,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
     try {
       const job = await api.startTranslate(params);
       set({ translateJobId: job.id });
+      useSessionJobs.getState().register(sessionId, job.id);
       closeTranslateEvents = openJobEvents(job.id, (frame: JobEventFrame) => {
         switch (frame.type) {
           case "progress": {

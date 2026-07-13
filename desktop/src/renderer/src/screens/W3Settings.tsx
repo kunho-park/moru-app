@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ModelSelect } from "@/components/ModelSelect";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
 import { formatCompact, formatInt, formatUsd } from "@/lib/format";
@@ -820,9 +821,9 @@ export function W3Settings() {
               </div>
             ) : (
               <div className="grid grid-cols-2 gap-3">
-                <label className="block">
+                <div className="block">
                   <span className="mb-[6px] flex items-center gap-2 font-mono text-[11px] text-text3">
-                    {t("w3.advanced.model")}
+                    <span id="w3-advanced-model-label">{t("w3.advanced.model")}</span>
                     <button
                       type="button"
                       onClick={() => void liveModelsQuery.refetch()}
@@ -844,20 +845,12 @@ export function W3Settings() {
                       {t("w3.advanced.refresh")}
                     </button>
                   </span>
-                  <select
+                  <ModelSelect
                     value={settings.model}
-                    onChange={(e) => settings.set({ model: e.target.value, preset: "custom" })}
-                    className="w-full border border-edge bg-ink px-[10px] py-[7px] font-mono text-[12px] text-text"
-                  >
-                    {modelOptions.includes(settings.model) !== true && (
-                      <option value={settings.model}>{modelDisplayName(settings.model)}</option>
-                    )}
-                    {modelOptions.map((m) => (
-                      <option key={m} value={m}>
-                        {modelDisplayName(m)}
-                      </option>
-                    ))}
-                  </select>
+                    options={modelOptions}
+                    onSelect={(model) => settings.set({ model, preset: "custom" })}
+                    labelId="w3-advanced-model-label"
+                  />
                   <span className="mt-[6px] block font-mono text-[10px]">
                     {liveModelsQuery.isFetching ? (
                       <span className="animate-pxpulse text-text3">
@@ -871,7 +864,7 @@ export function W3Settings() {
                       <span className="text-amber">{t("w3.advanced.modelsStatic")}</span>
                     ) : null}
                   </span>
-                </label>
+                </div>
               </div>
             )}
             <div className="grid grid-cols-4 gap-3">

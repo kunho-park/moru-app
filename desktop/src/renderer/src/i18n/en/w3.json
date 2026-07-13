@@ -53,7 +53,10 @@
     "refresh": "Refresh",
     "modelsLoading": "Fetching model list…",
     "modelsLive": "Live list · {{n}} models",
-    "modelsStatic": "Live fetch failed — showing the default list"
+    "modelsStatic": "Live fetch failed — showing the default list",
+    "modelSearchPlaceholder": "Search models… (name or ID)",
+    "modelNoMatch": "No models match \"{{q}}\"",
+    "modelMatchCount": "{{n}} of {{total}} models match"
   },
   "key": {
     "checking": "Checking API key…",

@@ -11,8 +11,8 @@ import { useQuery } from "@tanstack/react-query";
 import type { ScanCategory, ScanFile } from "../../../shared/engine";
 import { api } from "@/lib/api";
 import { formatCompact, formatInt, formatUsd } from "@/lib/format";
-import { estimateUsage } from "@/lib/models";
-import { costUsd, priceForModel, usePricingTable } from "@/lib/pricing";
+import { RECOMMENDED_MODEL, estimateUsage, modelDisplayName } from "@/lib/models";
+import { costUsd, estimatePriceForModel, usePricingTable } from "@/lib/pricing";
 import { useRouter } from "@/stores/router";
 import { useSettings } from "@/stores/settings";
 import { selectedScanTotals, useWizard } from "@/stores/wizard";
@@ -575,6 +575,8 @@ function DoneState() {
   const go = useRouter((s) => s.go);
   const model = useSettings((s) => s.model);
   const batchSize = useSettings((s) => s.batchSize);
+  const maxRefine = useSettings((s) => s.maxRefine);
+  const thinkingEnabled = useSettings((s) => s.thinkingEnabled);
   const useVanillaGlossary = useSettings((s) => s.useVanillaGlossary);
   const extractGlossary = useSettings((s) => s.extractGlossary);
   const glossaryMaxTerms = useSettings((s) => s.glossaryMaxTerms);
@@ -603,14 +605,21 @@ function DoneState() {
     chars: totals.chars,
     entries: totals.entries,
     batchSize,
+    maxRefine,
     glossary: useVanillaGlossary,
     extractGlossary,
     glossaryMaxTerms,
+    thinking: thinkingEnabled,
   });
   const pricingTable = usePricingTable();
-  const price = priceForModel(pricingTable, model);
+  const price = estimatePriceForModel(pricingTable, model);
   const estCostUsd = price !== null ? costUsd(usage, price) : null;
   const costText = estCostUsd !== null ? formatUsd(estCostUsd) : "—";
+  const recommendedPrice = estimatePriceForModel(pricingTable, RECOMMENDED_MODEL);
+  const recommendedCostUsd =
+    model !== RECOMMENDED_MODEL && recommendedPrice !== null && totals.chars > 0
+      ? costUsd(usage, recommendedPrice)
+      : null;
   const selectedCount = categories.filter((c) => !excludedCategories.includes(c.name)).length;
   const allSelected = selectedCount === categories.length;
 
@@ -689,6 +698,21 @@ function DoneState() {
           )}
         </div>
       </div>
+
+      {/* Recommended-combo estimate (hidden when it is already selected) */}
+      {recommendedCostUsd !== null && (
+        <div className="-mt-4 mb-6 flex items-center gap-2 border border-accent-lo bg-tint px-3.5 py-2 font-mono text-[11px] text-text2">
+          <span className="bg-accent px-1.5 py-[1px] text-[9px] font-bold tracking-[0.06em] text-sel-ink uppercase">
+            {t("w2.recommend.badge")}
+          </span>
+          <span>
+            {t("w2.recommend.line", {
+              model: modelDisplayName(RECOMMENDED_MODEL),
+              cost: formatUsd(recommendedCostUsd),
+            })}
+          </span>
+        </div>
+      )}
 
       {/* 2-column: tree + preview */}
       <div className="grid grid-cols-[340px_1fr] gap-3">

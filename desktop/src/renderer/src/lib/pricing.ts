@@ -1,10 +1,20 @@
 /**
  * Model pricing from OpenRouter plus the static direct-provider table.
- * Direct-provider models use the lower known rate for each token class so
- * displayed costs may be low but are not inflated by OpenRouter markup.
- * OpenRouter-selected models use their live OpenRouter row. Local
- * providers (Ollama, OpenAI-compatible servers) are free.
  *
+ * Two resolvers, two jobs:
+ * - priceForModel      — ROUTE-ACCURATE, for money already spent (live
+ *   cost, history, export). Direct-provider selections bill at the
+ *   provider's list price (static table), never at OpenRouter's route
+ *   price; "openrouter/..." selections bill at the live OpenRouter row.
+ * - estimatePriceForModel — CONSERVATIVE, for pre-run estimates. Almost
+ *   every catalog model is listed on OpenRouter (verified 2026-07: only
+ *   the retired xAI grok-4/3/3-mini rows are missing), so estimates lean
+ *   on the live table and take the HIGHER of live/static per token class
+ *   — an estimate must never price under the real bill. Models absent
+ *   from OpenRouter fall back to the static list-price table, which is
+ *   kept at-or-above the providers' published rates.
+ *
+ * Local providers (Ollama, OpenAI-compatible servers) are free.
  * All rates are normalized to USD per 1M tokens.
  */
 
@@ -163,34 +173,71 @@ export function usePricingTable(): PricingTable | null {
 /* Price resolution + cost math                                         */
 /* -------------------------------------------------------------------- */
 
+/** Live OpenRouter row + static fallback row for a LiteLLM model string. */
+function priceCandidates(
+  table: PricingTable | null,
+  model: string,
+): { live: ModelPrice | undefined; staticPrice: ModelPrice | undefined } {
+  const orId = openRouterId(model);
+  return {
+    live: table !== null && orId !== null ? table.get(orId) : undefined,
+    staticPrice:
+      MODEL_PRICES[model] ??
+      (model.startsWith("openrouter/")
+        ? MODEL_PRICES[model.slice("openrouter/".length).replace(/\./g, "-")]
+        : undefined),
+  };
+}
+
 /**
- * Price for a LiteLLM model string. OpenRouter models use their live route
- * price. Direct-provider models use the lower of the static direct price and
- * the OpenRouter row for every token class; unknown paid models return null.
+ * Route-accurate price of a LiteLLM model string — what the selected
+ * route actually bills. OpenRouter models use their live row (static as
+ * offline fallback); direct-provider models use the provider list price
+ * (live row only when the list price is unknown). Unknown paid models
+ * return null.
  */
 export function priceForModel(table: PricingTable | null, model: string): LivePrice | null {
   if (LOCAL_PROVIDERS.has(providerIdOf(model))) {
     return { input: 0, output: 0, cacheRead: 0, source: "free" };
   }
-  const orId = openRouterId(model);
-  const live = table !== null && orId !== null ? table.get(orId) : undefined;
-  const staticPrice =
-    MODEL_PRICES[model] ??
-    (model.startsWith("openrouter/")
-      ? MODEL_PRICES[model.slice("openrouter/".length).replace(/\./g, "-")]
-      : undefined);
+  const { live, staticPrice } = priceCandidates(table, model);
+  if (model.startsWith("openrouter/")) {
+    if (live !== undefined) return { ...live, source: "openrouter" };
+    return staticPrice !== undefined ? { ...staticPrice, source: "static" } : null;
+  }
+  if (staticPrice !== undefined) return { ...staticPrice, source: "static" };
+  return live !== undefined ? { ...live, source: "openrouter" } : null;
+}
 
+/**
+ * Conservative price for PRE-RUN estimates: may overstate, never
+ * understates. OpenRouter routes bill exactly the live row, so it is
+ * used as-is; direct routes take the HIGHER of the provider list price
+ * and the live OpenRouter reference per token class (the live table is
+ * the fresher signal when a provider raises prices, the static table
+ * covers models OpenRouter no longer lists).
+ */
+export function estimatePriceForModel(
+  table: PricingTable | null,
+  model: string,
+): LivePrice | null {
+  if (LOCAL_PROVIDERS.has(providerIdOf(model))) {
+    return { input: 0, output: 0, cacheRead: 0, source: "free" };
+  }
+  const { live, staticPrice } = priceCandidates(table, model);
   if (model.startsWith("openrouter/")) {
     if (live !== undefined) return { ...live, source: "openrouter" };
     return staticPrice !== undefined ? { ...staticPrice, source: "static" } : null;
   }
   if (live !== undefined && staticPrice !== undefined) {
-    const liveCache = live.cacheRead ?? live.input;
-    const staticCache = staticPrice.cacheRead ?? staticPrice.input;
     return {
-      input: Math.min(live.input, staticPrice.input),
-      output: Math.min(live.output, staticPrice.output),
-      cacheRead: Math.min(liveCache, staticCache),
+      input: Math.max(live.input, staticPrice.input),
+      output: Math.max(live.output, staticPrice.output),
+      // A missing cache rate never earns a discount: fall back to input.
+      cacheRead: Math.max(
+        live.cacheRead ?? live.input,
+        staticPrice.cacheRead ?? staticPrice.input,
+      ),
       source: "conservative",
     };
   }

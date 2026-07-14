@@ -10,6 +10,10 @@
     "tm": "Local TM",
     "tmSuffix": " entries"
   },
+  "recommend": {
+    "badge": "Best value",
+    "line": "About {{cost}} with {{model}} via OpenRouter — apply it in translation settings"
+  },
   "tree": {
     "header": "Categories",
     "selectAll": "Select all",

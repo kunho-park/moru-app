@@ -30,6 +30,13 @@
     "balancedDesc": "Quests, guidebooks, lang files — anything. Validation + 1 retry.",
     "bestDesc": "Story and roleplay packs. Double validation + a context review pass."
   },
+  "recommend": {
+    "badge": "Recommended",
+    "title": "OpenRouter · DeepSeek V4 Flash",
+    "sub": "Best-value combo · about {{cost}} for this pack — a conservative figure; cache hits usually bring it lower",
+    "subNoScan": "Best-value combo · one key for every model, lowest list price with the deepest cache discount",
+    "apply": "Use recommended"
+  },
   "advanced": {
     "title": "Advanced settings",
     "hint": "— temperature, batching, concurrency, reasoning, term extraction, custom model",

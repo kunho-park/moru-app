@@ -10,6 +10,10 @@
     "tm": "로컬 TM",
     "tmSuffix": "개 보유"
   },
+  "recommend": {
+    "badge": "추천",
+    "line": "OpenRouter · {{model}} 기준 예상 {{cost}} — 번역 설정에서 바로 적용할 수 있어요"
+  },
   "tree": {
     "header": "카테고리",
     "selectAll": "전체 선택",

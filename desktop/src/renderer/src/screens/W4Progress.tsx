@@ -16,7 +16,13 @@ import {
   remainingSeconds,
 } from "@/lib/format";
 import { estimateUsage } from "@/lib/models";
-import { cacheRatioPercent, costUsd, priceForModel, usePricingTable } from "@/lib/pricing";
+import {
+  cacheRatioPercent,
+  costUsd,
+  estimatePriceForModel,
+  priceForModel,
+  usePricingTable,
+} from "@/lib/pricing";
 import { useRouter } from "@/stores/router";
 import { useSettings } from "@/stores/settings";
 import { selectedScanTotals, useWizard } from "@/stores/wizard";
@@ -236,6 +242,8 @@ export function W4Progress() {
   const model = useWizard((s) => s.model) ?? settingsModel;
   const batchSize = useSettings((s) => s.batchSize);
   const maxConcurrent = useSettings((s) => s.maxConcurrent);
+  const maxRefine = useSettings((s) => s.maxRefine);
+  const thinkingEnabled = useSettings((s) => s.thinkingEnabled);
   const useVanillaGlossary = useSettings((s) => s.useVanillaGlossary);
   const extractGlossary = useSettings((s) => s.extractGlossary);
   const glossaryMaxTerms = useSettings((s) => s.glossaryMaxTerms);
@@ -341,20 +349,40 @@ export function W4Progress() {
             chars: totals.chars,
             entries: totals.entries,
             batchSize,
+            maxRefine,
             glossary: useVanillaGlossary,
             extractGlossary,
             glossaryMaxTerms,
+            thinking: thinkingEnabled,
           })
         : null,
     [
       totals.chars,
       totals.entries,
       batchSize,
+      maxRefine,
       useVanillaGlossary,
       extractGlossary,
       glossaryMaxTerms,
+      thinkingEnabled,
     ],
   );
+  // Displayed estimate never reads below what the run has already burned:
+  // clamp element-wise to the live counters (estimates are conservative,
+  // but a pathological run must not show "used 18M / est 17M").
+  const shownEstimate =
+    estimate !== null
+      ? {
+          promptTokens: Math.max(estimate.promptTokens, promptTokens),
+          completionTokens: Math.max(estimate.completionTokens, completionTokens),
+          totalTokens: Math.max(estimate.totalTokens, usedTokens),
+        }
+      : null;
+  const estPrice = estimatePriceForModel(pricingTable, model);
+  const estCost =
+    shownEstimate !== null && estPrice !== null
+      ? Math.max(costUsd(shownEstimate, estPrice), liveCost ?? 0)
+      : null;
 
   /* files */
   const fileList = Object.values(fileProgress);
@@ -709,8 +737,8 @@ export function W4Progress() {
               }
               sub={
                 <div className="mt-[6px] font-mono text-[10px] text-text3">
-                  {estimate !== null
-                    ? t("w4.stats.estimate", { value: formatCompact(estimate.totalTokens) })
+                  {shownEstimate !== null
+                    ? t("w4.stats.estimate", { value: formatCompact(shownEstimate.totalTokens) })
                     : "—"}
                 </div>
               }
@@ -748,8 +776,8 @@ export function W4Progress() {
                   <span>
                     {liveCost === null
                       ? t("w4.stats.noPrice")
-                      : estimate !== null && price !== null
-                        ? t("w4.stats.estimate", { value: formatUsd(costUsd(estimate, price)) })
+                      : estCost !== null
+                        ? t("w4.stats.estimate", { value: formatUsd(estCost) })
                         : "—"}
                   </span>
                   {cachePercent !== null && cachePercent > 0 && (

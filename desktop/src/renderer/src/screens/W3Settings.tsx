@@ -17,13 +17,15 @@ import {
   PRESET_IDS,
   PROVIDER_ORDER,
   PROVIDER_TIERS,
+  RECOMMENDED_MODEL,
+  RECOMMENDED_PROVIDER,
   estimateUsage,
   modelDisplayName,
   healedModel,
   providerIdOf,
 } from "@/lib/models";
 import { resolveProviderSecret } from "@/lib/providerSecrets";
-import { costUsd, priceForModel, usePricingTable } from "@/lib/pricing";
+import { costUsd, estimatePriceForModel, usePricingTable } from "@/lib/pricing";
 import { useRouter } from "@/stores/router";
 import { useSettings } from "@/stores/settings";
 import { selectedScanTotals, useWizard } from "@/stores/wizard";
@@ -164,9 +166,11 @@ export function W3Settings() {
     chars: totals.chars,
     entries: totals.entries,
     batchSize: settings.batchSize,
+    maxRefine: settings.maxRefine,
     glossary: settings.useVanillaGlossary || settings.useTm,
     extractGlossary: settings.extractGlossary,
     glossaryMaxTerms: settings.glossaryMaxTerms,
+    thinking: settings.thinkingEnabled,
   });
   const pricingTable = usePricingTable();
 
@@ -346,7 +350,7 @@ export function W3Settings() {
 
   const presetName =
     settings.preset === "custom" ? t("w3.footer.custom") : t(`common.preset.${settings.preset}`);
-  const price = priceForModel(pricingTable, settings.model);
+  const price = estimatePriceForModel(pricingTable, settings.model);
   const footerCost =
     price === null
       ? null
@@ -355,6 +359,11 @@ export function W3Settings() {
         : totals.chars > 0
           ? `${formatUsd(costUsd(usage, price))} ${t("w3.footer.estimated")}`
           : null;
+  const recommendedPrice = estimatePriceForModel(pricingTable, RECOMMENDED_MODEL);
+  const recommendedCostText =
+    recommendedPrice !== null && totals.chars > 0
+      ? formatUsd(costUsd(usage, recommendedPrice))
+      : null;
 
   const numberField = (
     key: keyof typeof ADVANCED_DEFAULTS,
@@ -482,6 +491,38 @@ export function W3Settings() {
           })}
         </div>
       </div>
+
+      {/* Recommended combo — hidden once it is the active selection */}
+      {settings.model !== RECOMMENDED_MODEL && (
+        <div className="mb-5 flex items-center gap-3 border border-accent-lo bg-tint px-[18px] py-3">
+          <span className="bg-accent px-2 py-[3px] font-mono text-[10px] font-bold tracking-[0.06em] text-sel-ink uppercase">
+            {t("w3.recommend.badge")}
+          </span>
+          <div className="flex-1">
+            <div className="mb-[2px] text-[13px] font-bold text-text">
+              {t("w3.recommend.title")}
+            </div>
+            <div className="font-mono text-[11px] text-text2">
+              {recommendedCostText !== null
+                ? t("w3.recommend.sub", { cost: recommendedCostText })
+                : t("w3.recommend.subNoScan")}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() =>
+              settings.set({
+                provider: RECOMMENDED_PROVIDER,
+                preset: "fast",
+                model: RECOMMENDED_MODEL,
+              })
+            }
+            className="cursor-pointer border border-accent bg-transparent px-[14px] py-[7px] text-[12px] font-semibold text-accent hover:bg-[rgba(61,220,132,0.08)]"
+          >
+            {t("w3.recommend.apply")}
+          </button>
+        </div>
+      )}
 
       {/* Key / connection state for the selected provider */}
       {isOllama || isCompat ? (
@@ -728,7 +769,9 @@ export function W3Settings() {
                     : undefined
                 }
               >
-                {tier === "balanced" && (
+                {(providerId === RECOMMENDED_PROVIDER
+                  ? model === RECOMMENDED_MODEL
+                  : tier === "balanced") && (
                   <div className="absolute top-0 right-0 bg-accent px-2 py-[3px] font-mono text-[10px] font-bold tracking-[0.06em] text-sel-ink uppercase">
                     {t("w3.preset.recommended")}
                   </div>

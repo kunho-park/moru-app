@@ -32,6 +32,9 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   "gemini/gemini-3.1-flash-lite": { input: 0.25, output: 1.5, cacheRead: 0.025 },
   "deepseek/deepseek-chat": { input: 0.27, output: 1.1, cacheRead: 0.07 },
   "deepseek/deepseek-reasoner": { input: 0.55, output: 2.19, cacheRead: 0.14 },
+  // Listed on OpenRouter 2026-07 at $0.09/$0.18 (cache read $0.018);
+  // deepseek-chat/-reasoner ids retire in favor of v4-flash/v4-pro on 7/24.
+  "deepseek/deepseek-v4-flash": { input: 0.09, output: 0.18, cacheRead: 0.018 },
   "xai/grok-4": { input: 3.0, output: 15.0, cacheRead: 0.75 },
   "xai/grok-3": { input: 3.0, output: 15.0, cacheRead: 0.75 },
   "xai/grok-3-mini": { input: 0.3, output: 0.5, cacheRead: 0.075 },
@@ -105,13 +108,22 @@ export const PROVIDER_TIERS: Record<string, Record<PresetId, string>> = {
     best: "xai/grok-4",
   },
   openrouter: {
-    fast: "openrouter/openai/gpt-5.6-luna",
+    fast: "openrouter/deepseek/deepseek-v4-flash",
     balanced: "openrouter/anthropic/claude-haiku-4.5",
     best: "openrouter/anthropic/claude-sonnet-4.6",
   },
 };
 
 export const PRESET_IDS: readonly PresetId[] = ["fast", "balanced", "best"];
+
+/**
+ * The combo moru actively recommends: OpenRouter (one key, every model,
+ * live pricing) running DeepSeek V4 Flash — lowest list price in the
+ * catalog and the deepest cache-read discount, which suits the repeated
+ * instruction/glossary prompts of modpack translation.
+ */
+export const RECOMMENDED_PROVIDER = "openrouter";
+export const RECOMMENDED_MODEL = "openrouter/deepseek/deepseek-v4-flash";
 
 /** Provider id a LiteLLM model string belongs to ("ollama_chat/x" -> "ollama"). */
 export function providerIdOf(model: string): string {
@@ -170,15 +182,47 @@ export function modelDisplayName(model: string): string {
  * Engine request shape (dspy JSONAdapter): every batch re-sends the
  * signature instructions + JSON schema + field scaffolding, plus a
  * glossary slice; entry keys are echoed in prompt AND completion.
- * Constants calibrated against real runs (observed ~2.4x the old
- * chars/4-only heuristic).
+ * Baseline constants calibrated against real engine runs.
+ *
+ * CONSERVATIVE BY CONTRACT: the estimate may overshoot the real bill,
+ * never undershoot it (2026-07 76k-entry run burned past the old
+ * baseline-only estimate). On top of the baseline we price work the
+ * engine really runs:
+ * - refine passes and parse-failure splits re-send translation batches:
+ *   priced per configured refine pass (settings maxRefine, engine
+ *   orchestrator max_refine)             -> RETRY_TRAFFIC_SHARE
+ * - glossary chunks retry on schema errors: priced per allowed retry
+ *   (engine glossary_max_retries)        -> RETRY_TRAFFIC_SHARE
+ * - verbose models bill completions above the source token volume
+ *                                        -> COMPLETION_RATIO
+ * - reasoning tokens are billed as completions when thinking is on
+ *                                        -> THINKING_COMPLETION_MULTIPLIER
+ * - everything unmodeled (long-entry re-batching, tokenizer variance)
+ *                                        -> SAFETY_MARGIN on the total
  */
 const TOKENS_PER_CHAR = 1 / 3.5;
 const BATCH_OVERHEAD_TOKENS = 950;
 const GLOSSARY_TOKENS_PER_BATCH = 250;
 const KEY_TOKENS_PER_ENTRY = 7;
-/** ko/ja/zh completions tokenize to roughly the source token volume */
-const COMPLETION_RATIO = 1.0;
+/** ko/ja/zh completions routinely tokenize above the source volume */
+const COMPLETION_RATIO = 1.2;
+/**
+ * Traffic share assumed re-sent PER allowed retry pass. Refine work
+ * scales with settings.maxRefine; glossary retries with the engine's
+ * glossary_max_retries. maxRefine=0 correctly prices zero refine work.
+ */
+const RETRY_TRAFFIC_SHARE = 0.1;
+/** orchestrator PipelineConfig.glossary_max_retries (not user-tunable) */
+const ENGINE_GLOSSARY_MAX_RETRIES = 2;
+/** reasoning output when thinking is enabled, billed as completion */
+const THINKING_COMPLETION_MULTIPLIER = 2.0;
+/**
+ * Final pad so the estimate never prices under the real run. Sized off
+ * the 2026-07 76k-entry calibration run: models that reason BY DEFAULT
+ * (DeepSeek V4 Flash emits CoT without the thinking toggle) burn ~6%
+ * past the component model at 1.25 — 1.4 keeps real headroom.
+ */
+const SAFETY_MARGIN = 1.4;
 /** Glossary curation: 50 candidates per engine request. */
 const GLOSSARY_CHUNK_SIZE = 50;
 /** DSPy signature/schema plus existing-glossary context on every chunk. */
@@ -196,12 +240,16 @@ export interface UsageEstimateInput {
   entries: number;
   /** settings.batchSize */
   batchSize: number;
+  /** settings.maxRefine — allowed refine passes; scales retry pricing */
+  maxRefine?: number;
   /** a glossary is sent with every batch (vanilla/community/user) */
   glossary: boolean;
   /** term extraction pass enabled */
   extractGlossary: boolean;
   /** maximum candidates curated by the glossary LLM; null means uncapped */
   glossaryMaxTerms: number | null;
+  /** litellm reasoning enabled — reasoning tokens are billed as completions */
+  thinking?: boolean;
 }
 
 export interface UsageEstimate {
@@ -226,17 +274,24 @@ export function estimateUsage(input: UsageEstimateInput): UsageEstimate {
   const sourceTokens = chars * TOKENS_PER_CHAR;
   const keyTokens = entries * KEY_TOKENS_PER_ENTRY;
 
-  let prompt =
-    batches * BATCH_OVERHEAD_TOKENS +
-    (input.glossary ? batches * GLOSSARY_TOKENS_PER_BATCH : 0) +
-    sourceTokens +
-    keyTokens;
-  let completion = sourceTokens * COMPLETION_RATIO + keyTokens;
+  const thinkingMult = input.thinking === true ? THINKING_COMPLETION_MULTIPLIER : 1;
+  const refinePasses = Math.max(0, input.maxRefine ?? 2);
+  const translationRetryFactor = 1 + RETRY_TRAFFIC_SHARE * refinePasses;
+  const glossaryRetryFactor = 1 + RETRY_TRAFFIC_SHARE * ENGINE_GLOSSARY_MAX_RETRIES;
 
-  // Baseline only: optional refine and schema-retry calls are deliberately
-  // excluded so the estimate never prices work that may not run.
+  let prompt =
+    (batches * BATCH_OVERHEAD_TOKENS +
+      (input.glossary ? batches * GLOSSARY_TOKENS_PER_BATCH : 0) +
+      sourceTokens +
+      keyTokens) *
+    translationRetryFactor;
+  let completion =
+    (sourceTokens * COMPLETION_RATIO * thinkingMult + keyTokens) *
+    translationRetryFactor;
 
   if (input.extractGlossary) {
+    // Uncapped extraction: the miner keeps every ranked candidate, so
+    // price the conservative upper bound of one candidate per entry.
     const configuredLimit =
       input.glossaryMaxTerms === null
         ? entries
@@ -244,13 +299,19 @@ export function estimateUsage(input: UsageEstimateInput): UsageEstimate {
     const candidates = Math.min(entries, configuredLimit);
     const chunks = Math.ceil(candidates / GLOSSARY_CHUNK_SIZE);
     prompt +=
-      chunks * GLOSSARY_PROMPT_OVERHEAD_TOKENS +
-      candidates * GLOSSARY_PROMPT_TOKENS_PER_CANDIDATE;
-    completion += candidates * GLOSSARY_COMPLETION_TOKENS_PER_CANDIDATE;
+      (chunks * GLOSSARY_PROMPT_OVERHEAD_TOKENS +
+        candidates * GLOSSARY_PROMPT_TOKENS_PER_CANDIDATE) *
+      glossaryRetryFactor;
+    completion +=
+      candidates *
+      GLOSSARY_COMPLETION_TOKENS_PER_CANDIDATE *
+      thinkingMult *
+      glossaryRetryFactor;
   }
 
-  const promptTokens = Math.round(prompt);
-  const completionTokens = Math.round(completion);
+  // Round UP: a conservative estimate never shaves tokens off.
+  const promptTokens = Math.ceil(prompt * SAFETY_MARGIN);
+  const completionTokens = Math.ceil(completion * SAFETY_MARGIN);
   return {
     promptTokens,
     completionTokens,

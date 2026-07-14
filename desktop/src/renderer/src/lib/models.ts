@@ -184,15 +184,23 @@ export function modelDisplayName(model: string): string {
  * glossary slice; entry keys are echoed in prompt AND completion.
  * Baseline constants calibrated against real engine runs.
  *
- * CONSERVATIVE BY CONTRACT: the estimate may overshoot the real bill,
- * never undershoot it (2026-07 76k-entry run burned past the old
- * baseline-only estimate). On top of the baseline we price work the
- * engine really runs:
- * - refine passes and parse-failure splits re-send translation batches:
+ * CONSERVATIVELY BIASED (empirical buffer, not a mathematical bound):
+ * the estimate is sized to overshoot the real bill in practice — the
+ * 2026-07 76k-entry run burned past the old baseline-only estimate.
+ * The TRUE engine ceiling is deliberately not priced: translator.py
+ * re-translates every still-failed entry per refine pass and issues
+ * per-entry refine calls, and the orchestrator may re-send a glossary
+ * chunk up to 1+glossary_max_retries FULL times — pricing that would
+ * roughly triple the figure and make the estimate useless. The W4
+ * screen additionally clamps the DISPLAYED estimate to the live
+ * counters, so the shown number can never trail actual burn.
+ * Buffered components, calibrated at/above the worst observed run:
+ * - refine passes and parse-failure splits re-send translation traffic:
  *   priced per configured refine pass (settings maxRefine, engine
  *   orchestrator max_refine)             -> RETRY_TRAFFIC_SHARE
  * - glossary chunks retry on schema errors: priced per allowed retry
- *   (engine glossary_max_retries)        -> RETRY_TRAFFIC_SHARE
+ *   (engine glossary_max_retries; observed retry rate ~5% of chunks)
+ *                                        -> RETRY_TRAFFIC_SHARE
  * - verbose models bill completions above the source token volume
  *                                        -> COMPLETION_RATIO
  * - reasoning tokens are billed as completions when thinking is on
@@ -207,9 +215,11 @@ const KEY_TOKENS_PER_ENTRY = 7;
 /** ko/ja/zh completions routinely tokenize above the source volume */
 const COMPLETION_RATIO = 1.2;
 /**
- * Traffic share assumed re-sent PER allowed retry pass. Refine work
- * scales with settings.maxRefine; glossary retries with the engine's
- * glossary_max_retries. maxRefine=0 correctly prices zero refine work.
+ * Traffic share assumed re-sent PER allowed retry pass — an empirical
+ * rate (observed failure shares run well below it), NOT the all-fail
+ * ceiling. Refine work scales with settings.maxRefine; glossary retries
+ * with the engine's glossary_max_retries. maxRefine=0 prices zero
+ * refine work.
  */
 const RETRY_TRAFFIC_SHARE = 0.1;
 /** orchestrator PipelineConfig.glossary_max_retries (not user-tunable) */
@@ -217,10 +227,10 @@ const ENGINE_GLOSSARY_MAX_RETRIES = 2;
 /** reasoning output when thinking is enabled, billed as completion */
 const THINKING_COMPLETION_MULTIPLIER = 2.0;
 /**
- * Final pad so the estimate never prices under the real run. Sized off
- * the 2026-07 76k-entry calibration run: models that reason BY DEFAULT
- * (DeepSeek V4 Flash emits CoT without the thinking toggle) burn ~6%
- * past the component model at 1.25 — 1.4 keeps real headroom.
+ * Final empirical pad. Sized off the 2026-07 76k-entry calibration run:
+ * models that reason BY DEFAULT (DeepSeek V4 Flash emits CoT without
+ * the thinking toggle) burn ~6% past the component model at 1.25 — 1.4
+ * keeps real headroom.
  */
 const SAFETY_MARGIN = 1.4;
 /** Glossary curation: 50 candidates per engine request. */
@@ -309,7 +319,7 @@ export function estimateUsage(input: UsageEstimateInput): UsageEstimate {
       glossaryRetryFactor;
   }
 
-  // Round UP: a conservative estimate never shaves tokens off.
+  // Round UP: the buffer must not lose tokens to rounding.
   const promptTokens = Math.ceil(prompt * SAFETY_MARGIN);
   const completionTokens = Math.ceil(completion * SAFETY_MARGIN);
   return {

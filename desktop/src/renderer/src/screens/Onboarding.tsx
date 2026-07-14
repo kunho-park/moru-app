@@ -28,6 +28,8 @@ const PROVIDER_TINT: Record<string, string> = {
   google: "#4285F4",
   gemini: "#4285F4",
   openrouter: "#6366F1",
+  ollama: "#A78BFA",
+  "openai-compatible": "#38BDF8",
 };
 
 /** Mono step breadcrumb + title + description (mirrors Settings TabHeader). */
@@ -86,24 +88,28 @@ function WelcomeStep() {
 }
 
 /**
- * Provider API key setup. Key test mirrors W3Settings' keyTest mutation:
- * POST /providers/test, then persist to the OS keychain on success, point
- * settings at the provider's balanced tier, and refresh the react-query
- * caches W3 reads so the key shows up there without re-entry.
+ * Provider setup. Cloud providers take an API key (test mirrors
+ * W3Settings' keyTest mutation: POST /providers/test, persist to the OS
+ * keychain, point settings at the provider's balanced tier). Local
+ * providers (Ollama, OpenAI-compatible servers) take a base URL instead
+ * and connect by probing the live model list. Both refresh the
+ * react-query caches W3 reads so the connection shows up there.
  */
 function KeyStep({ onSaved }: { onSaved: () => void }) {
   const { t } = useTranslation();
   const set = useSettings((s) => s.set);
+  const ollamaBaseUrl = useSettings((s) => s.ollamaBaseUrl);
+  const openaiCompatBaseUrl = useSettings((s) => s.openaiCompatBaseUrl);
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [keyInput, setKeyInput] = useState("");
+  const [urlInput, setUrlInput] = useState("");
   const [savedIds, setSavedIds] = useState<ReadonlySet<string>>(new Set());
 
   const providersQuery = useQuery({ queryKey: ["providers"], queryFn: api.providers });
-  // Local providers (Ollama, OpenAI-compatible servers) need no key; they
-  // stay a Settings-only concern during onboarding.
-  const providers = (providersQuery.data ?? []).filter((p) => !LOCAL_PROVIDERS.has(p.id));
+  const providers = providersQuery.data ?? [];
   const selected = providers.find((p) => p.id === selectedId);
+  const selectedIsLocal = selected !== undefined && LOCAL_PROVIDERS.has(selected.id);
 
   const keyTest = useMutation({
     mutationFn: async ({ provider, key }: { provider: Provider; key: string }) => {
@@ -129,10 +135,65 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
     },
   });
 
+  // Local providers need a reachable server, not a cloud key: probe the
+  // live model list (optional key for keyed OpenAI-compatible servers)
+  // and adopt the first detected model on success.
+  const localTest = useMutation({
+    mutationFn: async ({
+      provider,
+      baseUrl,
+      key,
+    }: {
+      provider: Provider;
+      baseUrl: string;
+      key?: string;
+    }) => {
+      const res = await api.providerModels(provider.id, key, baseUrl);
+      if (res.source !== "live" || res.models.length === 0) {
+        throw new Error(t("onboarding.key.connectFail"));
+      }
+      return { provider, baseUrl, key, models: res.models };
+    },
+    onSuccess: async ({ provider, baseUrl, key, models }) => {
+      if (key !== undefined && provider.id === "openai-compatible") {
+        // vLLM --api-key / remote gateways: mirrors Settings' CompatCard
+        await moru.secrets.set("apikey:openai-compatible", key);
+      }
+      // W3 opens on the server the user just connected
+      set({
+        ...(provider.id === "ollama"
+          ? { ollamaBaseUrl: baseUrl }
+          : { openaiCompatBaseUrl: baseUrl }),
+        provider: provider.id,
+        preset: "custom",
+        model: models[0],
+      });
+      setSavedIds((prev) => new Set(prev).add(provider.id));
+      onSaved();
+      await queryClient.invalidateQueries({ queryKey: ["secret", provider.id] });
+      await queryClient.invalidateQueries({ queryKey: ["secrets"] });
+      await queryClient.invalidateQueries({ queryKey: ["provider-models"] });
+    },
+  });
+
+  const connectLocal = () => {
+    if (selected === undefined || urlInput.trim().length === 0 || localTest.isPending) return;
+    const key = keyInput.trim();
+    localTest.mutate({
+      provider: selected,
+      baseUrl: urlInput.trim(),
+      key: selected.id === "openai-compatible" && key.length > 0 ? key : undefined,
+    });
+  };
+
   const select = (id: string) => {
     setSelectedId(id);
     setKeyInput("");
+    setUrlInput(
+      id === "ollama" ? ollamaBaseUrl : id === "openai-compatible" ? openaiCompatBaseUrl : "",
+    );
     keyTest.reset();
+    localTest.reset();
   };
 
   return (
@@ -171,9 +232,11 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
                     <div className="mt-[2px] font-mono text-[10px] text-text3">
                       {savedIds.has(p.id)
                         ? t("onboarding.key.saved")
-                        : p.has_key
-                          ? t("onboarding.key.envKey")
-                          : t("onboarding.key.needsKey")}
+                        : LOCAL_PROVIDERS.has(p.id)
+                          ? t("onboarding.key.localNoKey")
+                          : p.has_key
+                            ? t("onboarding.key.envKey")
+                            : t("onboarding.key.needsKey")}
                     </div>
                   </div>
                   {connected && <div className="h-[6px] w-[6px] shrink-0 bg-accent" />}
@@ -184,35 +247,94 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
 
           {selected !== undefined && (
             <div className="mt-4 flex flex-col gap-2">
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  value={keyInput}
-                  onChange={(e) => setKeyInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && keyInput.trim().length > 0 && !keyTest.isPending) {
-                      keyTest.mutate({ provider: selected, key: keyInput.trim() });
-                    }
-                  }}
-                  placeholder={t("onboarding.key.placeholder", { name: selected.name })}
-                  className="min-w-0 flex-1 border border-edge bg-bar px-3 py-2 font-mono text-[12px] text-text placeholder:text-text4 focus:border-accent focus:outline-none"
-                />
-                <button
-                  disabled={keyTest.isPending || keyInput.trim().length === 0}
-                  onClick={() => keyTest.mutate({ provider: selected, key: keyInput.trim() })}
-                  className="shrink-0 border border-accent bg-transparent px-4 py-2 text-[12px] font-semibold text-accent hover:bg-[rgba(61,220,132,0.08)] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {keyTest.isPending ? t("onboarding.key.testing") : t("onboarding.key.test")}
-                </button>
-              </div>
-              {keyTest.isError && (
-                <div className="font-mono text-[11px] text-red">{keyTest.error.message}</div>
-              )}
-              {keyTest.isSuccess && (
-                <div className="flex items-center gap-[6px] font-mono text-[11px] text-accent">
-                  <div className="h-[6px] w-[6px] bg-accent" />
-                  {t("onboarding.key.testOk")}
-                </div>
+              {selectedIsLocal ? (
+                <>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={urlInput}
+                      onChange={(e) => setUrlInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") connectLocal();
+                      }}
+                      placeholder={
+                        selected.id === "ollama"
+                          ? "http://localhost:11434"
+                          : "http://localhost:1234/v1"
+                      }
+                      className="min-w-0 flex-1 border border-edge bg-bar px-3 py-2 font-mono text-[12px] text-text placeholder:text-text4 focus:border-accent focus:outline-none"
+                    />
+                    <button
+                      disabled={localTest.isPending || urlInput.trim().length === 0}
+                      onClick={connectLocal}
+                      className="shrink-0 border border-accent bg-transparent px-4 py-2 text-[12px] font-semibold text-accent hover:bg-[rgba(61,220,132,0.08)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {localTest.isPending
+                        ? t("onboarding.key.connecting")
+                        : t("onboarding.key.connect")}
+                    </button>
+                  </div>
+                  {selected.id === "openai-compatible" && (
+                    <input
+                      type="password"
+                      value={keyInput}
+                      onChange={(e) => setKeyInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") connectLocal();
+                      }}
+                      placeholder={t("settings.models.compatKeyPlaceholder")}
+                      className="border border-edge bg-bar px-3 py-2 font-mono text-[12px] text-text placeholder:text-text4 focus:border-accent focus:outline-none"
+                    />
+                  )}
+                  {localTest.isError && (
+                    <div className="font-mono text-[11px] text-red">
+                      {localTest.error.message}
+                    </div>
+                  )}
+                  {localTest.isSuccess && (
+                    <div className="flex items-center gap-[6px] font-mono text-[11px] text-accent">
+                      <div className="h-[6px] w-[6px] bg-accent" />
+                      {t("onboarding.key.connectOk", { n: localTest.data.models.length })}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={keyInput}
+                      onChange={(e) => setKeyInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (
+                          e.key === "Enter" &&
+                          keyInput.trim().length > 0 &&
+                          !keyTest.isPending
+                        ) {
+                          keyTest.mutate({ provider: selected, key: keyInput.trim() });
+                        }
+                      }}
+                      placeholder={t("onboarding.key.placeholder", { name: selected.name })}
+                      className="min-w-0 flex-1 border border-edge bg-bar px-3 py-2 font-mono text-[12px] text-text placeholder:text-text4 focus:border-accent focus:outline-none"
+                    />
+                    <button
+                      disabled={keyTest.isPending || keyInput.trim().length === 0}
+                      onClick={() => keyTest.mutate({ provider: selected, key: keyInput.trim() })}
+                      className="shrink-0 border border-accent bg-transparent px-4 py-2 text-[12px] font-semibold text-accent hover:bg-[rgba(61,220,132,0.08)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {keyTest.isPending ? t("onboarding.key.testing") : t("onboarding.key.test")}
+                    </button>
+                  </div>
+                  {keyTest.isError && (
+                    <div className="font-mono text-[11px] text-red">{keyTest.error.message}</div>
+                  )}
+                  {keyTest.isSuccess && (
+                    <div className="flex items-center gap-[6px] font-mono text-[11px] text-accent">
+                      <div className="h-[6px] w-[6px] bg-accent" />
+                      {t("onboarding.key.testOk")}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}

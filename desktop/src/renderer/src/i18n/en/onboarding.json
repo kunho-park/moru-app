@@ -14,7 +14,7 @@
   },
   "key": {
     "title": "Connect an AI provider",
-    "desc": "Register an API key for the provider you want to translate with. Keys are encrypted in this computer's OS keychain and never sent to our servers.",
+    "desc": "Register an API key for the provider you want to translate with — or connect a local server (Ollama, OpenAI-compatible) with no key at all. Keys are encrypted in this computer's OS keychain and never sent to our servers.",
     "loading": "Loading providers…",
     "loadError": "Could not load the provider list",
     "needsKey": "Key required",
@@ -25,6 +25,11 @@
     "testing": "Testing connection…",
     "testOk": "Key saved to the keychain",
     "testFail": "Connection failed",
+    "localNoKey": "No key needed · local & free",
+    "connect": "Test connection",
+    "connecting": "Connecting…",
+    "connectOk": "Server connected — {{n}} models detected",
+    "connectFail": "Could not reach the server — check it is running and the address",
     "later": "Set up later",
     "hint": "You can add or change keys anytime in Settings → Models · API keys"
   },

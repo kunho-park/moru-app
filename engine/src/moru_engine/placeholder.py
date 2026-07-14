@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-# Placeholder patterns
+# Placeholder patterns. Dict order is the overlap priority: when two
+# patterns match overlapping spans, the earlier pattern keeps its match
+# and the later one is dropped (see protect()).
 PATTERNS = {
     # Java format specifiers: %s, %d, %1$s, %2$d, etc.
     "java_format": re.compile(r"%(?:\d+\$)?[sdifxXobeEgGaAcChHnp%]"),
@@ -18,8 +20,22 @@ PATTERNS = {
     "mc_color_ampersand": re.compile(r"&[0-9a-fk-or]", re.IGNORECASE),
     # Named placeholders: {player}, {item}, etc.
     "named_placeholder": re.compile(r"\{[^}]+\}"),
-    # XML-like tags: <b>, </b>, <color=red>, etc.
-    "xml_tags": re.compile(r"<[^>]+>"),
+    # XML-like tags: <b>, </b>, <color=red>, <font color="red">, <br />.
+    # Whitespace inside a tag is allowed ONLY for name=value attributes
+    # (or a spaced self-close), so prose in angle brackets
+    # ("<Error occurred, plz report to %s>") stays translatable instead
+    # of being frozen as one opaque token.
+    "xml_tags": re.compile(
+        # whitespace-free tags: <b>, </b>, <color=red>, <#FF0000>, <br/>
+        r"<[^>\s]+>"
+        # attribute tags — every attribute must carry =value (bare words
+        # after the name read as prose): <font color="red" size=2>
+        r"|<[A-Za-z][\w:.-]*"
+        r"(?:\s+[A-Za-z][\w:.-]*\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+))+"
+        r"\s*/?>"
+        # spaced self-closing tag: <br />
+        r"|<[A-Za-z][\w:.-]*\s*/>"
+    ),
     # Newlines and special characters
     "special_chars": re.compile(r"\\[nrt]"),
 }
@@ -167,14 +183,21 @@ class PlaceholderProtector:
         placeholders: list[PlaceholderInfo] = []
 
         matches: list[tuple[int, str, str]] = []  # (position, literal, kind)
+        claimed: list[tuple[int, int]] = []  # spans owned by earlier patterns
         for pattern_name, pattern in PATTERNS.items():
             for match in pattern.finditer(text):
-                original = match.group(0)
-                # Skip if already processed (overlapping patterns)
-                if any(m[0] == match.start() and m[1] == original for m in matches):
+                start, end = match.span()
+                # A match overlapping an earlier pattern's span is dropped
+                # (PATTERNS order is the priority). Keeping both corrupts
+                # restore(): replacing the inner literal shifts the text,
+                # so the outer literal's recorded position/length go stale
+                # ("<...%s>" used to restore as "{{TAG}}RG}}>").
+                if any(start < c_end and c_start < end for c_start, c_end in claimed):
                     continue
+                claimed.append((start, end))
+                original = match.group(0)
                 matches.append(
-                    (match.start(), original, _classify_kind(pattern_name, original))
+                    (start, original, _classify_kind(pattern_name, original))
                 )
 
         # Number tokens per kind ONLY when that kind mixes distinct

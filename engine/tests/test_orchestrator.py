@@ -20,6 +20,7 @@ from moru_engine.pipeline.orchestrator import (
     TranslationPipeline,
     category_stats,
     looks_like_identifier,
+    write_outputs,
 )
 from moru_engine.scanner import ScanResult, TranslationFile
 from moru_engine.server.jobs import JobManager, JobRecord, JobStatus, JobType
@@ -444,3 +445,86 @@ def test_build_lm_forwards_explicit_reasoning_effort(
     kwargs = seen["kwargs"]
     assert isinstance(kwargs, dict)
     assert kwargs["reasoning_effort"] == "high"
+
+
+def _seed_lang_modpack(modpack_path: Path) -> EntryResult:
+    """One translated lang entry backed by a real source file on disk."""
+    lang_dir = modpack_path / "assets" / "somemod" / "lang"
+    lang_dir.mkdir(parents=True)
+    (lang_dir / "en_us.json").write_text('{"gui.ok": "OK"}', encoding="utf-8")
+    return EntryResult(
+        key="gui.ok",
+        file="assets/somemod/lang/en_us.json",
+        source_text="OK",
+        translated_text="확인",
+        status=EntryStatus.PASSED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pack_description_is_version_slash_attribution(
+    tmp_path: Path,
+) -> None:
+    # "v{version} / §a모루§7로 한국어로 번역됨" — the pack list already shows
+    # the pack's name, so the description carries only version + credit.
+    modpack_path = tmp_path / "modpack"
+    modpack_path.mkdir()
+    entry = _seed_lang_modpack(modpack_path)
+    (modpack_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifestType": "minecraftModpack",
+                "name": "Linggango - [V6.5 IS OUT]",
+                "version": "6.5.4hotfix",
+                "minecraft": {
+                    "version": "1.20.1",
+                    "modLoaders": [{"id": "forge-47.3.0", "primary": True}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = PipelineResult(
+        config=PipelineConfig(
+            modpack_path=modpack_path, output_dir=tmp_path / "out"
+        ),
+        entries=[entry],
+    )
+
+    await write_outputs(result)
+
+    mcmeta = json.loads(
+        (tmp_path / "out" / "resourcepack" / "pack.mcmeta").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        mcmeta["pack"]["description"]
+        == "v6.5.4hotfix / §a모루§7로 한국어로 번역됨 — §amoru.gg"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pack_description_without_version_keeps_attribution_only(
+    tmp_path: Path,
+) -> None:
+    modpack_path = tmp_path / "modpack"
+    modpack_path.mkdir()
+    entry = _seed_lang_modpack(modpack_path)
+    result = PipelineResult(
+        config=PipelineConfig(
+            modpack_path=modpack_path, output_dir=tmp_path / "out"
+        ),
+        entries=[entry],
+    )
+
+    await write_outputs(result)
+
+    mcmeta = json.loads(
+        (tmp_path / "out" / "resourcepack" / "pack.mcmeta").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        mcmeta["pack"]["description"] == "§a모루§7로 한국어로 번역됨 — §amoru.gg"
+    )

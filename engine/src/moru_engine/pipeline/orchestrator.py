@@ -1276,11 +1276,13 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
         if entry.status in _FRESH_STATUSES:
             file_output.fresh[entry.key] = entry.translated_text
 
-    # Launcher metadata names the pack better than the folder does; the
-    # description is what the resource-pack UI shows under the moru icon.
+    # The description shows under the moru icon in the resource-pack UI.
+    # The pack list already displays the pack's name, so the description
+    # carries only the translated version + attribution, e.g.
+    # "v6.5.4hotfix / §a모루§7로 한국어로 번역됨 — §amoru.gg".
+    # (identity versions are pre-stripped of any leading "v" marker.)
     identity = detect_pack_identity(config.modpack_path)
-    pack_name = identity.name or config.modpack_path.name
-    title = f"{pack_name} {identity.version}" if identity.version else pack_name
+    version_prefix = f"v{identity.version} / " if identity.version else ""
     pack_format = pack_format_for_minecraft_version(
         identity.mc_version,
         config.pack_format,
@@ -1292,7 +1294,7 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
             source_locale=config.source_locale,
             target_locale=config.target_locale,
             pack_format=pack_format,
-            description=f"§f{title} §7한국어 번역\n§a모루§7로 번역됨 — §amoru.gg",
+            description=f"{version_prefix}§a모루§7로 한국어로 번역됨 — §amoru.gg",
         )
     )
     generation = await generator.generate(list(outputs.values()))

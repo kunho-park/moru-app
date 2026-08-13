@@ -17,11 +17,12 @@ import { useTranslation } from "react-i18next";
 
 import type { Entry, EntryStatus } from "../../../shared/engine";
 import { api } from "@/lib/api";
+import { moru } from "@/lib/bridge";
 import { formatInt } from "@/lib/format";
 import { modelDisplayName } from "@/lib/models";
 import { useRouter } from "@/stores/router";
 import { useSettings } from "@/stores/settings";
-import { useWizard } from "@/stores/wizard";
+import { useSessionJobs, useWizard } from "@/stores/wizard";
 
 const PAGE_SIZE = 100;
 
@@ -253,6 +254,8 @@ function errorText(err: unknown): string {
 export function W5Review() {
   const { t } = useTranslation();
   const go = useRouter((s) => s.go);
+  const sessionId = useWizard((s) => s.sessionId);
+  const modpackName = useWizard((s) => s.modpackName);
   const translateJobId = useWizard((s) => s.translateJobId);
   const failedKeys = useWizard((s) => s.failedKeys);
   const stats = useWizard((s) => s.stats);
@@ -497,6 +500,19 @@ export function W5Review() {
     );
   };
 
+  const handleExportSession = async (): Promise<void> => {
+    const targetId = (translateJobId ?? (sessionId ? useSessionJobs.getState().jobs[sessionId] : null)) ?? sessionId;
+    if (!targetId) return;
+    const name = (modpackName || "modpack").replace(/[^a-zA-Z0-9가-힣_-]/g, "_");
+    const savePath = await moru.saveFile(`${name}_session.moru`);
+    if (!savePath) return;
+    try {
+      await api.exportSession(targetId, savePath);
+    } catch (err) {
+      console.error("Failed to export session:", err);
+    }
+  };
+
   return (
     <div className="animate-fade-in-up px-10 py-[28px]">
       {stepHeader}
@@ -570,16 +586,10 @@ export function W5Review() {
           disabled={failedOnPage.length === 0 || bulkMut.isPending}
           className="flex items-center gap-[6px] border border-edge px-3 py-[6px] text-[11px] font-semibold text-text2 hover:border-edge2 hover:text-text disabled:cursor-default disabled:opacity-50"
         >
-          {bulkMut.isPending && (
-            <svg
-              className="animate-pxspin"
-              width="10"
-              height="10"
-              viewBox="0 0 12 12"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-            >
+          {bulkMut.isPending ? (
+            <span className="inline-block h-3.5 w-3.5 animate-pxspin border-2 border-accent border-t-transparent" />
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
               <path d="M1 6 A5 5 0 0 1 11 6 L9 6" />
               <path d="M11 6 L9 4 M11 6 L9 8" />
             </svg>
@@ -643,10 +653,10 @@ export function W5Review() {
                 )}
                 {rows.map((e) => {
                   const c = STATUS_COLOR[e.status];
-                  const isSel = selected !== null && selected.key === e.key;
+                  const isSel = selected !== null && selected.key === e.key && selected.file === e.file;
                   return (
                     <div
-                      key={e.key}
+                      key={`${e.file}:${e.key}`}
                       data-key={e.key}
                       onClick={() => setSelectedKey(e.key)}
                       className={`grid cursor-pointer grid-cols-[20px_200px_1fr_1fr_80px] gap-[10px] border-b border-line px-[14px] py-[10px] ${
@@ -857,15 +867,27 @@ export function W5Review() {
 
       {/* Wizard footer */}
       <div className="mt-5 flex items-center justify-between border-t border-line pt-4">
-        <button
-          onClick={() => go("w4")}
-          className="flex items-center gap-[6px] px-[18px] py-[10px] text-[13px] font-semibold text-text2 hover:text-text"
-        >
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M8 2 L4 6 L8 10" />
-          </svg>
-          {t("common.action.back")}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => go("w4")}
+            className="flex items-center gap-[6px] px-[18px] py-[10px] text-[13px] font-semibold text-text2 hover:text-text"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M8 2 L4 6 L8 10" />
+            </svg>
+            {t("common.action.back")}
+          </button>
+          <button
+            onClick={() => void handleExportSession()}
+            className="flex items-center gap-[6px] border border-edge bg-card px-3.5 py-[8px] text-[12px] font-semibold text-text2 hover:border-accent hover:text-accent"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M6 8V2M6 8L3 5M6 8L9 5" />
+              <path d="M2 10H10" />
+            </svg>
+            {useSettings.getState().uiLanguage === "ko" ? "세션 저장 (.moru)" : "Save session (.moru)"}
+          </button>
+        </div>
         <div className="flex items-center gap-3">
           {failedTotal > 0 && (
             <span className="font-mono text-[11px] text-amber">

@@ -151,6 +151,7 @@ export interface PipelineStats {
 
 /** Params for POST /jobs {type: "translate"} - engine PipelineConfig surface. */
 export interface TranslateParams {
+  session_id?: string;
   modpack_path: string;
   output_dir?: string;
   source_locale?: string;

@@ -80,10 +80,11 @@ test("refuses to clobber a run in flight", async () => {
   useWizard.setState({ runState: "idle" });
 });
 
-test("gone when the session has no registered engine job", async () => {
+test("gone when the session has no registered engine job and disk session restore fails", async () => {
   useSessions.getState().upsert(record("s1", "done"));
+  fetchCalls.length = 0;
   expect(await useWizard.getState().reopenSession("s1")).toBe("gone");
-  expect(fetchCalls.length).toBe(0); // no job id -> no probe
+  expect(fetchCalls.length).toBe(2); // probes api.entries and falls back to api.restoreSession
 });
 
 test("hydrates W5/W6 state after a successful probe", async () => {

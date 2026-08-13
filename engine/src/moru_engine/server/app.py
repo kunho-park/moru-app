@@ -39,6 +39,7 @@ from ..community import sync_community
 from ..dspy_modules import build_lm
 from ..pipeline import (
     EntryStatus,
+    PipelineResult,
     RetranslateError,
     TranslationPipeline,
 )
@@ -54,6 +55,7 @@ from .jobs import (
     UnknownJobError,
 )
 from .live_models import LIVE_MODEL_PROVIDERS, fetch_live_models
+from .sessions import SessionStore
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -188,6 +190,14 @@ class ProviderModelsRequest(BaseModel):
     api_base: str | None = None
 
 
+class SessionExportRequest(BaseModel):
+    output_path: str
+
+
+class SessionImportRequest(BaseModel):
+    input_path: str
+
+
 def _atomic_write_json(path: Path, data: object) -> None:
     """Write JSON via a sibling temp file + os.replace (atomic on POSIX/NTFS)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -306,7 +316,8 @@ def create_app(
     config_root = config_dir or Path(user_config_dir("moru", "moru"))
     config_path = config_root / "engine.json"
     glossary_dir = config_root / "glossaries"
-    manager = JobManager(glossary_store_dir=glossary_dir)
+    session_store = SessionStore(sessions_dir=config_root / "sessions")
+    manager = JobManager(glossary_store_dir=glossary_dir, session_store=session_store)
     tm_holder: dict[str, LocalTM] = {}
 
     def get_tm() -> LocalTM:
@@ -455,13 +466,22 @@ def create_app(
 
     @api.get("/scan/{job_id}/result")
     async def scan_result(job_id: str) -> dict[str, Any]:
-        record = _get_typed_job(job_id, JobType.SCAN)
+        try:
+            record = manager.get(job_id)
+        except UnknownJobError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        if record.params.get("scan_result"):
+            return record.params["scan_result"]
+
         if record.status is not JobStatus.DONE or record.result is None:
             raise HTTPException(
                 status_code=409,
-                detail=f"scan job {job_id} is {record.status.value}, not done",
+                detail=f"job {job_id} is {record.status.value}, not done",
             )
-        return _scan_result_payload(record.result)  # type: ignore[arg-type]
+        payload = _scan_result_payload(record.result)  # type: ignore[arg-type]
+        record.params["scan_result"] = payload
+        return payload
 
     def _get_pipeline_result(job_id: str) -> tuple[JobRecord, PipelineResult]:
         record = _get_typed_job(job_id, JobType.TRANSLATE)
@@ -521,6 +541,9 @@ def create_app(
             )
         entry.translated_text = body.translated_text
         entry.status = EntryStatus.MODIFIED
+        record = manager.get(job_id)
+        if manager._session_store is not None:
+            manager._session_store.save_job_session(record)
         return _entry_payload(entry)
 
     @api.post("/translate/{job_id}/entries/{entry_key:path}/retranslate")
@@ -550,6 +573,8 @@ def create_app(
             ) from exc
         try:
             entry = await pipeline.retranslate_entry(result, entry_key)
+            if manager._session_store is not None:
+                manager._session_store.save_job_session(record)
         except RetranslateError as exc:
             raise HTTPException(
                 status_code=422, detail=f"retranslation failed: {exc}"
@@ -557,6 +582,79 @@ def create_app(
         finally:
             pipeline.close()
         return _entry_payload(entry)
+
+    # -- sessions -------------------------------------------------------------------
+
+    @api.get("/sessions")
+    async def list_sessions() -> list[dict[str, Any]]:
+        return manager._session_store.list_sessions()
+
+    @api.post("/sessions/{session_id}/restore")
+    async def restore_session(session_id: str) -> dict[str, Any]:
+        try:
+            record = manager.get(session_id)
+        except UnknownJobError as exc:
+            raise HTTPException(status_code=404, detail=f"session {session_id} not found") from exc
+        return record.to_public()
+
+    @api.post("/sessions/{session_id}/export")
+    async def export_session(session_id: str, body: SessionExportRequest) -> dict[str, Any]:
+        try:
+            output_path = Path(body.output_path)
+            if manager._session_store is not None:
+                try:
+                    record = manager.get(session_id)
+                    manager._session_store.save_job_session(record)
+                except UnknownJobError:
+                    pass
+            exported = manager._session_store.export_session_file(session_id, output_path)
+            return {"status": "ok", "path": str(exported)}
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"세션 파일({session_id}.moru)을 찾을 수 없습니다. 세션 영구 저장 기능 도입 이전에 완료된 작업이거나 세션 파일이 삭제된 상태입니다.",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"export failed: {exc}") from exc
+
+    @api.post("/sessions/import")
+    async def import_session(body: SessionImportRequest) -> dict[str, Any]:
+        try:
+            input_path = Path(body.input_path)
+            record = manager._session_store.import_session_file(input_path)
+            manager._jobs[record.id] = record
+            summary = manager._session_store.summarize_session({
+                "id": record.id,
+                "modpack_name": record.params.get("modpack_name", ""),
+                "modpack_path": record.params.get("modpack_path", ""),
+                "source_locale": record.params.get("source_locale", "en_us"),
+                "target_locale": record.params.get("target_locale", "ko_kr"),
+                "model": record.params.get("model", ""),
+                "status": record.status.value,
+                "created_at": record.created_at.isoformat(),
+                "entries": [
+                    {"status": e.status.value} for e in record.result.entries
+                ] if isinstance(record.result, PipelineResult) else [],
+                "stats": record.result.stats.model_dump() if isinstance(record.result, PipelineResult) else {},
+                "done_payload": record.done_payload,
+            })
+            return {
+                "status": "ok",
+                "session": summary,
+                "job": record.to_public(),
+            }
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"import failed: {exc}") from exc
+
+    @api.delete("/sessions/{session_id}")
+    async def delete_session(session_id: str) -> dict[str, str]:
+        manager._jobs.pop(session_id, None)
+        deleted = manager._session_store.delete_session(session_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+        return {"status": "ok", "id": session_id}
 
     # -- glossary -------------------------------------------------------------------
 

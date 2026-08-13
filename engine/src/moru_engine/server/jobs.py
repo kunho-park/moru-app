@@ -45,6 +45,7 @@ from . import upload
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Mapping
     from ..models import LanguageFilePair
+    from .sessions import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -195,21 +196,34 @@ def _sha256_and_size(path: Path) -> tuple[str, int]:
 class JobManager:
     """Creates, runs, cancels, and streams jobs on the server event loop."""
 
-    def __init__(self, glossary_store_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        glossary_store_dir: Path | None = None,
+        session_store: SessionStore | None = None,
+    ) -> None:
         self._jobs: dict[str, JobRecord] = {}
+        self._scan_cache: dict[str, EnrichedScanResult] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         #: Injected by the app so pipeline runs read the same user glossary
         #: store (hub manual terms + synced community terms) the HTTP
         #: endpoints write.
         self._glossary_store_dir = glossary_store_dir
+        if session_store is None:
+            from .sessions import SessionStore
+            session_store = SessionStore()
+        self._session_store = session_store
 
     # -- lookup --------------------------------------------------------------
 
     def get(self, job_id: str) -> JobRecord:
-        try:
+        if job_id in self._jobs:
             return self._jobs[job_id]
-        except KeyError:
-            raise UnknownJobError(f"unknown job: {job_id}") from None
+        if self._session_store is not None:
+            restored = self._session_store.load_job_session(job_id)
+            if restored is not None:
+                self._jobs[job_id] = restored
+                return restored
+        raise UnknownJobError(f"unknown job: {job_id}")
 
     # -- creation ------------------------------------------------------------
 
@@ -219,8 +233,9 @@ class JobManager:
         Must be called from within the running event loop (route handlers).
         """
         job_type = JobType(type_)
+        job_id = str(params.get("session_id")) if params.get("session_id") else str(uuid.uuid4())
         record = JobRecord(
-            id=str(uuid.uuid4()), type=job_type, params=dict(params)
+            id=job_id, type=job_type, params=dict(params)
         )
         runner: Coroutine[Any, Any, object]
         if job_type is JobType.SCAN:
@@ -403,6 +418,11 @@ class JobManager:
                 terminal.update(record.done_payload)
         self._emit(record, terminal_type, terminal)
         record.finished = True
+        if record.type is JobType.TRANSLATE and self._session_store is not None:
+            try:
+                self._session_store.save_job_session(record)
+            except Exception:
+                logger.exception("Failed to save session for job %s", record.id)
         for queue in record.subscribers:
             queue.put_nowait(None)  # stream-end sentinel for live listeners
 
@@ -420,6 +440,13 @@ class JobManager:
                     "message": message,
                 },
             )
+
+        cache_key = f"{Path(str(params['modpack_path'])).resolve()}:{params.get('source_locale', 'en_us')}:{params.get('target_locale', 'ko_kr')}"
+        if cache_key in self._scan_cache:
+            progress("scan", 1, 1, "cached")
+            progress("parse", 1, 1, "cached")
+            logger.info("Serving cached scan result for %s", cache_key)
+            return self._scan_cache[cache_key]
 
         scan = await scan_modpack(
             params["modpack_path"],
@@ -486,6 +513,7 @@ class JobManager:
         if pairs:
             progress("parse", 0, len(pairs), "")
             await asyncio.gather(*(parse_one(pair) for pair in pairs))
+        self._scan_cache[cache_key] = enriched
         return enriched
 
     async def _run_translate(

@@ -313,6 +313,15 @@ def _install_translate_record(
             target_locale="ko_kr",
             model="openai/gpt-4o-mini",
         ),
+        entries=[
+            EntryResult(
+                key="key.hello",
+                file="somemod/lang/en_us.json",
+                source_text="Hello",
+                translated_text="안녕",
+                status=EntryStatus.PASSED,
+            )
+        ],
         output_files=output_files,
         stats=PipelineStats(
             total_entries=10,
@@ -332,6 +341,8 @@ def _install_translate_record(
         finished=True,
     )
     client.app.state.job_manager._jobs[record.id] = record
+    if client.app.state.job_manager._session_store is not None:
+        client.app.state.job_manager._session_store.save_job_session(record)
     return record
 
 
@@ -569,6 +580,79 @@ def test_cancelled_translate_result_can_be_reviewed_and_exported(
     assert final["status"] == "done", final["error"]
     assert target.exists()
     assert target.with_name("partial_overrides.zip").exists()
+
+
+def test_sessions_persistence_export_import(
+    client: TestClient, done_translate_job: JobRecord, tmp_path: Path
+) -> None:
+    session_id = done_translate_job.id
+
+    # 1. GET /sessions lists saved sessions
+    list_res = client.get("/sessions", headers=AUTH)
+    assert list_res.status_code == 200
+    sessions_list = list_res.json()
+    assert any(s["id"] == session_id for s in sessions_list)
+
+    # 2. Simulate RAM clear / engine restart by removing from manager._jobs
+    app = client.app
+    manager = app.state.job_manager
+    manager._jobs.pop(session_id, None)
+
+    # 3. GET /translate/{job_id}/entries triggers auto-restoration from disk
+    entries_res = client.get(f"/translate/{session_id}/entries", headers=AUTH)
+    assert entries_res.status_code == 200
+    assert entries_res.json()["total"] == len(done_translate_job.result.entries)
+
+    # 4. PATCH entry persists modified status
+    first_key = done_translate_job.result.entries[0].key
+    patch_res = client.patch(
+        f"/translate/{session_id}/entries/{first_key}",
+        json={"translated_text": "수정된 테스트 번역문"},
+        headers=AUTH,
+    )
+    assert patch_res.status_code == 200
+    assert patch_res.json()["status"] == "modified"
+
+    # Clear RAM again and verify patched value persisted
+    manager._jobs.pop(session_id, None)
+    recheck_res = client.get(
+        f"/translate/{session_id}/entries?filter=modified", headers=AUTH
+    )
+    assert recheck_res.status_code == 200
+    assert recheck_res.json()["total"] == 1
+    assert recheck_res.json()["entries"][0]["translated_text"] == "수정된 테스트 번역문"
+
+    # 5. Export session file (.moru)
+    export_file = tmp_path / "exported_session.moru"
+    export_res = client.post(
+        f"/sessions/{session_id}/export",
+        json={"output_path": str(export_file)},
+        headers=AUTH,
+    )
+    assert export_res.status_code == 200
+    assert export_file.exists()
+
+    # 6. Delete session
+    del_res = client.delete(f"/sessions/{session_id}", headers=AUTH)
+    assert del_res.status_code == 200
+
+    # Verify deleted
+    assert not (manager._session_store.sessions_dir / f"{session_id}.moru").exists()
+
+    # 7. Import exported session file
+    import_res = client.post(
+        "/sessions/import",
+        json={"input_path": str(export_file)},
+        headers=AUTH,
+    )
+    assert import_res.status_code == 200, import_res.json()
+    imported_job = import_res.json()["job"]
+    assert imported_job["id"] == session_id
+
+    # Verify imported session entries
+    imported_entries = client.get(f"/translate/{session_id}/entries", headers=AUTH)
+    assert imported_entries.status_code == 200
+    assert imported_entries.json()["total"] == len(done_translate_job.result.entries)
 
 
 def test_upload_job_without_token_uses_defaults(

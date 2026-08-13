@@ -274,23 +274,61 @@ export const useWizard = create<WizardStore>((set, get) => ({
       return "busy";
     }
     const record = useSessions.getState().sessions.find((s) => s.id === sessionId);
-    const jobId = useSessionJobs.getState().jobs[sessionId];
+    const jobId = useSessionJobs.getState().jobs[sessionId] ?? sessionId;
     if (
       record === undefined ||
-      jobId === undefined ||
       (record.status !== "done" && record.status !== "cancelled")
     ) {
       return "gone";
     }
-    // Engine jobs are process-scoped, and a cancelled-early job has no
-    // PipelineResult. One entries probe verifies existence, type, state,
-    // and result presence before the wizard state is replaced.
+    // Engine jobs are process-scoped or persisted on disk. Probing api.entries
+    // auto-restores disk session files if sidecar dropped in-RAM job state.
     try {
       await api.entries(jobId, "all", 1, 1);
+      useSessionJobs.getState().register(sessionId, jobId);
     } catch {
-      useSessionJobs.getState().unregister(sessionId);
-      return "gone";
+      try {
+        await api.restoreSession(sessionId);
+        useSessionJobs.getState().register(sessionId, sessionId);
+      } catch {
+        useSessionJobs.getState().unregister(sessionId);
+        return "gone";
+      }
     }
+    const activeJobId = useSessionJobs.getState().jobs[sessionId] ?? jobId;
+    const failedKeys: Record<string, string[]> = {};
+    const restoredLog: LogLine[] = [];
+    try {
+      const failedRes = await api.entries(activeJobId, "failed", 1, 500);
+      for (const e of failedRes.entries) {
+        failedKeys[e.key] = e.errors.length > 0 ? e.errors : ["translation failed"];
+        restoredLog.push({
+          ts: record.finishedAt ?? record.createdAt,
+          level: "warn",
+          text: `entry failed: ${e.key} — ${e.errors.join("; ") || "failed"}`,
+        });
+      }
+      const warningRes = await api.entries(activeJobId, "warning", 1, 500);
+      for (const e of warningRes.entries) {
+        if (e.errors.length > 0) {
+          restoredLog.push({
+            ts: record.finishedAt ?? record.createdAt,
+            level: "warn",
+            text: `entry warning: ${e.key} — ${e.errors.join("; ")}`,
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    let scanResult: ScanResult | null = null;
+    try {
+      scanResult = await api.scanResult(activeJobId);
+    } catch {
+      // ignore
+    }
+
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
@@ -302,7 +340,10 @@ export const useWizard = create<WizardStore>((set, get) => ({
       sourceLocale: record.sourceLocale,
       targetLocale: record.targetLocale,
       ...initialJobState,
-      translateJobId: jobId,
+      scanResult,
+      failedKeys,
+      log: restoredLog,
+      translateJobId: activeJobId,
       model: record.model,
       runState: record.status,
       startedAt: record.createdAt,
@@ -399,7 +440,9 @@ export const useWizard = create<WizardStore>((set, get) => ({
         : providerId === "openai-compatible"
           ? settings.openaiCompatBaseUrl
           : undefined;
+    const sessionId = state.sessionId ?? crypto.randomUUID();
     const params: TranslateParams = {
+      session_id: sessionId,
       modpack_path: state.modpackPath,
       source_locale: state.sourceLocale,
       target_locale: state.targetLocale,
@@ -469,7 +512,6 @@ export const useWizard = create<WizardStore>((set, get) => ({
     }
 
     const sessions = useSessions.getState();
-    const sessionId = state.sessionId ?? crypto.randomUUID();
     sessions.upsert({
       id: sessionId,
       modpackPath: state.modpackPath,

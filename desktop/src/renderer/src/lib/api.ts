@@ -131,6 +131,22 @@ export const api = {
   config: () => request<Record<string, unknown>>("/config"),
   putConfig: (config: Record<string, unknown>) =>
     request<Record<string, unknown>>("/config", { method: "PUT", body: JSON.stringify(config) }),
+
+  listSessions: () => request<Record<string, unknown>[] >("/sessions"),
+  restoreSession: (sessionId: string) =>
+    request<Job>(`/sessions/${sessionId}/restore`, { method: "POST" }),
+  exportSession: (sessionId: string, outputPath: string) =>
+    request<{ status: string; path: string }>(`/sessions/${sessionId}/export`, {
+      method: "POST",
+      body: JSON.stringify({ output_path: outputPath }),
+    }),
+  importSession: (inputPath: string) =>
+    request<{ status: string; session: Record<string, unknown>; job: Job }>("/sessions/import", {
+      method: "POST",
+      body: JSON.stringify({ input_path: inputPath }),
+    }),
+  deleteSession: (sessionId: string) =>
+    request<{ status: string; id: string }>(`/sessions/${sessionId}`, { method: "DELETE" }),
 };
 
 /**

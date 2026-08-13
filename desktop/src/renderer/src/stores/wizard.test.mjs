@@ -91,7 +91,7 @@ test("hydrates W5/W6 state after a successful probe", async () => {
   useSessionJobs.getState().register("s1", "job-1");
   nextResponse = okPage;
   expect(await useWizard.getState().reopenSession("s1")).toBe("ok");
-  expect(fetchCalls.pop()).toContain("/translate/job-1/entries");
+  expect(fetchCalls.some((c) => c.includes("/translate/job-1/entries"))).toBe(true);
 
   const w = useWizard.getState();
   expect(w.sessionId).toBe("s1");

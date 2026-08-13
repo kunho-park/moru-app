@@ -182,7 +182,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { type: object }
+                items: { $ref: "#/components/schemas/SessionSummary" }
   /sessions/{sessionId}/restore:
     post:
       summary: Restore a persisted disk session into JobManager RAM
@@ -225,6 +225,7 @@ paths:
                   status: { type: string }
                   path: { type: string }
         "404": { description: session not found }
+        "500": { description: export failed }
   /sessions/import:
     post:
       summary: Import an external .moru session file into persistent store and activate it
@@ -246,8 +247,9 @@ paths:
                 required: [status, session, job]
                 properties:
                   status: { type: string }
-                  session: { type: object }
+                  session: { $ref: "#/components/schemas/SessionSummary" }
                   job: { $ref: "#/components/schemas/Job" }
+        "404": { description: file not found }
         "422": { description: invalid session file format }
   /sessions/{sessionId}:
     delete:
@@ -615,5 +617,23 @@ components:
           nullable: true
           description: Shell command that authenticates the CLI, e.g. "claude login".
         account: { type: string, nullable: true }
+    SessionSummary:
+      type: object
+      required: [id, modpack_name, modpack_path, source_locale, target_locale, model, status, total_entries, done_entries]
+      properties:
+        id: { type: string }
+        modpack_name: { type: string }
+        modpack_path: { type: string }
+        source_locale: { type: string }
+        target_locale: { type: string }
+        model: { type: string }
+        status: { type: string }
+        created_at: { type: string, nullable: true }
+        finished_at: { type: string, nullable: true }
+        total_entries: { type: integer }
+        done_entries: { type: integer }
+        stats: { type: object, nullable: true }
+        export_zip_path: { type: string, nullable: true }
+        export_overrides_zip_path: { type: string, nullable: true }
 security:
   - sessionToken: []

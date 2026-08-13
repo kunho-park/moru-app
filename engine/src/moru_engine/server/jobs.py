@@ -513,6 +513,9 @@ class JobManager:
         if pairs:
             progress("parse", 0, len(pairs), "")
             await asyncio.gather(*(parse_one(pair) for pair in pairs))
+        if len(self._scan_cache) >= 20:
+            first_key = next(iter(self._scan_cache))
+            del self._scan_cache[first_key]
         self._scan_cache[cache_key] = enriched
         return enriched
 

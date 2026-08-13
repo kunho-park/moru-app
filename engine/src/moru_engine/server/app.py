@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from platformdirs import user_config_dir
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.websockets import WebSocketDisconnect
 
 from .. import __version__
@@ -193,9 +193,29 @@ class ProviderModelsRequest(BaseModel):
 class SessionExportRequest(BaseModel):
     output_path: str
 
+    @field_validator("output_path")
+    @classmethod
+    def validate_path(cls, v: str) -> str:
+        p = Path(v)
+        if not p.is_absolute():
+            raise ValueError("output_path must be an absolute path")
+        if p.suffix.lower() not in (".moru", ".json"):
+            raise ValueError("output_path must end with .moru or .json")
+        return v
+
 
 class SessionImportRequest(BaseModel):
     input_path: str
+
+    @field_validator("input_path")
+    @classmethod
+    def validate_path(cls, v: str) -> str:
+        p = Path(v)
+        if not p.is_absolute():
+            raise ValueError("input_path must be an absolute path")
+        if p.suffix.lower() not in (".moru", ".json"):
+            raise ValueError("input_path must end with .moru or .json")
+        return v
 
 
 def _atomic_write_json(path: Path, data: object) -> None:
@@ -573,14 +593,19 @@ def create_app(
             ) from exc
         try:
             entry = await pipeline.retranslate_entry(result, entry_key)
-            if manager._session_store is not None:
-                manager._session_store.save_job_session(record)
         except RetranslateError as exc:
             raise HTTPException(
                 status_code=422, detail=f"retranslation failed: {exc}"
             ) from exc
         finally:
             pipeline.close()
+
+        if manager._session_store is not None:
+            try:
+                manager._session_store.save_job_session(record)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to save session after retranslation: %s", exc)
+
         return _entry_payload(entry)
 
     # -- sessions -------------------------------------------------------------------
@@ -612,7 +637,7 @@ def create_app(
         except FileNotFoundError as exc:
             raise HTTPException(
                 status_code=404,
-                detail=f"세션 파일({session_id}.moru)을 찾을 수 없습니다. 세션 영구 저장 기능 도입 이전에 완료된 작업이거나 세션 파일이 삭제된 상태입니다.",
+                detail=f"session_file_not_found: {session_id}",
             ) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"export failed: {exc}") from exc

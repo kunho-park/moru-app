@@ -299,24 +299,35 @@ export const useWizard = create<WizardStore>((set, get) => ({
     const failedKeys: Record<string, string[]> = {};
     const restoredLog: LogLine[] = [];
     try {
-      const failedRes = await api.entries(activeJobId, "failed", 1, 500);
-      for (const e of failedRes.entries) {
-        failedKeys[e.key] = e.errors.length > 0 ? e.errors : ["translation failed"];
-        restoredLog.push({
-          ts: record.finishedAt ?? record.createdAt,
-          level: "warn",
-          text: `entry failed: ${e.key} — ${e.errors.join("; ") || "failed"}`,
-        });
-      }
-      const warningRes = await api.entries(activeJobId, "warning", 1, 500);
-      for (const e of warningRes.entries) {
-        if (e.errors.length > 0) {
+      let page = 1;
+      while (true) {
+        const res = await api.entries(activeJobId, "failed", page, 500);
+        for (const e of res.entries) {
+          failedKeys[e.key] = e.errors.length > 0 ? e.errors : ["translation failed"];
           restoredLog.push({
             ts: record.finishedAt ?? record.createdAt,
             level: "warn",
-            text: `entry warning: ${e.key} — ${e.errors.join("; ")}`,
+            text: `entry failed: ${e.key} — ${e.errors.join("; ") || "failed"}`,
           });
         }
+        if (res.entries.length === 0 || page * 500 >= res.total) break;
+        page++;
+      }
+
+      page = 1;
+      while (true) {
+        const res = await api.entries(activeJobId, "warning", page, 500);
+        for (const e of res.entries) {
+          if (e.errors.length > 0) {
+            restoredLog.push({
+              ts: record.finishedAt ?? record.createdAt,
+              level: "warn",
+              text: `entry warning: ${e.key} — ${e.errors.join("; ")}`,
+            });
+          }
+        }
+        if (res.entries.length === 0 || page * 500 >= res.total) break;
+        page++;
       }
     } catch {
       // ignore
@@ -340,6 +351,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
       sourceLocale: record.sourceLocale,
       targetLocale: record.targetLocale,
       ...initialJobState,
+      scanState: scanResult !== null ? ("done" as const) : ("idle" as const),
       scanResult,
       failedKeys,
       log: restoredLog,

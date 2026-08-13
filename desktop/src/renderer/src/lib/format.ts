@@ -33,7 +33,7 @@ export function formatUsd(usd?: number | null): string {
 
 /** seconds -> "4분 22초" | "52초" | "1시간 4분" (ko) or "4m 22s" (en) */
 export function formatDuration(totalSeconds?: number | null, locale: "ko" | "en" = "ko"): string {
-  if (totalSeconds === null || totalSeconds === undefined || isNaN(totalSeconds)) return "0s";
+  if (totalSeconds === null || totalSeconds === undefined || isNaN(totalSeconds)) return locale === "ko" ? "0초" : "0s";
   const s = Math.max(0, Math.round(totalSeconds));
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);

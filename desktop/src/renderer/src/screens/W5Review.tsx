@@ -323,13 +323,16 @@ export function W5Review() {
   // Already filtered server-side by `query`; nothing left to narrow here.
   const rows = entries;
 
-  const selected: Entry | null = rows.find((e) => e.key === selectedKey) ?? rows[0] ?? null;
+  const selected: Entry | null =
+    rows.find((e) => `${e.file}:${e.key}` === selectedKey || e.key === selectedKey) ??
+    rows[0] ??
+    null;
 
   useEffect(() => {
     setDraft(selected?.translated_text ?? "");
     setActionError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.key, selected?.translated_text]);
+  }, [selected?.file, selected?.key, selected?.translated_text]);
 
   const invalidate = (): void => {
     void queryClient.invalidateQueries({ queryKey: ["w5", translateJobId] });
@@ -376,12 +379,15 @@ export function W5Review() {
 
   const moveSelection = (delta: number): void => {
     if (rows.length === 0) return;
-    const idx = selected === null ? 0 : rows.findIndex((e) => e.key === selected.key);
+    const idx =
+      selected === null
+        ? 0
+        : rows.findIndex((e) => e.file === selected.file && e.key === selected.key);
     const next = Math.min(rows.length - 1, Math.max(0, idx + delta));
-    const key = rows[next].key;
-    setSelectedKey(key);
+    const entryId = `${rows[next].file}:${rows[next].key}`;
+    setSelectedKey(entryId);
     listRef.current
-      ?.querySelector(`[data-key="${CSS.escape(key)}"]`)
+      ?.querySelector(`[data-key="${CSS.escape(entryId)}"]`)
       ?.scrollIntoView({ block: "nearest" });
   };
 
@@ -508,8 +514,10 @@ export function W5Review() {
     if (!savePath) return;
     try {
       await api.exportSession(targetId, savePath);
+      setActionError(null);
     } catch (err) {
       console.error("Failed to export session:", err);
+      setActionError(errorText(err));
     }
   };
 
@@ -657,8 +665,8 @@ export function W5Review() {
                   return (
                     <div
                       key={`${e.file}:${e.key}`}
-                      data-key={e.key}
-                      onClick={() => setSelectedKey(e.key)}
+                      data-key={`${e.file}:${e.key}`}
+                      onClick={() => setSelectedKey(`${e.file}:${e.key}`)}
                       className={`grid cursor-pointer grid-cols-[20px_200px_1fr_1fr_80px] gap-[10px] border-b border-line px-[14px] py-[10px] ${
                         isSel ? "" : "hover:bg-raised-hover"
                       }`}

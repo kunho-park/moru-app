@@ -64,6 +64,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface SessionSummary {
+  id: string;
+  modpack_name: string;
+  modpack_path: string;
+  source_locale: string;
+  target_locale: string;
+  model: string;
+  status: string;
+  created_at: string | null;
+  finished_at: string | null;
+  total_entries: number;
+  done_entries: number;
+  stats: Record<string, unknown> | null;
+  export_zip_path: string | null;
+  export_overrides_zip_path: string | null;
+}
+
 export const api = {
   startScan: (params: ScanParams) =>
     request<Job>("/jobs", { method: "POST", body: JSON.stringify({ type: "scan", params }) }),
@@ -132,7 +149,7 @@ export const api = {
   putConfig: (config: Record<string, unknown>) =>
     request<Record<string, unknown>>("/config", { method: "PUT", body: JSON.stringify(config) }),
 
-  listSessions: () => request<Record<string, unknown>[] >("/sessions"),
+  listSessions: () => request<SessionSummary[]>("/sessions"),
   restoreSession: (sessionId: string) =>
     request<Job>(`/sessions/${sessionId}/restore`, { method: "POST" }),
   exportSession: (sessionId: string, outputPath: string) =>
@@ -141,7 +158,7 @@ export const api = {
       body: JSON.stringify({ output_path: outputPath }),
     }),
   importSession: (inputPath: string) =>
-    request<{ status: string; session: Record<string, unknown>; job: Job }>("/sessions/import", {
+    request<{ status: string; session: SessionSummary; job: Job }>("/sessions/import", {
       method: "POST",
       body: JSON.stringify({ input_path: inputPath }),
     }),

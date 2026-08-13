@@ -14,6 +14,13 @@
     "badge": "Best value",
     "line": "About {{cost}} with {{model}} via OpenRouter — apply it in translation settings"
   },
+  "migration": {
+    "title": "Previous translation compared",
+    "summary": "Reuse {{reused}} previous manual translations and translate only {{translate}} entries.",
+    "zero": "No exact matches were found; all entries will follow the normal translation path.",
+    "reused": "Reused",
+    "assets": "Assets kept"
+  },
   "tree": {
     "header": "Categories",
     "selectAll": "Select all",
@@ -45,6 +52,7 @@
   "footer": {
     "back": "Back",
     "entriesPart": "{{entries}} entries · ",
+    "reusedPart": "{{reused}} previous translations reused · ",
     "estSuffix": " est.",
     "tokensOnly": "{{count}} tokens",
     "next": "Next: Translation settings"

@@ -71,10 +71,11 @@ export function WizardLayout({ children }: { children: React.ReactNode }) {
   };
 
   /* ETA: extrapolate from provider translation time, excluding scan/glossary. */
-  const rate = ratePerSecond(wizard.doneEntries, wizard.translationStartedAt, Date.now());
+  const translatedDone = Math.max(0, wizard.doneEntries - totals.migrationEntries);
+  const rate = ratePerSecond(translatedDone, wizard.translationStartedAt, Date.now());
   const eta =
     wizard.runState === "running"
-      ? remainingSeconds(totals.entries, wizard.doneEntries, rate)
+      ? remainingSeconds(totals.translationEntries, translatedDone, rate)
       : null;
 
   return (

@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -26,7 +27,9 @@ from platformdirs import user_data_dir
 from pydantic import ValidationError
 
 from .. import __version__
+from ..glossary.pair_harvester import is_untranslated_copy
 from ..handlers.base import create_default_registry
+from ..migration import MigrationCatalog, build_migration_catalog, logical_file_id
 from ..output import (
     OVERRIDES_DIRNAME,
     RESOURCEPACK_DIRNAME,
@@ -36,6 +39,7 @@ from ..pipeline import (
     PipelineConfig,
     PipelineResult,
     apply_entry_edits,
+    is_translatable_text,
     output_root,
     run_pipeline,
 )
@@ -45,6 +49,7 @@ from . import upload
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Mapping
+
     from ..graph import TranslationGraph
     from ..models import LanguageFilePair
     from ..pipeline import TranslationPipeline
@@ -58,6 +63,10 @@ PARSE_CONCURRENCY = 8
 SAMPLE_ENTRIES = 3
 #: Sample values are truncated to this many characters.
 SAMPLE_TEXT_LIMIT = 160
+#: A restore snapshot keeps only a small live ticker/error tail. Per-file
+#: progress, token usage and active requests are already compacted to latest.
+SNAPSHOT_RECENT_ENTRIES = 24
+SNAPSHOT_RECENT_FAILURES = 50
 
 #: Upper bound on files folded into the cached-scan staleness signal, so a
 #: pathological tree cannot make the freshness check cost more than a scan.
@@ -75,6 +84,8 @@ class FileParseMeta:
     char_count: int = 0
     sample: dict[str, str] = field(default_factory=dict)
     parsed: bool = False
+    migration_entry_count: int = 0
+    migration_char_count: int = 0
 
 
 @dataclass
@@ -90,6 +101,9 @@ class EnrichedScanResult:
     scan: ScanResult
     identity: PackIdentity | None = None
     files: dict[str, FileParseMeta] = field(default_factory=dict)
+    migration: MigrationCatalog | None = None
+    migration_entries: int = 0
+    migration_chars: int = 0
 
 
 def scan_result_payload(enriched: EnrichedScanResult) -> dict[str, Any]:
@@ -201,6 +215,9 @@ class JobRecord:
 
     cancel_requested: bool = False
     finished: bool = False
+    #: Monotonic cursor assigned when each event is delivered. A desktop can
+    #: fetch a compact snapshot at N and then subscribe after=N without a gap.
+    event_seq: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, Any] | None]] = field(
         default_factory=set
@@ -287,6 +304,7 @@ class JobManager:
 
             session_store = _SessionStore()
         self._session_store: SessionStore = session_store
+        self._temporary_dirs: set[Path] = set()
 
     @property
     def session_store(self) -> SessionStore:
@@ -330,14 +348,17 @@ class JobManager:
             runner = self._run_scan(record)
         elif job_type is JobType.TRANSLATE:
             self._require_modpack_path(record.params)
+            config_params = dict(record.params)
+            scan_job_id = config_params.pop("scan_job_id", None)
             try:
-                config = PipelineConfig(**record.params)
+                config = PipelineConfig(**config_params)
             except ValidationError as exc:
                 raise JobParamsError(f"invalid translate params: {exc}") from exc
             if config.glossary_store_dir is None:
                 config.glossary_store_dir = self._glossary_store_dir
             self._attach_scan_payload(record)
-            runner = self._run_translate(record, config)
+            scan_source = self._resolve_scan_source(scan_job_id, config)
+            runner = self._run_translate(record, config, scan_source)
         elif job_type is JobType.EXPORT:
             source = self._resolve_translate_source(record.params, "export")
             runner = self._run_export(record, source)
@@ -486,6 +507,56 @@ class JobManager:
             )
         return source
 
+    def _resolve_scan_source(
+        self,
+        scan_job_id: object,
+        config: PipelineConfig,
+    ) -> JobRecord | None:
+        """Resolve the desktop's W2 scan for reuse by W4 translation."""
+        if scan_job_id is None:
+            return None
+        source = self.get(str(scan_job_id))
+        if source.type is not JobType.SCAN:
+            raise JobStateError(
+                f"job {source.id} is a {source.type.value} job, not scan"
+            )
+        if source.status is not JobStatus.DONE or not isinstance(
+            source.result, EnrichedScanResult
+        ):
+            raise JobStateError(
+                f"scan job {source.id} is {source.status.value}; "
+                "translate requires a completed scan job"
+            )
+        expected = {
+            "modpack_path": str(config.modpack_path),
+            "source_locale": config.source_locale,
+            "target_locale": config.target_locale,
+            "previous_modpack_path": (
+                str(config.previous_modpack_path)
+                if config.previous_modpack_path is not None
+                else None
+            ),
+            "previous_resourcepack_path": (
+                str(config.previous_resourcepack_path)
+                if config.previous_resourcepack_path is not None
+                else None
+            ),
+            "previous_overrides_path": (
+                str(config.previous_overrides_path)
+                if config.previous_overrides_path is not None
+                else None
+            ),
+        }
+        for key, value in expected.items():
+            actual = source.params.get(key)
+            if key in {"source_locale", "target_locale"} and actual is None:
+                actual = "en_us" if key == "source_locale" else "ko_kr"
+            if (str(actual) if actual is not None else None) != value:
+                raise JobParamsError(
+                    f"scan job {source.id} does not match translate param {key}"
+                )
+        return source
+
     # -- cancellation ----------------------------------------------------------
 
     def cancel(self, job_id: str) -> JobRecord:
@@ -509,11 +580,14 @@ class JobManager:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        for directory in self._temporary_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+        self._temporary_dirs.clear()
 
     # -- event stream ----------------------------------------------------------
 
     def subscribe(
-        self, job_id: str
+        self, job_id: str, after: int | None = None
     ) -> tuple[list[dict[str, Any]], asyncio.Queue[dict[str, Any] | None] | None]:
         """Return (history snapshot, live queue).
 
@@ -523,12 +597,82 @@ class JobManager:
         event loop thread, so no frame can fall between them.
         """
         record = self.get(job_id)
-        history = list(record.history)
+        history = [
+            frame
+            for frame in record.history
+            if after is None or int(frame.get("seq", 0)) > after
+        ]
         if record.finished:
             return history, None
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         record.subscribers.add(queue)
         return history, queue
+
+    def snapshot(self, job_id: str) -> dict[str, Any]:
+        """Return compact recoverable UI state plus a gap-free event cursor.
+
+        Translation jobs can emit tens of thousands of batch frames. Replaying
+        all of them into React when a user returns from another tab is both
+        unnecessary and visibly stalls the renderer. This reduction retains
+        the latest progress per file/stage, current requests, cumulative token
+        usage, recent ticker/error samples and the terminal frame.
+        """
+        record = self.get(job_id)
+        progress: dict[tuple[str, str], dict[str, Any]] = {}
+        tokens: dict[str, Any] | None = None
+        glossary_progress: dict[str, Any] | None = None
+        glossary_extracted: dict[str, Any] | None = None
+        active_batches: dict[int, dict[str, Any]] = {}
+        translation_started_at: int | None = None
+        recent_entries: list[dict[str, Any]] = []
+        recent_failures: list[dict[str, Any]] = []
+        failed_count = 0
+        terminal: dict[str, Any] | None = None
+
+        for frame in record.history:
+            event_type = frame.get("type")
+            if event_type == "progress":
+                key = (str(frame.get("stage", "")), str(frame.get("file", "")))
+                progress[key] = frame
+            elif event_type == "tokens":
+                tokens = frame
+            elif event_type == "glossary_progress":
+                glossary_progress = frame
+            elif event_type == "glossary_extracted":
+                glossary_extracted = frame
+            elif event_type == "batch_started":
+                if translation_started_at is None:
+                    translation_started_at = int(frame.get("emitted_at", 0)) or None
+                active_batches[int(frame["request_id"])] = frame
+            elif event_type == "batch_finished":
+                active_batches.pop(int(frame["request_id"]), None)
+            elif event_type == "entry_done":
+                recent_entries.append(frame)
+                recent_entries = recent_entries[-SNAPSHOT_RECENT_ENTRIES:]
+            elif event_type == "entry_failed":
+                failed_count += 1
+                recent_failures.append(frame)
+                recent_failures = recent_failures[-SNAPSHOT_RECENT_FAILURES:]
+            elif event_type in TERMINAL_EVENT_TYPES:
+                terminal = frame
+
+        frames = [
+            *progress.values(),
+            *active_batches.values(),
+            *recent_entries,
+            *recent_failures,
+        ]
+        for optional in (tokens, glossary_progress, glossary_extracted, terminal):
+            if optional is not None:
+                frames.append(optional)
+        frames.sort(key=lambda frame: int(frame.get("seq", 0)))
+        return {
+            "job": record.to_public(),
+            "cursor": record.event_seq,
+            "events": frames,
+            "failed_count": failed_count,
+            "translation_started_at": translation_started_at,
+        }
 
     def unsubscribe(
         self, job_id: str, queue: asyncio.Queue[dict[str, Any] | None]
@@ -563,6 +707,12 @@ class JobManager:
 
     @staticmethod
     def _deliver(record: JobRecord, frame: dict[str, Any]) -> None:
+        record.event_seq += 1
+        frame = {
+            **frame,
+            "seq": record.event_seq,
+            "emitted_at": int(time.time() * 1000),
+        }
         record.history.append(frame)
         for queue in record.subscribers:
             queue.put_nowait(frame)
@@ -651,6 +801,47 @@ class JobManager:
         registry = create_default_registry()
         pairs = scan.all_translation_pairs
         enriched = EnrichedScanResult(scan=scan, identity=identity)
+        migration_inputs = (
+            params.get("previous_modpack_path"),
+            params.get("previous_resourcepack_path"),
+            params.get("previous_overrides_path"),
+        )
+        if any(value is not None for value in migration_inputs):
+            if not params.get("previous_modpack_path"):
+                raise JobParamsError(
+                    "params.previous_modpack_path is required for translation migration"
+                )
+            if not (
+                params.get("previous_resourcepack_path")
+                or params.get("previous_overrides_path")
+            ):
+                raise JobParamsError(
+                    "a previous resource pack or overrides artifact is required"
+                )
+            migration_root = Path(
+                tempfile.mkdtemp(prefix=f"moru-migration-{record.id}-")
+            )
+            self._temporary_dirs.add(migration_root)
+            progress("migration", 0, 1, "이전 번역 비교 준비 중...")
+            enriched.migration = await build_migration_catalog(
+                previous_modpack_path=Path(str(params["previous_modpack_path"])),
+                previous_resourcepack_path=(
+                    Path(str(params["previous_resourcepack_path"]))
+                    if params.get("previous_resourcepack_path")
+                    else None
+                ),
+                previous_overrides_path=(
+                    Path(str(params["previous_overrides_path"]))
+                    if params.get("previous_overrides_path")
+                    else None
+                ),
+                current_modpack_root=Path(str(params["modpack_path"])),
+                current_scan=scan,
+                source_locale=str(params.get("source_locale", "en_us")),
+                target_locale=str(params.get("target_locale", "ko_kr")),
+                asset_cache_dir=migration_root / "resourcepack-assets",
+            )
+            progress("migration", 1, 1, "이전 번역 비교 준비 완료")
         semaphore = asyncio.Semaphore(PARSE_CONCURRENCY)
         parsed_count = 0
 
@@ -680,7 +871,10 @@ class JobManager:
                                 pending_data = {
                                     key: value
                                     for key, value in source_data.items()
-                                    if not existing.get(key, "").strip()
+                                    if is_untranslated_copy(
+                                        value,
+                                        existing.get(key, ""),
+                                    )
                                 }
                         meta.parsed = True
                         meta.entry_count = len(pending_data)
@@ -689,7 +883,24 @@ class JobManager:
                             key: value[:SAMPLE_TEXT_LIMIT]
                             for key, value in list(pending_data.items())[:SAMPLE_ENTRIES]
                         }
+                        if enriched.migration is not None:
+                            logical = logical_file_id(
+                                pair.source_path, scan.modpack_path
+                            )
+                            migrated = {
+                                key: value
+                                for key, value in pending_data.items()
+                                if is_translatable_text(value)
+                                and enriched.migration.match(logical, key, value)
+                                is not None
+                            }
+                            meta.migration_entry_count = len(migrated)
+                            meta.migration_char_count = sum(
+                                len(value) for value in migrated.values()
+                            )
             enriched.files[str(source_path)] = meta
+            enriched.migration_entries += meta.migration_entry_count
+            enriched.migration_chars += meta.migration_char_count
             parsed_count += 1
             progress("parse", parsed_count, len(pairs), source_path.name)
 
@@ -702,7 +913,10 @@ class JobManager:
         return enriched
 
     async def _run_translate(
-        self, record: JobRecord, config: PipelineConfig
+        self,
+        record: JobRecord,
+        config: PipelineConfig,
+        scan_source: JobRecord | None,
     ) -> PipelineResult:
         def on_event(event: str, payload: dict[str, object]) -> None:
             if event == "done":
@@ -716,6 +930,13 @@ class JobManager:
         def cancel_check() -> bool:
             return record.cancel_requested
 
+        enriched = (
+            scan_source.result
+            if scan_source is not None
+            and isinstance(scan_source.result, EnrichedScanResult)
+            else None
+        )
+
         def on_pipeline(pipeline: TranslationPipeline) -> None:
             record.pipeline = pipeline
 
@@ -725,6 +946,8 @@ class JobManager:
                 on_event=on_event,
                 cancel_check=cancel_check,
                 on_pipeline=on_pipeline,
+                scan_result=enriched.scan if enriched is not None else None,
+                migration=enriched.migration if enriched is not None else None,
             )
         finally:
             record.pipeline = None
@@ -930,6 +1153,7 @@ class JobManager:
                 "coverage_percent": stats.coverage_percent,
                 "quality_score": stats.quality_score,
                 "tm_hits": stats.tm_hits,
+                "migration_hits": stats.migration_hits,
                 "model": result.config.model,
                 "duration_seconds": stats.duration_seconds,
             },

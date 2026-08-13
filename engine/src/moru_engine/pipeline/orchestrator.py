@@ -39,6 +39,7 @@ from ..glossary.pair_harvester import (
 from ..glossary.term_miner import TermCandidate, mine_candidates
 from ..graph import SIBLING_CONTEXT_HEADER, TranslationGraph, is_name_entry
 from ..handlers.base import ContentHandler, create_default_registry
+from ..migration import MigrationCatalog, build_migration_catalog, logical_file_id
 from ..models import Glossary, TermRule, ValidationSeverity
 from ..models.glossary_filter import GlossaryFilter
 from ..output import (
@@ -69,6 +70,7 @@ TICKER_TEXT_LIMIT = 120
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_./:-]+")
 _DOTTED_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
+_TEXT_PROTECTOR = PlaceholderProtector()  # stateless; safe to share for estimates
 _CATEGORY_BUCKET_BY_FILE_TYPE = {
     "ftbquests": "quests",
     "the_vault_quest": "quests",
@@ -104,6 +106,17 @@ def looks_like_identifier(text: str) -> bool:
     return len(segments) >= 2 and all(segments)
 
 
+def is_translatable_text(
+    text: str,
+    protected: ProtectedText | None = None,
+) -> bool:
+    """Mirror the pipeline's pre-LLM skip rules for scan-time estimates."""
+    prepared = protected or _TEXT_PROTECTOR.protect(text)
+    return bool(text.strip()) and not (
+        _TEXT_PROTECTOR.is_only_placeholders(prepared) or looks_like_identifier(text)
+    )
+
+
 class RetranslateError(Exception):
     """Single-entry retranslation produced no acceptable output."""
 
@@ -113,6 +126,7 @@ class EntryStatus(str, Enum):
     WARNING = "warning"
     FAILED = "failed"
     TM_HIT = "tm_hit"
+    MIGRATED = "migrated"
     SKIPPED = "skipped"
     MODIFIED = "modified"
 
@@ -134,6 +148,7 @@ class PipelineStats(BaseModel):
     translated_entries: int = 0
     failed_entries: int = 0
     tm_hits: int = 0
+    migration_hits: int = 0
     skipped_entries: int = 0
     categories: dict[str, int] = Field(default_factory=dict)
     prompt_tokens: int = 0
@@ -144,7 +159,7 @@ class PipelineStats(BaseModel):
     quality_score: float = 0.0
 
     def finalize(self) -> None:
-        done = self.translated_entries + self.tm_hits
+        done = self.translated_entries + self.tm_hits + self.migration_hits
         translatable = max(self.total_entries - self.skipped_entries, 1)
         self.coverage_percent = round(100.0 * done / translatable, 2)
         checked = done + self.failed_entries
@@ -217,6 +232,13 @@ class PipelineConfig(BaseModel):
     #: payload convention: TranslationFile.category or file_type fallback.
     include_categories: list[str] | None = None
 
+    #: Optional A/B inputs for run-scoped previous-version migration.  A is a
+    #: previous original modpack folder or CurseForge export ZIP.  B can have
+    #: either or both of the normal Moru output channels.
+    previous_modpack_path: Path | None = None
+    previous_resourcepack_path: Path | None = None
+    previous_overrides_path: Path | None = None
+
 
 class PipelineResult(BaseModel):
     """Mutable across stages: retry mutates in place."""
@@ -234,6 +256,9 @@ class PipelineResult(BaseModel):
     #: terms and LLM-curated terms are run-scoped and would be lost by a
     #: bare rebuild.
     glossary: Glossary | None = None
+    #: Run-scoped A/B index. It also owns the preserved resource-pack asset
+    #: directory needed when review edits regenerate the output trees.
+    migration: MigrationCatalog | None = None
 
     @property
     def failed(self) -> list[EntryResult]:
@@ -347,6 +372,10 @@ class TranslationPipeline:
         graph endpoint; snapshots must stay synchronous (same-loop
         cooperative access, see TranslationGraph.snapshot)."""
         return self._graph
+
+        #: Built only when previous-version inputs are supplied; the default
+        #: path pays no scan/index cost and follows the existing pipeline.
+        self.migration: MigrationCatalog | None = None
 
     # -- events ------------------------------------------------------------
 
@@ -829,11 +858,7 @@ class TranslationPipeline:
                     )
                     continue
                 protected = protector.protect(text)
-                if (
-                    protector.is_only_placeholders(protected)
-                    or not text.strip()
-                    or looks_like_identifier(text)
-                ):
+                if not is_translatable_text(text, protected):
                     prepared.final[key] = text
                     prepared.file_entries.append(
                         EntryResult(
@@ -847,6 +872,32 @@ class TranslationPipeline:
                     continue
                 prepared.protected_map[key] = protected
                 prepared.to_translate[key] = protected.protected
+
+            # Previous-version A/B/C match is deliberately stricter than the
+            # global source-text TM: file identity + entry key + exact A/C
+            # source equality.  It is run-scoped and never stored globally.
+            if self.migration is not None and prepared.to_translate:
+                logical = logical_file_id(
+                    pair.source_path, self.config.modpack_path
+                )
+                for key in list(prepared.to_translate):
+                    translated = self.migration.lookup(
+                        logical, key, source_data[key]
+                    )
+                    if translated is None:
+                        continue
+                    prepared.final[key] = translated
+                    prepared.known_translations[key] = translated
+                    prepared.to_translate.pop(key, None)
+                    prepared.file_entries.append(
+                        EntryResult(
+                            key=key,
+                            file=rel,
+                            source_text=source_data[key],
+                            translated_text=translated,
+                            status=EntryStatus.MIGRATED,
+                        )
+                    )
 
             # TM lookup on raw source text
             if self.tm is not None and prepared.to_translate:
@@ -1154,7 +1205,11 @@ class TranslationPipeline:
 
     # -- entry point ---------------------------------------------------------
 
-    async def run(self, scan_result: ScanResult | None = None) -> PipelineResult:
+    async def run(
+        self,
+        scan_result: ScanResult | None = None,
+        migration: MigrationCatalog | None = None,
+    ) -> PipelineResult:
         started = time.monotonic()
         result = PipelineResult(config=self.config)
         cancelled = False
@@ -1169,6 +1224,46 @@ class TranslationPipeline:
                 scan_result = await scanner.scan(self.config.modpack_path)
             result.scan_result = scan_result
             result.artifact_id = self.artifact_id
+            self.migration = migration
+            result.migration = migration
+
+            migration_inputs = (
+                self.config.previous_modpack_path,
+                self.config.previous_resourcepack_path,
+                self.config.previous_overrides_path,
+            )
+            if self.migration is None and any(
+                path is not None for path in migration_inputs
+            ):
+                if self.config.previous_modpack_path is None:
+                    raise ValueError(
+                        "previous_modpack_path is required for translation migration"
+                    )
+                if (
+                    self.config.previous_resourcepack_path is None
+                    and self.config.previous_overrides_path is None
+                ):
+                    raise ValueError(
+                        "a previous resource pack or overrides artifact is required"
+                    )
+                self._emit(
+                    "progress", {"stage": "migration", "done": 0, "total": 1}
+                )
+                migration_assets = output_root(self.config) / ".migration_assets"
+                self.migration = await build_migration_catalog(
+                    previous_modpack_path=self.config.previous_modpack_path,
+                    previous_resourcepack_path=self.config.previous_resourcepack_path,
+                    previous_overrides_path=self.config.previous_overrides_path,
+                    current_modpack_root=self.config.modpack_path,
+                    current_scan=scan_result,
+                    source_locale=self.config.source_locale,
+                    target_locale=self.config.target_locale,
+                    asset_cache_dir=migration_assets,
+                )
+                result.migration = self.migration
+                self._emit(
+                    "progress", {"stage": "migration", "done": 1, "total": 1}
+                )
 
             all_pairs = scan_result.all_translation_pairs
             pairs = all_pairs
@@ -1340,7 +1435,11 @@ class TranslationPipeline:
 
         # Generate installable trees from every preserved partial entry. A
         # cancellation arriving during the write is consumed once and retried.
-        if result.entries:
+        has_migrated_assets = (
+            result.migration is not None
+            and result.migration.stats.preserved_resourcepack_assets > 0
+        )
+        if result.entries or has_migrated_assets:
             self._emit("progress", self._stage_frame(0))
             try:
                 await write_outputs(result)
@@ -1354,6 +1453,9 @@ class TranslationPipeline:
         stats.total_entries = len(result.entries)
         stats.tm_hits = sum(
             1 for e in result.entries if e.status == EntryStatus.TM_HIT
+        )
+        stats.migration_hits = sum(
+            1 for e in result.entries if e.status == EntryStatus.MIGRATED
         )
         stats.skipped_entries = sum(
             1 for e in result.entries if e.status == EntryStatus.SKIPPED
@@ -1377,10 +1479,11 @@ class TranslationPipeline:
             self._emit("done", {"stats": stats.model_dump()})
             logger.info(
                 "Pipeline done: %d translated, %d TM hits, %d failed, "
-                "%d skipped (%.1fs)",
+                "%d migrated, %d skipped (%.1fs)",
                 stats.translated_entries,
                 stats.tm_hits,
                 stats.failed_entries,
+                stats.migration_hits,
                 stats.skipped_entries,
                 stats.duration_seconds,
             )
@@ -1533,6 +1636,8 @@ async def run_pipeline(
     on_event: Callable[[str, dict[str, object]], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     on_pipeline: Callable[[TranslationPipeline], None] | None = None,
+    scan_result: ScanResult | None = None,
+    migration: MigrationCatalog | None = None,
 ) -> PipelineResult:
     """Convenience wrapper: build, run, close.
 
@@ -1546,7 +1651,7 @@ async def run_pipeline(
     if on_pipeline is not None:
         on_pipeline(pipeline)
     try:
-        return await pipeline.run()
+        return await pipeline.run(scan_result=scan_result, migration=migration)
     finally:
         pipeline.close()
 
@@ -1562,6 +1667,7 @@ _FRESH_STATUSES = (
     EntryStatus.WARNING,
     EntryStatus.MODIFIED,
     EntryStatus.TM_HIT,
+    EntryStatus.MIGRATED,
 )
 
 
@@ -1616,6 +1722,11 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
             target_locale=config.target_locale,
             pack_format=pack_format,
             description=f"{version_prefix}§a모루§7로 한국어로 번역됨 — §amoru.gg",
+            resourcepack_seed_dir=(
+                result.migration.resourcepack_assets_dir
+                if result.migration is not None
+                else None
+            ),
         )
     )
     generation = await generator.generate(list(outputs.values()))

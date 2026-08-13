@@ -111,6 +111,9 @@ class OutputConfig:
     target_locale: str = "ko_kr"
     pack_format: int = DEFAULT_PACK_FORMAT
     description: str = "§a모루§7로 번역됨 — §amoru.gg"
+    #: Optional previous resource-pack assets (fonts/textures/etc.).  The
+    #: migration index has already removed translated files and pack metadata.
+    resourcepack_seed_dir: Path | None = None
 
 
 @dataclass(slots=True)
@@ -192,6 +195,19 @@ class OutputGenerator:
         for tree in (self.resourcepack_dir, self.overrides_dir):
             if tree.exists():
                 shutil.rmtree(tree)
+
+        # A previous translation can carry fonts/textures needed for Korean
+        # readability.  Seed only its pre-filtered non-translation assets;
+        # generated C translations below win on any path collision.
+        seed = self.config.resourcepack_seed_dir
+        if seed is not None and seed.is_dir():
+            for source in sorted(seed.rglob("*")):
+                if not source.is_file():
+                    continue
+                target = self.resourcepack_dir / source.relative_to(seed)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                result.resourcepack_files.append(target)
 
         # Language files from several sources (mod JAR + resourcepack zip
         # + overlay) can map to the same output file; merge them so the

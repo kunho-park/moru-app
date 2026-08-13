@@ -12,6 +12,7 @@ import type {
   Glossary,
   Job,
   JobEventFrame,
+  JobSnapshot,
   Provider,
   ProviderModels,
   ProviderTestResult,
@@ -96,6 +97,7 @@ export const api = {
     request<Job>("/jobs", { method: "POST", body: JSON.stringify({ type: "upload", params }) }),
 
   job: (id: string) => request<Job>(`/jobs/${id}`),
+  jobSnapshot: (id: string) => request<JobSnapshot>(`/jobs/${id}/snapshot`),
   cancelJob: (id: string) => request<{ id: string; status: string }>(`/jobs/${id}/cancel`, { method: "POST" }),
 
   scanResult: (jobId: string) => request<ScanResult>(`/scan/${jobId}/result`),
@@ -222,14 +224,20 @@ export const api = {
 export function openJobEvents(
   jobId: string,
   onFrame: (frame: JobEventFrame) => void,
-  onClose?: () => void,
+  onClose?: (event: CloseEvent, manuallyClosed: boolean) => void,
+  after?: number,
 ): () => void {
   const { base, token } = endpoint();
-  const url = `${base.replace("http", "ws")}/jobs/${jobId}/events?token=${token}`;
+  const cursor = after === undefined ? "" : `&after=${after}`;
+  const url = `${base.replace("http", "ws")}/jobs/${jobId}/events?token=${token}${cursor}`;
   const ws = new WebSocket(url);
+  let manuallyClosed = false;
   ws.onmessage = (event) => {
     onFrame(JSON.parse(event.data as string) as JobEventFrame);
   };
-  ws.onclose = () => onClose?.();
-  return () => ws.close();
+  ws.onclose = (event) => onClose?.(event, manuallyClosed);
+  return () => {
+    manuallyClosed = true;
+    ws.close();
+  };
 }

@@ -57,6 +57,7 @@
     "passed": "통과",
     "modified": "수정됨",
     "tmHit": "TM 재사용",
+    "migrated": "이전 번역 재사용",
     "skipped": "건너뜀",
     "shared": "공유됨"
   },

@@ -57,6 +57,7 @@
     "passed": "Passed",
     "modified": "Modified",
     "tmHit": "TM reuse",
+    "migrated": "Previous translation",
     "skipped": "Skipped",
     "shared": "Shared"
   },

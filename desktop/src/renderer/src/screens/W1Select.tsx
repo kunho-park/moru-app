@@ -147,6 +147,70 @@ function SkeletonRow() {
   );
 }
 
+function MigrationInputRow({
+  label,
+  optional,
+  value,
+  onPickFolder,
+  onPickZip,
+  onClear,
+}: {
+  label: string;
+  optional: boolean;
+  value: string | null;
+  onPickFolder: () => void;
+  onPickZip: () => void;
+  onClear: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="grid grid-cols-[190px_1fr_auto] items-center gap-3 border-t border-line px-4 py-3 first:border-t-0">
+      <div>
+        <div className="text-[12px] font-bold text-text">{label}</div>
+        <div className="mt-0.5 font-mono text-[10px] text-text3">
+          {optional ? t("w1.migration.optional") : t("w1.migration.required")}
+        </div>
+      </div>
+      <div
+        className={`truncate border border-line2 bg-card px-3 py-2 font-mono text-[11px] ${
+          value === null ? "text-text4" : "text-text2"
+        }`}
+        title={value ?? undefined}
+      >
+        {value ?? t("w1.migration.notSelected")}
+      </div>
+      <div className="flex gap-1.5">
+        <button
+          type="button"
+          onClick={onPickFolder}
+          aria-label={`${label}: ${t("w1.migration.folder")}`}
+          className="border border-edge bg-bar px-2.5 py-2 font-mono text-[10px] text-text2 hover:border-edge2 hover:text-text"
+        >
+          {t("w1.migration.folder")}
+        </button>
+        <button
+          type="button"
+          onClick={onPickZip}
+          aria-label={`${label}: ZIP`}
+          className="border border-edge bg-bar px-2.5 py-2 font-mono text-[10px] text-text2 hover:border-edge2 hover:text-text"
+        >
+          ZIP
+        </button>
+        {value !== null && (
+          <button
+            type="button"
+            onClick={onClear}
+            aria-label={`${label}: ${t("common.action.delete")}`}
+            className="border border-line2 px-2.5 py-2 font-mono text-[11px] text-text3 hover:border-red hover:text-red"
+          >
+            ×
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function W1Select() {
   const { t } = useTranslation();
   const go = useRouter((s) => s.go);
@@ -155,6 +219,12 @@ export function W1Select() {
   const probe = useWizard((s) => s.probe);
   const startSession = useWizard((s) => s.startSession);
   const startScan = useWizard((s) => s.startScan);
+  const migrationEnabled = useWizard((s) => s.migrationEnabled);
+  const previousModpackPath = useWizard((s) => s.previousModpackPath);
+  const previousResourcepackPath = useWizard((s) => s.previousResourcepackPath);
+  const previousOverridesPath = useWizard((s) => s.previousOverridesPath);
+  const setMigrationEnabled = useWizard((s) => s.setMigrationEnabled);
+  const setMigrationInput = useWizard((s) => s.setMigrationInput);
   const recentFolders = useSettings((s) => s.recentFolders);
   const sessions = useSessions((s) => s.sessions);
 
@@ -180,6 +250,10 @@ export function W1Select() {
   );
   const recentList = recentFolders.filter((p) => p !== modpackPath && !detectedPaths.has(p));
   const selectedInDetected = modpackPath !== null && detectedPaths.has(modpackPath);
+  const migrationReady =
+    !migrationEnabled ||
+    (previousModpackPath !== null &&
+      (previousResourcepackPath !== null || previousOverridesPath !== null));
 
   const selectPath = useCallback(
     async (path: string) => {
@@ -215,10 +289,26 @@ export function W1Select() {
   }, [t]);
 
   const handleNext = useCallback(() => {
-    if (modpackPath === null) return;
+    if (modpackPath === null || !migrationReady) return;
     void startScan();
     go("w2");
-  }, [modpackPath, startScan, go]);
+  }, [migrationReady, modpackPath, startScan, go]);
+
+  const pickMigrationInput = useCallback(
+    async (
+      kind: "modpack" | "resourcepack" | "overrides",
+      source: "folder" | "zip",
+    ) => {
+      const path =
+        source === "folder"
+          ? await moru.pickFolder()
+          : await moru.pickFile([
+              { name: t("w1.migration.zipFilter"), extensions: ["zip"] },
+            ]);
+      if (path !== null && path !== "") setMigrationInput(kind, path);
+    },
+    [setMigrationInput, t],
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -431,6 +521,76 @@ export function W1Select() {
         </div>
       )}
 
+      {/* Optional A/B/C migration. The existing one-pack workflow stays the
+          default; enabling this only adds local inputs to the normal scan. */}
+      <div className="mt-5 border border-line2 bg-raised">
+        <button
+          type="button"
+          onClick={() => setMigrationEnabled(!migrationEnabled)}
+          disabled={modpackPath === null}
+          aria-expanded={migrationEnabled}
+          className="flex w-full items-center gap-3 px-4 py-3.5 text-left hover:bg-raised-hover disabled:cursor-not-allowed disabled:opacity-55"
+        >
+          <div
+            className={`flex h-5 w-5 shrink-0 items-center justify-center border ${
+              migrationEnabled
+                ? "border-accent bg-accent text-sel-ink"
+                : "border-edge bg-bar text-text3"
+            }`}
+          >
+            {migrationEnabled ? "✓" : "+"}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-bold text-text">{t("w1.migration.title")}</div>
+            <div className="mt-0.5 text-[11px] text-text3">{t("w1.migration.subtitle")}</div>
+          </div>
+          <span className="font-mono text-[10px] text-text3">
+            {modpackPath === null
+              ? t("w1.migration.selectCurrentFirst")
+              : migrationEnabled
+                ? t("w1.migration.on")
+                : t("w1.migration.off")}
+          </span>
+        </button>
+        {migrationEnabled && (
+          <div className="border-t border-line2 bg-hover">
+            <MigrationInputRow
+              label={t("w1.migration.oldModpack")}
+              optional={false}
+              value={previousModpackPath}
+              onPickFolder={() => void pickMigrationInput("modpack", "folder")}
+              onPickZip={() => void pickMigrationInput("modpack", "zip")}
+              onClear={() => setMigrationInput("modpack", null)}
+            />
+            <MigrationInputRow
+              label={t("w1.migration.resourcepack")}
+              optional
+              value={previousResourcepackPath}
+              onPickFolder={() => void pickMigrationInput("resourcepack", "folder")}
+              onPickZip={() => void pickMigrationInput("resourcepack", "zip")}
+              onClear={() => setMigrationInput("resourcepack", null)}
+            />
+            <MigrationInputRow
+              label={t("w1.migration.overrides")}
+              optional
+              value={previousOverridesPath}
+              onPickFolder={() => void pickMigrationInput("overrides", "folder")}
+              onPickZip={() => void pickMigrationInput("overrides", "zip")}
+              onClear={() => setMigrationInput("overrides", null)}
+            />
+            <div
+              className={`border-t px-4 py-2.5 text-[11px] ${
+                migrationReady
+                  ? "border-accent-lo bg-tint text-accent"
+                  : "border-amber/30 bg-[rgba(245,180,84,0.05)] text-amber"
+              }`}
+            >
+              {migrationReady ? t("w1.migration.ready") : t("w1.migration.incomplete")}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Wizard footer */}
       <div className="mt-8 flex items-center justify-between border-t border-line pt-5">
         <button
@@ -451,7 +611,7 @@ export function W1Select() {
           )}
           <button
             type="button"
-            disabled={modpackPath === null}
+            disabled={modpackPath === null || !migrationReady}
             onClick={handleNext}
             className="flex items-center gap-[6px] bg-accent px-5 py-[10px] text-[13px] font-bold text-sel-ink hover:bg-accent-hi disabled:cursor-not-allowed disabled:opacity-40"
           >

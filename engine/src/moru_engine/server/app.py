@@ -21,7 +21,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, WebSocket
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from platformdirs import user_config_dir
 from pydantic import BaseModel, Field, field_validator
@@ -251,10 +259,8 @@ def _validate_locale(value: str, name: str) -> str:
 
 
 def _entry_payload(entry: EntryResult) -> dict[str, Any]:
-    # Deviation: contract requires translated_text as a plain string, but the
-    # engine keeps None for untranslated entries -> coerced to "". The engine
-    # also has a "skipped" status the contract enum does not list; it is
-    # passed through as-is (only reachable with filter=all).
+    # Contract requires translated_text as a plain string, while the engine
+    # keeps None for untranslated entries, so coerce that one internal state.
     return {
         "key": entry.key,
         "file": entry.file,
@@ -263,7 +269,6 @@ def _entry_payload(entry: EntryResult) -> dict[str, Any]:
         "status": entry.status.value,
         "errors": list(entry.errors),
     }
-
 
 def _find_entry(
     result: PipelineResult, key: str, file: str | None = None
@@ -397,6 +402,13 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return record.to_public()
 
+    @api.get("/jobs/{job_id}/snapshot")
+    async def get_job_snapshot(job_id: str) -> dict[str, Any]:
+        try:
+            return manager.snapshot(job_id)
+        except UnknownJobError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @api.post("/jobs/{job_id}/cancel", status_code=202)
     async def cancel_job(job_id: str) -> dict[str, Any]:
         try:
@@ -415,8 +427,16 @@ def create_app(
         if not _token_matches(supplied):
             await websocket.close(code=1008, reason="unauthorized")
             return
+        after_value = websocket.query_params.get("after")
         try:
-            history, queue = manager.subscribe(job_id)
+            after = int(after_value) if after_value is not None else None
+            if after is not None and after < 0:
+                raise ValueError
+        except ValueError:
+            await websocket.close(code=1008, reason="invalid event cursor")
+            return
+        try:
+            history, queue = manager.subscribe(job_id, after=after)
         except UnknownJobError:
             await websocket.close(code=1008, reason=f"unknown job: {job_id}")
             return

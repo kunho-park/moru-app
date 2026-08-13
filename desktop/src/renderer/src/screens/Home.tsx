@@ -408,6 +408,7 @@ export function HomeScreen() {
   const removeSession = useSessions((s) => s.remove);
   const startSession = useWizard((s) => s.startSession);
   const resumeSession = useWizard((s) => s.resumeSession);
+  const reopenSession = useWizard((s) => s.reopenSession);
   const recentFolders = useSettings((s) => s.recentFolders);
   const [dragOver, setDragOver] = useState(false);
 
@@ -434,10 +435,9 @@ export function HomeScreen() {
     await beginSession(path);
   };
 
-  const handleResume = (id: string) => {
-    const live = useWizard.getState().sessionId === id;
-    if (!resumeSession(id)) return;
-    go(live ? "w4" : "w3");
+  const handleResume = async (id: string) => {
+    const result = await reopenSession(id);
+    if (result === "ok") go("w4");
   };
 
   const handleRetry = (id: string) => {
@@ -575,7 +575,7 @@ export function HomeScreen() {
               <RecentJobCard
                 key={record.id}
                 record={record}
-                onResume={() => handleResume(record.id)}
+                onResume={() => void handleResume(record.id)}
                 onRetry={() => handleRetry(record.id)}
                 onRemove={() => removeSession(record.id)}
               />

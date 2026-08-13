@@ -111,8 +111,8 @@ class OutputConfig:
     target_locale: str = "ko_kr"
     pack_format: int = DEFAULT_PACK_FORMAT
     description: str = "§a모루§7로 번역됨 — §amoru.gg"
-    #: Optional previous resource-pack assets (fonts/textures/etc.).  The
-    #: migration index has already removed translated files and pack metadata.
+    #: Optional previous font definitions/files/textures. The migration index
+    #: has already removed translated files and pack metadata.
     resourcepack_seed_dir: Path | None = None
 
 
@@ -196,9 +196,9 @@ class OutputGenerator:
             if tree.exists():
                 shutil.rmtree(tree)
 
-        # A previous translation can carry fonts/textures needed for Korean
-        # readability.  Seed only its pre-filtered non-translation assets;
-        # generated C translations below win on any path collision.
+        # A previous translation can carry fonts needed for Korean readability.
+        # Seed only its pre-filtered font definitions/files/textures; generated
+        # C translations below win on any path collision.
         seed = self.config.resourcepack_seed_dir
         if seed is not None and seed.is_dir():
             for source in sorted(seed.rglob("*")):

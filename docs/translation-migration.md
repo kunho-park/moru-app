@@ -41,11 +41,13 @@ text follows the normal translation pipeline.
   entries and feed the normal resource-pack output tree.
 - B overrides match files relative to the modpack root and feed the normal
   overrides output tree.
-- Non-translation resource-pack assets (for example fonts, textures, and
-  sounds) are copied unchanged into the new resource-pack output, including
-  assets inside Paxi/OpenLoader resource-pack ZIPs supplied as B. Translation
-  patch JARs are used for text matching only; their old binaries/assets are not
-  copied wholesale.
+- Font-related resource-pack assets are copied unchanged into the new output:
+  font definitions and files under `font/`, bitmap glyphs under
+  `textures/font/`, and font binaries referenced from another resource path.
+  The same filter applies to Paxi/OpenLoader resource-pack ZIPs supplied as B;
+  unrelated textures, sounds, and other assets are not carried forward.
+  Translation patch JARs are used for text matching only; their old binaries
+  and assets are not copied wholesale.
 - Old override files are never copied wholesale. Only matched translated text
   is applied onto C's current file template, preventing old configuration from
   reverting new-version behavior.
@@ -65,6 +67,10 @@ text follows the normal translation pipeline.
 - Archive extraction scratch is removed after indexing. The filtered resource
   asset cache remains only for the sidecar session so review edits can safely
   regenerate the output, and is removed when the sidecar shuts down.
+- W2's parsed A/B/C index is reused only when a lightweight path/size/mtime
+  fingerprint is unchanged at W4. If any input changed, W4 automatically
+  rebuilds the scan and migration index. Normal translation always keeps its
+  established fresh W4 scan.
 - Existing Moru behavior is unchanged when migration inputs are absent.
 
 ## Failure handling
@@ -81,8 +87,9 @@ text follows the normal translation pipeline.
 
 - Unit tests for exact match, changed source, deleted/new keys, wrong A/B,
   ambiguous files, both output channels, and ZIP traversal rejection.
-- Output tests proving a font file survives byte-for-byte, `pack.mcmeta` targets
-  C, and old override-only configuration does not leak into the result.
+- Output tests proving font assets survive byte-for-byte while unrelated
+  textures/sounds do not, `pack.mcmeta` targets C, and old override-only
+  configuration does not leak into the result.
 - Pipeline test proving migrated entries skip the LLM while changed entries
   reach it, with separate migration statistics.
 - Engine pytest, desktop tests/typecheck/build, and a read-only dry run against
@@ -101,10 +108,13 @@ archives were used as B; no LLM was called.
   changed source text and were deliberately not reused
 - 0 ambiguous coordinates after explicit A content took precedence over
   manifest-based addon inference
-- 15 non-translation resource-pack assets preserved, all output SHA-256 hashes
-  identical to the indexed B assets
-- 420 resource-pack files and 58 overrides files generated; no old-only
-  override path appeared in the output
+- 4 font-related assets are preserved by the final default filter (2 font
+  definitions plus OTF/TTF files); the original broad-asset dry run retained
+  15 files before this review refinement.
+- The earlier broad-asset dry run generated 420 resource-pack files and 58
+  overrides files. Translation reuse counts and override isolation were
+  unchanged by narrowing the final asset filter; the final font-only copy was
+  separately verified as the four files above.
 - generated `pack.mcmeta` identified C as v4.0.1
 
 ## Deferred work

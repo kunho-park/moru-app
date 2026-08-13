@@ -193,6 +193,22 @@ test("uses compact persisted totals after the full scan tree is gone", () => {
   ).toEqual(totals);
 });
 
+test("review stat updates reach both the live wizard and persisted session", () => {
+  useSessions.getState().upsert(record("s1", "done", { translateJobId: "job-1" }));
+  useWizard.setState({ sessionId: "s1", stats });
+  const refreshed = {
+    ...stats,
+    translated_entries: 31,
+    migration_hits: 9,
+    coverage_percent: 96,
+  };
+
+  useWizard.getState().updateReviewStats(refreshed);
+
+  expect(useWizard.getState().stats).toEqual(refreshed);
+  expect(useSessions.getState().sessions[0].stats).toEqual(refreshed);
+});
+
 test("falls back to the persisted session id before reporting a missing job", async () => {
   useSessions.getState().upsert(record("s1", "done"));
   responses.push(notFound, notFound);

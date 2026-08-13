@@ -427,6 +427,60 @@ def test_category_stats_bucket_refresh_and_upload_payload(
     }
 
 
+def test_refresh_stats_reclassifies_migrated_and_cached_entries(
+    tmp_path: Path,
+) -> None:
+    result = PipelineResult(
+        config=PipelineConfig(modpack_path=tmp_path / "modpack"),
+        entries=[
+            EntryResult(
+                key="migrated",
+                file="lang/en_us.json",
+                source_text="Old source",
+                translated_text="이전 수동 번역",
+                status=EntryStatus.MIGRATED,
+            ),
+            EntryResult(
+                key="cached",
+                file="lang/en_us.json",
+                source_text="Cached source",
+                translated_text="TM 번역",
+                status=EntryStatus.TM_HIT,
+            ),
+            EntryResult(
+                key="skipped",
+                file="lang/en_us.json",
+                source_text="Identifier",
+                status=EntryStatus.SKIPPED,
+            ),
+            EntryResult(
+                key="failed",
+                file="lang/en_us.json",
+                source_text="Failed source",
+                status=EntryStatus.FAILED,
+            ),
+        ],
+    )
+
+    TranslationPipeline._refresh_stats(result)
+    assert result.stats.total_entries == 4
+    assert result.stats.migration_hits == 1
+    assert result.stats.tm_hits == 1
+    assert result.stats.skipped_entries == 1
+    assert result.stats.failed_entries == 1
+    assert result.stats.translated_entries == 0
+    assert result.stats.coverage_percent == 66.67
+
+    result.entries[0].status = EntryStatus.MODIFIED
+    result.entries[0].translated_text = "새 번역"
+    TranslationPipeline._refresh_stats(result)
+    assert result.stats.migration_hits == 0
+    assert result.stats.tm_hits == 1
+    assert result.stats.translated_entries == 1
+    assert result.stats.coverage_percent == 66.67
+    assert result.stats.coverage_percent <= 100
+
+
 def _pack_payload(result: PipelineResult) -> dict[str, Any]:
     source = JobRecord(
         id="translate",

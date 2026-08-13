@@ -154,6 +154,7 @@ interface WizardStore {
   startTranslate: () => Promise<void>;
   handleTranslationFrame: (frame: JobEventFrame, sessionId: string) => void;
   cancelTranslate: () => Promise<void>;
+  updateReviewStats: (stats: PipelineStats) => void;
   startExport: () => Promise<void>;
   appendLog: (level: LogLine["level"], text: string) => void;
   reset: () => void;
@@ -885,6 +886,14 @@ export const useWizard = create<WizardStore>((set, get) => ({
     const { translateJobId } = get();
     if (translateJobId === null) return;
     await api.cancelJob(translateJobId);
+  },
+
+  updateReviewStats: (stats) => {
+    set({ stats });
+    const sessionId = get().sessionId;
+    if (sessionId !== null) {
+      useSessions.getState().patch(sessionId, { stats });
+    }
   },
 
   startExport: async () => {

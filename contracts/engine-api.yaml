@@ -226,6 +226,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Entry" }
         "404": { description: unknown entry }
+        "409": { description: translate job still running }
   /translate/{jobId}/entries/{entryKey}/retranslate:
     post:
       summary: >
@@ -258,6 +259,18 @@ paths:
               schema: { $ref: "#/components/schemas/Entry" }
         "409": { description: translate job still running }
         "422": { description: translator build or retranslation failure }
+  /translate/{jobId}/stats:
+    get:
+      summary: Current pipeline counters after any review edits
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PipelineStats" }
+        "404": { description: unknown or non-translate job }
+        "409": { description: translate result not available }
   /sessions:
     get:
       summary: List all persisted translation session records on disk
@@ -752,6 +765,37 @@ components:
               source: { type: string }
               target: { type: string }
               kind: { type: string, enum: [defines, mentions, sibling] }
+    PipelineStats:
+      type: object
+      required:
+        [
+          total_files,
+          total_entries,
+          translated_entries,
+          failed_entries,
+          tm_hits,
+          migration_hits,
+          skipped_entries,
+          coverage_percent,
+          quality_score,
+        ]
+      properties:
+        total_files: { type: integer }
+        total_entries: { type: integer }
+        translated_entries: { type: integer }
+        failed_entries: { type: integer }
+        tm_hits: { type: integer }
+        migration_hits: { type: integer }
+        skipped_entries: { type: integer }
+        categories:
+          type: object
+          additionalProperties: { type: integer }
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        cached_tokens: { type: integer }
+        duration_seconds: { type: number }
+        coverage_percent: { type: number }
+        quality_score: { type: number }
     Glossary:
       type: object
       properties:

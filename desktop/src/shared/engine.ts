@@ -241,7 +241,6 @@ export interface TranslateParams {
   /** Maximum mined glossary candidates; null means unlimited. */
   glossary_max_terms?: number | null;
   include_categories?: string[];
-  /** Completed W2 scan/index reused by the translate job. */
   previous_modpack_path?: string;
   previous_resourcepack_path?: string;
   previous_overrides_path?: string;

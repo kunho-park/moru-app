@@ -613,6 +613,11 @@ def create_app(
         job_id: str, entry_key: str, body: EntryPatch
     ) -> dict[str, Any]:
         record, result = _get_pipeline_result(job_id)
+        if not record.finished:
+            raise HTTPException(
+                status_code=409,
+                detail=f"translate job {job_id} is still running",
+            )
         entry = _find_entry(result, entry_key, body.file)
         if entry is None:
             raise HTTPException(
@@ -620,6 +625,8 @@ def create_app(
             )
         entry.translated_text = body.translated_text
         entry.status = EntryStatus.MODIFIED
+        TranslationPipeline._refresh_stats(result)
+        manager.refresh_translate_stats(record)
         await _persist_session(record)
         return _entry_payload(entry)
 
@@ -661,9 +668,15 @@ def create_app(
             ) from exc
         finally:
             pipeline.close()
-
+        manager.refresh_translate_stats(record)
         await _persist_session(record)
         return _entry_payload(entry)
+
+    @api.get("/translate/{job_id}/stats")
+    async def translate_stats(job_id: str) -> dict[str, Any]:
+        """Current counters, including any post-run review mutations."""
+        _, result = _get_pipeline_result(job_id)
+        return result.stats.model_dump()
 
     # -- sessions -------------------------------------------------------------------
 

@@ -57,6 +57,19 @@ def _seed_three_way(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     font = resourcepack / "assets/demo/font/readable.bin"
     font.parent.mkdir(parents=True, exist_ok=True)
     font.write_bytes(b"font-bytes-\x00-unchanged")
+    _write_json(
+        resourcepack / "assets/demo/font/default.json",
+        {"providers": [{"type": "ttf", "file": "demo:font/readable.ttf"}]},
+    )
+    glyph = resourcepack / "assets/demo/textures/font/glyph.png"
+    glyph.parent.mkdir(parents=True, exist_ok=True)
+    glyph.write_bytes(b"font-glyph")
+    unrelated_texture = resourcepack / "assets/demo/textures/gui/legacy.png"
+    unrelated_texture.parent.mkdir(parents=True, exist_ok=True)
+    unrelated_texture.write_bytes(b"old-ui-texture")
+    unrelated_sound = resourcepack / "assets/demo/sounds/legacy.ogg"
+    unrelated_sound.parent.mkdir(parents=True, exist_ok=True)
+    unrelated_sound.write_bytes(b"old-sound")
     _write_json(resourcepack / "pack.mcmeta", {"pack": {"pack_format": 1}})
 
     old_skill = {
@@ -140,7 +153,12 @@ async def test_catalog_matches_only_exact_source_and_preserves_assets(
         "New override",
     ) is None
     assert (tmp_path / "asset-cache/assets/demo/font/readable.bin").read_bytes() == b"font-bytes-\x00-unchanged"
+    assert (tmp_path / "asset-cache/assets/demo/font/default.json").is_file()
+    assert (tmp_path / "asset-cache/assets/demo/textures/font/glyph.png").read_bytes() == b"font-glyph"
+    assert not (tmp_path / "asset-cache/assets/demo/textures/gui/legacy.png").exists()
+    assert not (tmp_path / "asset-cache/assets/demo/sounds/legacy.ogg").exists()
     assert not (tmp_path / "asset-cache/pack.mcmeta").exists()
+    assert catalog.stats.preserved_resourcepack_assets == 3
 
 
 @pytest.mark.asyncio
@@ -212,6 +230,14 @@ async def test_overrides_patch_archive_reuses_translation_and_preserves_font(
             json.dumps({"same": "중첩 수동 번역"}, ensure_ascii=False),
         )
         zf.writestr("assets/demo/font/readable.ttf", b"embedded-font")
+        zf.writestr(
+            "assets/demo/font/default.json",
+            json.dumps(
+                {"providers": [{"type": "ttf", "file": "demo:font/readable.ttf"}]}
+            ),
+        )
+        zf.writestr("assets/demo/textures/gui/legacy.png", b"old-ui-texture")
+        zf.writestr("assets/demo/sounds/legacy.ogg", b"old-sound")
         zf.writestr("META-INF/not-a-resource.txt", "do not copy")
 
     scan = await scan_modpack(current)
@@ -230,8 +256,11 @@ async def test_overrides_patch_archive_reuses_translation_and_preserves_font(
         "resource:demo/lang/{locale}.json", "same", "Same"
     ) == "중첩 수동 번역"
     assert (tmp_path / "assets/assets/demo/font/readable.ttf").read_bytes() == b"embedded-font"
+    assert (tmp_path / "assets/assets/demo/font/default.json").is_file()
+    assert not (tmp_path / "assets/assets/demo/textures/gui/legacy.png").exists()
+    assert not (tmp_path / "assets/assets/demo/sounds/legacy.ogg").exists()
     assert not (tmp_path / "assets/META-INF/not-a-resource.txt").exists()
-    assert catalog.stats.preserved_resourcepack_assets == 1
+    assert catalog.stats.preserved_resourcepack_assets == 2
 
 
 @pytest.mark.asyncio
@@ -246,6 +275,16 @@ async def test_overrides_font_only_paxi_pack_is_preserved(tmp_path: Path) -> Non
     with zipfile.ZipFile(patch, "w") as zf:
         zf.writestr("pack.mcmeta", json.dumps({"pack": {"pack_format": 15}}))
         zf.writestr("assets/minecraft/font/readable.ttf", b"font-only-paxi")
+        zf.writestr(
+            "assets/minecraft/font/default.json",
+            json.dumps(
+                {
+                    "providers": [
+                        {"type": "ttf", "file": "minecraft:font/readable.ttf"}
+                    ]
+                }
+            ),
+        )
 
     scan = await scan_modpack(current)
     catalog = await build_migration_catalog(
@@ -262,7 +301,8 @@ async def test_overrides_font_only_paxi_pack_is_preserved(tmp_path: Path) -> Non
     assert (
         tmp_path / "assets/assets/minecraft/font/readable.ttf"
     ).read_bytes() == b"font-only-paxi"
-    assert catalog.stats.preserved_resourcepack_assets == 1
+    assert (tmp_path / "assets/assets/minecraft/font/default.json").is_file()
+    assert catalog.stats.preserved_resourcepack_assets == 2
 
 
 @pytest.mark.asyncio
@@ -583,6 +623,7 @@ async def test_pipeline_reuses_exact_diff_and_keeps_current_override_template(
     )
     assert pack_lang == {"changed": "AI New resource", "same": "수동 리소스"}
     assert (tmp_path / "out/resourcepack/assets/demo/font/readable.bin").read_bytes() == b"font-bytes-\x00-unchanged"
+    assert (tmp_path / "out/resourcepack/assets/demo/font/default.json").is_file()
 
     override_path = tmp_path / "out/overrides/config/puffish_skills/categories/demo/definitions.json"
     override_payload = json.loads(override_path.read_text(encoding="utf-8"))

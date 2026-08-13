@@ -13,6 +13,7 @@ import type {
   Job,
   JobEventFrame,
   JobSnapshot,
+  PipelineStats,
   Provider,
   ProviderModels,
   ProviderTestResult,
@@ -167,6 +168,8 @@ export const api = {
       `/translate/${jobId}/graph${qs === "" ? "" : `?${qs}`}`,
     );
   },
+  translateStats: (jobId: string) =>
+    request<PipelineStats>(`/translate/${jobId}/stats`),
 
   glossary: (sourceLang: string, targetLang: string) =>
     request<Glossary>(`/glossary?source_lang=${sourceLang}&target_lang=${targetLang}`),

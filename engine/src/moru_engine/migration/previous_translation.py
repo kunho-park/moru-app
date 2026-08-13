@@ -39,6 +39,7 @@ _LOCALE_TOKEN_RE = re.compile(r"(?i)(?<![a-z])([a-z]{2}_[a-z]{2})(?![a-z])")
 _ARCHIVE_SUFFIXES = {".zip", ".jar"}
 _MAX_ARCHIVE_FILES = 1_000_000
 _MAX_ARCHIVE_BYTES = 20 * 1024 * 1024 * 1024
+_FONT_FILE_SUFFIXES = {".otf", ".ttc", ".ttf", ".woff", ".woff2"}
 
 
 class MigrationError(ValueError):
@@ -461,7 +462,6 @@ async def _index_tree(
         ):
             _copy_embedded_resourcepack_assets(
                 extract_dir,
-                translated_paths,
                 resourcepack_assets_dir,
             )
         if len(translated_paths) > before:
@@ -471,7 +471,6 @@ async def _index_tree(
 
 def _copy_resourcepack_assets(
     root: Path,
-    translated_paths: set[Path],
     destination: Path,
 ) -> int:
     if destination.exists():
@@ -481,10 +480,8 @@ def _copy_resourcepack_assets(
     for source in root.rglob("*"):
         if not source.is_file() or source.is_symlink():
             continue
-        if source.resolve() in translated_paths:
-            continue
         relative = source.relative_to(root)
-        if relative.as_posix().lower() in {"pack.mcmeta", "pack.png"}:
+        if not _is_font_resource(relative):
             continue
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -495,15 +492,15 @@ def _copy_resourcepack_assets(
 
 def _copy_embedded_resourcepack_assets(
     archive_root: Path,
-    translated_paths: set[Path],
     destination: Path,
 ) -> None:
-    """Merge non-translation ``assets/`` trees from a patch archive.
+    """Merge font-related ``assets/`` files from a patch archive.
 
     Previous overrides commonly contain Paxi/OpenLoader resource-pack ZIPs.
-    Their wrapper/config must not replace C, but fonts and other resource-pack
-    assets are safe to carry into Moru's resource-pack output. Translation JARs
-    are indexed for strings only and never copied as an asset source.
+    Their wrapper/config must not replace C. Only font definitions, font files,
+    and font textures are carried into Moru's resource-pack output by default.
+    Translation JARs are indexed for strings only and never copied as an asset
+    source.
     """
     asset_roots = sorted(
         path
@@ -512,15 +509,36 @@ def _copy_embedded_resourcepack_assets(
     )
     for asset_root in asset_roots:
         for source in asset_root.rglob("*"):
-            if (
-                not source.is_file()
-                or source.is_symlink()
-                or source.resolve() in translated_paths
-            ):
+            if not source.is_file() or source.is_symlink():
                 continue
-            target = destination / "assets" / source.relative_to(asset_root)
+            relative = Path("assets") / source.relative_to(asset_root)
+            if not _is_font_resource(relative):
+                continue
+            target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+
+
+def _is_font_resource(relative: Path) -> bool:
+    """Whether an ``assets/<namespace>/...`` path is a font dependency.
+
+    Minecraft font providers conventionally live below ``font/`` and bitmap
+    glyph sheets below ``textures/font/``. Font binaries may be referenced from
+    another resource path, so their distinctive extensions are also accepted.
+    """
+    parts = tuple(part.casefold() for part in relative.parts)
+    try:
+        assets_index = parts.index("assets")
+    except ValueError:
+        return False
+    resource_parts = parts[assets_index + 2 :]
+    if not resource_parts:
+        return False
+    if resource_parts[0] == "font":
+        return True
+    if len(resource_parts) >= 2 and resource_parts[:2] == ("textures", "font"):
+        return True
+    return relative.suffix.casefold() in _FONT_FILE_SUFFIXES
 
 
 def _is_embedded_resourcepack_archive(archive: Path, extracted: Path) -> bool:
@@ -679,7 +697,7 @@ async def build_migration_catalog(
                 "previous_resourcepack_path",
             )
             resource_root = _resourcepack_root(materialized)
-            translated_paths = await _index_tree(
+            await _index_tree(
                 resource_root,
                 resource_root,
                 registry,
@@ -692,7 +710,6 @@ async def build_migration_catalog(
             catalog.stats.preserved_resourcepack_assets = await asyncio.to_thread(
                 _copy_resourcepack_assets,
                 resource_root,
-                translated_paths,
                 asset_cache_dir,
             )
         else:
@@ -760,7 +777,7 @@ async def build_migration_catalog(
     catalog.stats.ambiguous_entries = len(catalog.ambiguous)
     logger.info(
         "Previous translation index: %d old source, %d translated, %d ambiguous, "
-        "%d resource assets",
+        "%d font assets",
         catalog.stats.old_source_entries,
         catalog.stats.previous_translation_entries,
         catalog.stats.ambiguous_entries,

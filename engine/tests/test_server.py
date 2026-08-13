@@ -25,6 +25,7 @@ from moru_engine.pipeline import (
     PipelineConfig,
     PipelineResult,
     PipelineStats,
+    TranslationPipeline,
 )
 from moru_engine.server import create_app
 from moru_engine.server.jobs import JobRecord, JobStatus, JobType
@@ -329,8 +330,128 @@ def test_scan_migration_counts_and_translate_reuses_scan_index(
     translated_job = _wait_for_job(client, response.json()["id"])
     assert translated_job["status"] == "done", translated_job
     stored = client.app.state.job_manager._jobs[scan["id"]].result
+    assert stored.migration_input_fingerprint is not None
     assert captured["scan_result"] is stored.scan
     assert captured["migration"] is stored.migration
+
+    # A scan result is only an optimization. If C changes after W2, W4 must
+    # fall back to the normal fresh scan/index path instead of using stale data.
+    (current / relative).write_text(
+        '{"same":"Same","changed":"Newest","added":"Added"}',
+        encoding="utf-8",
+    )
+    captured.clear()
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(current),
+                "scan_job_id": scan["id"],
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    refreshed_job = _wait_for_job(client, response.json()["id"])
+    assert refreshed_job["status"] == "done", refreshed_job
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
+
+
+def test_migration_scan_refreshes_when_launcher_metadata_changes(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = tmp_path / "current"
+    old = tmp_path / "old"
+    translated = tmp_path / "translated"
+    for root in (current, old, translated):
+        root.mkdir()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    scan = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(current),
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+            },
+        },
+    ).json()
+    assert _wait_for_job(client, scan["id"])["status"] == "done"
+
+    # These launcher files affect pack identity and generated pack metadata,
+    # even though they are outside the translation-content folders.
+    (current / "modrinth.index.json").write_text(
+        '{"name":"Demo","versionId":"2.0","dependencies":{"minecraft":"1.21"}}',
+        encoding="utf-8",
+    )
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(current),
+                "scan_job_id": scan["id"],
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
+
+
+def test_translate_without_migration_keeps_normal_fresh_scan_path(
+    client: TestClient,
+    scan_job: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    different = tmp_path / "ordinary-translate"
+    different.mkdir()
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(different),
+                "scan_job_id": scan_job["id"],
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    final = _wait_for_job(client, response.json()["id"])
+    assert final["status"] == "done", final
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
 
 
 def test_translate_rejects_mismatched_scan_job(
@@ -340,6 +461,10 @@ def test_translate_rejects_mismatched_scan_job(
 ) -> None:
     different = tmp_path / "different"
     different.mkdir()
+    old = tmp_path / "old-for-mismatch"
+    translated = tmp_path / "translated-for-mismatch"
+    old.mkdir()
+    translated.mkdir()
     response = client.post(
         "/jobs",
         headers=AUTH,
@@ -348,6 +473,8 @@ def test_translate_rejects_mismatched_scan_job(
             "params": {
                 "modpack_path": str(different),
                 "scan_job_id": scan_job["id"],
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
             },
         },
     )
@@ -1170,6 +1297,60 @@ def test_patch_entry_unknown_job_is_404(client: TestClient) -> None:
         headers=AUTH,
     )
     assert response.status_code == 404
+
+
+def test_patch_entry_rejects_running_job(
+    client: TestClient, done_translate_job: JobRecord
+) -> None:
+    done_translate_job.finished = False
+    response = client.patch(
+        f"/translate/{done_translate_job.id}/entries/gui.ok",
+        json={"translated_text": "확인"},
+        headers=AUTH,
+    )
+    assert response.status_code == 409
+
+
+def test_patch_migrated_entry_refreshes_stats(
+    client: TestClient, done_translate_job: JobRecord
+) -> None:
+    result = done_translate_job.result
+    assert isinstance(result, PipelineResult)
+    result.entries = [
+        EntryResult(
+            key="migrated.entry",
+            file="lang/en_us.json",
+            source_text="Same source",
+            translated_text="이전 수동 번역",
+            status=EntryStatus.MIGRATED,
+        )
+    ]
+    result.stats = PipelineStats()
+    TranslationPipeline._refresh_stats(result)
+    assert result.stats.migration_hits == 1
+    assert result.stats.coverage_percent == 100
+
+    response = client.patch(
+        f"/translate/{done_translate_job.id}/entries/migrated.entry",
+        json={"translated_text": "검수 후 번역"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200, response.text
+    assert result.stats.migration_hits == 0
+    assert result.stats.translated_entries == 1
+    assert result.stats.coverage_percent == 100
+    stats_response = client.get(
+        f"/translate/{done_translate_job.id}/stats", headers=AUTH
+    )
+    assert stats_response.status_code == 200
+    assert stats_response.json()["migration_hits"] == 0
+    assert done_translate_job.done_payload == {
+        "stats": result.stats.model_dump()
+    }
+
+
+def test_translate_stats_unknown_job_is_404(client: TestClient) -> None:
+    assert client.get("/translate/nope/stats", headers=AUTH).status_code == 404
 
 
 def test_entries_unknown_job_is_404(client: TestClient) -> None:

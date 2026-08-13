@@ -19,7 +19,7 @@
     "summary": "Reuse {{reused}} previous manual translations and translate only {{translate}} entries.",
     "zero": "No exact matches were found; all entries will follow the normal translation path.",
     "reused": "Reused",
-    "assets": "Assets kept"
+    "assets": "Font assets kept"
   },
   "tree": {
     "header": "Categories",

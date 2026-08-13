@@ -67,6 +67,40 @@ SAMPLE_TEXT_LIMIT = 160
 #: progress, token usage and active requests are already compacted to latest.
 SNAPSHOT_RECENT_ENTRIES = 24
 SNAPSHOT_RECENT_FAILURES = 50
+#: Runtime-owned trees do not affect translation discovery and can change while
+#: the game is open. Excluding them keeps the migration freshness check useful
+#: without hiding changes to mods, configs, resource packs, or overrides.
+_FINGERPRINT_IGNORED_DIRS = frozenset(
+    {
+        ".git",
+        ".mct_cache",
+        "backups",
+        "crash-reports",
+        "logs",
+        "moru_output",
+        "saves",
+        "screenshots",
+    }
+)
+_MODPACK_FINGERPRINT_DIRS = (
+    "config",
+    "datapacks",
+    "defaultconfigs",
+    "kubejs",
+    "mods",
+    "patchouli_books",
+    "resourcepacks",
+    "resources",
+    "scripts",
+    "serverconfig",
+)
+_MODPACK_FINGERPRINT_FILES = (
+    "instance.cfg",
+    "manifest.json",
+    "minecraftinstance.json",
+    "mmc-pack.json",
+    "modrinth.index.json",
+)
 
 #: Upper bound on files folded into the cached-scan staleness signal, so a
 #: pathological tree cannot make the freshness check cost more than a scan.
@@ -104,6 +138,9 @@ class EnrichedScanResult:
     migration: MigrationCatalog | None = None
     migration_entries: int = 0
     migration_chars: int = 0
+    #: Metadata snapshot of A/B/C after W2 finished. W4 may reuse the parsed
+    #: scan and migration index only while this still matches the live inputs.
+    migration_input_fingerprint: str | None = None
 
 
 def scan_result_payload(enriched: EnrichedScanResult) -> dict[str, Any]:
@@ -278,6 +315,194 @@ def _sha256_and_size(path: Path) -> tuple[str, int]:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             sha.update(chunk)
     return sha.hexdigest(), path.stat().st_size
+
+
+def _update_path_metadata(
+    sha: Any,
+    label: str,
+    path: Path | None,
+    *,
+    ignore_generated: bool = False,
+) -> None:
+    """Add a lightweight, deterministic file-tree snapshot to ``sha``."""
+    sha.update(f"\0{label}\0".encode())
+    if path is None:
+        sha.update(b"none")
+        return
+
+    resolved = path.resolve()
+    sha.update(str(resolved).encode("utf-8", errors="surrogatepass"))
+    if not resolved.exists():
+        sha.update(b"\0missing")
+        return
+
+    def add_file(source: Path, relative: str) -> None:
+        try:
+            stat_result = source.stat()
+        except OSError as exc:
+            sha.update(f"\0error\0{relative}\0{type(exc).__name__}".encode())
+            return
+        sha.update(
+            f"\0file\0{relative}\0{stat_result.st_size}\0"
+            f"{stat_result.st_mtime_ns}".encode()
+        )
+
+    if resolved.is_file():
+        add_file(resolved, resolved.name)
+        return
+    if not resolved.is_dir():
+        sha.update(b"\0other")
+        return
+
+    def on_walk_error(exc: OSError) -> None:
+        sha.update(f"\0walk-error\0{type(exc).__name__}".encode())
+
+    for current, directory_names, file_names in os.walk(
+        resolved, topdown=True, onerror=on_walk_error, followlinks=False
+    ):
+        current_path = Path(current)
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if not (
+                ignore_generated
+                and (
+                    name.casefold() in _FINGERPRINT_IGNORED_DIRS
+                    or name.casefold().endswith(".zip_extracted")
+                )
+            )
+            and not (current_path / name).is_symlink()
+        )
+        for name in sorted(file_names):
+            source = current_path / name
+            if source.is_symlink():
+                continue
+            try:
+                relative = source.relative_to(resolved).as_posix()
+            except ValueError:
+                continue
+            add_file(source, relative)
+
+
+def _update_modpack_metadata(
+    sha: Any,
+    label: str,
+    path: Path,
+    *,
+    old_export: bool,
+) -> None:
+    """Snapshot only the paths the scanner and A/C matching can consume."""
+    resolved = path.resolve()
+    if not resolved.is_dir():
+        _update_path_metadata(sha, label, path)
+        return
+
+    scanner_root = resolved
+    metadata_root = resolved
+    if old_export:
+        try:
+            children = [
+                child
+                for child in resolved.iterdir()
+                if child.name != "__MACOSX"
+            ]
+        except OSError:
+            children = []
+        has_pack_root = any(
+            (resolved / name).is_dir() for name in _MODPACK_FINGERPRINT_DIRS
+        )
+        has_metadata = any(
+            (resolved / name).is_file() for name in _MODPACK_FINGERPRINT_FILES
+        )
+        if not has_pack_root and not has_metadata:
+            wrapper_dirs = [child for child in children if child.is_dir()]
+            if len(children) == 1 and len(wrapper_dirs) == 1:
+                metadata_root = wrapper_dirs[0]
+                scanner_root = metadata_root
+        if (
+            (metadata_root / "manifest.json").is_file()
+            and (metadata_root / "overrides").is_dir()
+        ):
+            scanner_root = metadata_root / "overrides"
+
+    sha.update(f"\0{label}\0root\0{resolved}".encode("utf-8"))
+    for name in _MODPACK_FINGERPRINT_FILES:
+        _update_path_metadata(
+            sha,
+            f"{label}:metadata:{name}",
+            metadata_root / name,
+            ignore_generated=True,
+        )
+    for name in _MODPACK_FINGERPRINT_DIRS:
+        _update_path_metadata(
+            sha,
+            f"{label}:tree:{name}",
+            scanner_root / name,
+            ignore_generated=True,
+        )
+    if not old_export:
+        for game_dir in (".minecraft", "minecraft"):
+            for name in _MODPACK_FINGERPRINT_FILES:
+                _update_path_metadata(
+                    sha,
+                    f"{label}:metadata:{game_dir}:{name}",
+                    metadata_root / game_dir / name,
+                    ignore_generated=True,
+                )
+        if resolved.name.casefold() in {".minecraft", "minecraft"}:
+            for name in _MODPACK_FINGERPRINT_FILES:
+                _update_path_metadata(
+                    sha,
+                    f"{label}:metadata:parent:{name}",
+                    resolved.parent / name,
+                    ignore_generated=True,
+                )
+
+
+def _migration_inputs_fingerprint(
+    *,
+    modpack_path: Path,
+    previous_modpack_path: Path | None,
+    previous_resourcepack_path: Path | None,
+    previous_overrides_path: Path | None,
+) -> str:
+    """Fingerprint the A/B/C inputs that produced a W2 migration index."""
+    sha = hashlib.sha256(b"moru-migration-inputs-v1")
+    _update_modpack_metadata(sha, "current", modpack_path, old_export=False)
+    if previous_modpack_path is None:
+        _update_path_metadata(sha, "old", None)
+    else:
+        _update_modpack_metadata(
+            sha,
+            "old",
+            previous_modpack_path,
+            old_export=True,
+        )
+    _update_path_metadata(sha, "resourcepack", previous_resourcepack_path)
+    _update_path_metadata(sha, "overrides", previous_overrides_path)
+    return sha.hexdigest()
+
+
+def _migration_scan_fingerprint(params: Mapping[str, Any]) -> str:
+    """Adapt raw W2 job params to the shared A/B/C fingerprint helper."""
+    return _migration_inputs_fingerprint(
+        modpack_path=Path(str(params["modpack_path"])),
+        previous_modpack_path=(
+            Path(str(params["previous_modpack_path"]))
+            if params.get("previous_modpack_path")
+            else None
+        ),
+        previous_resourcepack_path=(
+            Path(str(params["previous_resourcepack_path"]))
+            if params.get("previous_resourcepack_path")
+            else None
+        ),
+        previous_overrides_path=(
+            Path(str(params["previous_overrides_path"]))
+            if params.get("previous_overrides_path")
+            else None
+        ),
+    )
 
 
 class JobManager:
@@ -512,7 +737,7 @@ class JobManager:
         scan_job_id: object,
         config: PipelineConfig,
     ) -> JobRecord | None:
-        """Resolve the desktop's W2 scan for reuse by W4 translation."""
+        """Resolve a matching migration-enabled W2 scan for possible reuse."""
         if scan_job_id is None:
             return None
         source = self.get(str(scan_job_id))
@@ -674,6 +899,19 @@ class JobManager:
             "translation_started_at": translation_started_at,
         }
 
+    @staticmethod
+    def refresh_translate_stats(record: JobRecord) -> dict[str, Any]:
+        """Keep terminal/snapshot stats aligned with post-run review edits."""
+        if not isinstance(record.result, PipelineResult):
+            raise JobStateError(f"translate job {record.id} has no pipeline result")
+        stats = record.result.stats.model_dump()
+        record.done_payload = {"stats": stats}
+        for frame in reversed(record.history):
+            if frame.get("type") in TERMINAL_EVENT_TYPES:
+                frame["stats"] = stats
+                break
+        return stats
+
     def unsubscribe(
         self, job_id: str, queue: asyncio.Queue[dict[str, Any] | None]
     ) -> None:
@@ -761,6 +999,28 @@ class JobManager:
 
     async def _run_scan(self, record: JobRecord) -> EnrichedScanResult:
         params = record.params
+        migration_inputs = (
+            params.get("previous_modpack_path"),
+            params.get("previous_resourcepack_path"),
+            params.get("previous_overrides_path"),
+        )
+        migration_requested = any(value is not None for value in migration_inputs)
+        migration_fingerprint_before: str | None = None
+        if migration_requested:
+            if not params.get("previous_modpack_path"):
+                raise JobParamsError(
+                    "params.previous_modpack_path is required for translation migration"
+                )
+            if not (
+                params.get("previous_resourcepack_path")
+                or params.get("previous_overrides_path")
+            ):
+                raise JobParamsError(
+                    "a previous resource pack or overrides artifact is required"
+                )
+            migration_fingerprint_before = await asyncio.to_thread(
+                _migration_scan_fingerprint, params
+            )
 
         def progress(stage: str, current: int, total: int, message: str) -> None:
             self._emit(
@@ -775,7 +1035,7 @@ class JobManager:
             )
 
         cache_key = self._scan_cache_key(params)
-        if cache_key in self._scan_cache:
+        if not migration_requested and cache_key in self._scan_cache:
             progress("scan", 1, 1, "cached")
             progress("parse", 1, 1, "cached")
             logger.info("Serving cached scan result for %s", cache_key)
@@ -801,23 +1061,7 @@ class JobManager:
         registry = create_default_registry()
         pairs = scan.all_translation_pairs
         enriched = EnrichedScanResult(scan=scan, identity=identity)
-        migration_inputs = (
-            params.get("previous_modpack_path"),
-            params.get("previous_resourcepack_path"),
-            params.get("previous_overrides_path"),
-        )
-        if any(value is not None for value in migration_inputs):
-            if not params.get("previous_modpack_path"):
-                raise JobParamsError(
-                    "params.previous_modpack_path is required for translation migration"
-                )
-            if not (
-                params.get("previous_resourcepack_path")
-                or params.get("previous_overrides_path")
-            ):
-                raise JobParamsError(
-                    "a previous resource pack or overrides artifact is required"
-                )
+        if migration_requested:
             migration_root = Path(
                 tempfile.mkdtemp(prefix=f"moru-migration-{record.id}-")
             )
@@ -907,9 +1151,22 @@ class JobManager:
         if pairs:
             progress("parse", 0, len(pairs), "")
             await asyncio.gather(*(parse_one(pair) for pair in pairs))
-        while len(self._scan_cache) >= SCAN_CACHE_LIMIT:
-            self._scan_cache.pop(next(iter(self._scan_cache)))
-        self._scan_cache[cache_key] = enriched
+        if migration_requested:
+            migration_fingerprint_after = await asyncio.to_thread(
+                _migration_scan_fingerprint, params
+            )
+            if migration_fingerprint_before == migration_fingerprint_after:
+                enriched.migration_input_fingerprint = migration_fingerprint_after
+            else:
+                logger.info(
+                    "Migration inputs changed while scan job %s was running; "
+                    "W4 will rebuild the scan and index",
+                    record.id,
+                )
+        else:
+            while len(self._scan_cache) >= SCAN_CACHE_LIMIT:
+                self._scan_cache.pop(next(iter(self._scan_cache)))
+            self._scan_cache[cache_key] = enriched
         return enriched
 
     async def _run_translate(
@@ -936,6 +1193,39 @@ class JobManager:
             and isinstance(scan_source.result, EnrichedScanResult)
             else None
         )
+        reusable_scan: ScanResult | None = None
+        reusable_migration: MigrationCatalog | None = None
+        migration_requested = any(
+            path is not None
+            for path in (
+                config.previous_modpack_path,
+                config.previous_resourcepack_path,
+                config.previous_overrides_path,
+            )
+        )
+        if enriched is not None and not migration_requested:
+            # Preserve v1.0's ordinary W2 -> W4 scan reuse.
+            reusable_scan = enriched.scan
+        elif enriched is not None and enriched.migration is not None:
+            current_fingerprint = await asyncio.to_thread(
+                _migration_inputs_fingerprint,
+                modpack_path=config.modpack_path,
+                previous_modpack_path=config.previous_modpack_path,
+                previous_resourcepack_path=config.previous_resourcepack_path,
+                previous_overrides_path=config.previous_overrides_path,
+            )
+            if (
+                enriched.migration_input_fingerprint is not None
+                and enriched.migration_input_fingerprint == current_fingerprint
+            ):
+                reusable_scan = enriched.scan
+                reusable_migration = enriched.migration
+            else:
+                logger.info(
+                    "Migration inputs changed after scan job %s; rebuilding W4 "
+                    "scan and A/B/C index",
+                    scan_source.id if scan_source is not None else "unknown",
+                )
 
         def on_pipeline(pipeline: TranslationPipeline) -> None:
             record.pipeline = pipeline
@@ -946,8 +1236,8 @@ class JobManager:
                 on_event=on_event,
                 cancel_check=cancel_check,
                 on_pipeline=on_pipeline,
-                scan_result=enriched.scan if enriched is not None else None,
-                migration=enriched.migration if enriched is not None else None,
+                scan_result=reusable_scan,
+                migration=reusable_migration,
             )
         finally:
             record.pipeline = None

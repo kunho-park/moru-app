@@ -1615,7 +1615,19 @@ class TranslationPipeline:
     def _refresh_stats(result: PipelineResult) -> None:
         """Recompute the counters a post-run mutation can change."""
         stats = result.stats
-        stats.failed_entries = len(result.failed)
+        stats.total_entries = len(result.entries)
+        stats.tm_hits = sum(
+            1 for entry in result.entries if entry.status == EntryStatus.TM_HIT
+        )
+        stats.migration_hits = sum(
+            1 for entry in result.entries if entry.status == EntryStatus.MIGRATED
+        )
+        stats.skipped_entries = sum(
+            1 for entry in result.entries if entry.status == EntryStatus.SKIPPED
+        )
+        stats.failed_entries = sum(
+            1 for entry in result.entries if entry.status == EntryStatus.FAILED
+        )
         stats.translated_entries = sum(
             1
             for e in result.entries

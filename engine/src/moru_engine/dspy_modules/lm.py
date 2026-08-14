@@ -46,7 +46,9 @@ def build_lm(
         temperature: Sampling temperature.
         max_tokens: Completion token cap.
         cache: Enable the DSPy disk cache (free re-runs of identical batches).
-        extra: Passed through to litellm (e.g. reasoning_effort).
+        extra: Passed through to litellm (e.g. reasoning_effort; for
+            openrouter/ models it is translated to the native
+            extra_body reasoning object).
     """
     kwargs: dict[str, object] = {
         "temperature": temperature,
@@ -68,6 +70,23 @@ def build_lm(
         # reasoning_effort="disable" to Ollama think=false. Override by
         # passing reasoning_effort explicitly.
         extra["reasoning_effort"] = "disable"
+    if model.startswith("openrouter/") and "reasoning_effort" in extra:
+        # litellm's openrouter integration rejects the OpenAI-style
+        # reasoning_effort parameter outright (UnsupportedParamsError) but
+        # forwards extra_body verbatim; OpenRouter's unified `reasoning`
+        # object is the native control: {"enabled": false} turns thinking
+        # off, {"effort": "low"|"medium"|"high"} bounds it.
+        effort = extra.pop("reasoning_effort")
+        reasoning: dict[str, object] = (
+            {"enabled": False}
+            if effort in ("disable", "none", "off")
+            else {"effort": effort}
+        )
+        body = extra.get("extra_body")
+        if isinstance(body, dict):
+            body["reasoning"] = reasoning
+        else:
+            extra["extra_body"] = {"reasoning": reasoning}
     kwargs.update(extra)
     if api_key:
         kwargs["api_key"] = api_key

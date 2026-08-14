@@ -26,3 +26,33 @@ def test_non_gpt5_models_keep_temperature():
 
     lm = build_lm("openai/gpt-4.1", temperature=0.3, cache=False)
     assert lm.kwargs["temperature"] == 0.3
+
+
+def test_openrouter_reasoning_effort_maps_to_extra_body():
+    """litellm rejects reasoning_effort for openrouter; build_lm must
+    translate it to the native extra_body reasoning object."""
+    lm = build_lm(
+        "openrouter/~deepseek/deepseek-v4-flash-latest",
+        reasoning_effort="disable",
+        cache=False,
+    )
+    assert "reasoning_effort" not in lm.kwargs
+    assert lm.kwargs["extra_body"]["reasoning"] == {"enabled": False}
+
+    lm = build_lm(
+        "openrouter/anthropic/claude-sonnet-5",
+        reasoning_effort="low",
+        cache=False,
+    )
+    assert "reasoning_effort" not in lm.kwargs
+    assert lm.kwargs["extra_body"]["reasoning"] == {"effort": "low"}
+
+
+def test_reasoning_effort_untouched_off_openrouter():
+    lm = build_lm("openai/gpt-4.1", reasoning_effort="low", cache=False)
+    assert lm.kwargs["reasoning_effort"] == "low"
+    assert "extra_body" not in lm.kwargs
+
+    # Ollama thinking models still default to disable (litellm think=false)
+    lm = build_lm("ollama_chat/qwen3:8b", cache=False)
+    assert lm.kwargs["reasoning_effort"] == "disable"

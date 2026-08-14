@@ -14,7 +14,8 @@
     "modified": "Modified"
   },
   "colorPreview": "§ color preview",
-  "bulkRetranslate": "Retranslate failed",
+  "bulkRetranslate": "Retranslate {{n}} failed",
+  "bulkProgress": "Retranslating... {{done}}/{{total}}",
   "col": {
     "key": "Key",
     "source": "Source",

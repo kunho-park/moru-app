@@ -14,7 +14,8 @@
     "modified": "수정됨"
   },
   "colorPreview": "§색코드 미리보기",
-  "bulkRetranslate": "일괄 재번역",
+  "bulkRetranslate": "실패 {{n}}건 일괄 재번역",
+  "bulkProgress": "재번역 중... {{done}}/{{total}}",
   "col": {
     "key": "Key",
     "source": "Source",

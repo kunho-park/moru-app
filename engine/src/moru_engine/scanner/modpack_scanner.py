@@ -29,6 +29,21 @@ DIR_FILTER_WHITELIST = [
 ]
 
 
+#: (relative root, recorded ``file_type``) for every place a user-installed
+#: pack can live. OpenLoader and Paxi are loader mods that mount packs from
+#: their own folders instead of ``resourcepacks/``/``datapacks/``, so a pack
+#: installed through either is invisible to a scan that only looks at the
+#: vanilla folders - the reason those modpacks came back untranslated.
+PACK_ROOTS: tuple[tuple[str, str], ...] = (
+    ("resourcepacks", "resourcepacks"),
+    ("openloader/resources", "resourcepacks"),
+    ("paxi/resourcepacks", "resourcepacks"),
+    ("datapacks", "datapacks"),
+    ("openloader/data", "datapacks"),
+    ("paxi/datapacks", "datapacks"),
+)
+
+
 @dataclass
 class TranslationFile:
     """Information about a translation file."""
@@ -126,9 +141,9 @@ class ModpackScanner:
 
         # Scan every known translation location in a fixed pass order
         self._report_progress(
-            "ZIP 파일 추출 중...", 0, 7, "압축 파일들을 추출하고 있습니다..."
+            "ZIP 파일 추출 중...", 0, 7, "리소스팩 ZIP을 추출하고 있습니다..."
         )
-        await self._extract_all_zip_files(modpack_path)
+        await self._extract_resource_pack_zips(modpack_path)
 
         self._report_progress(
             "Config 파일 스캔 중...", 1, 7, "config 폴더를 스캔하고 있습니다..."
@@ -162,9 +177,8 @@ class ModpackScanner:
             "리소스팩 스캔 중...",
             5,
             7,
-            "리소스팩 ZIP 추출 및 스캔 중...",
+            "리소스팩·데이터팩을 스캔하고 있습니다...",
         )
-        await self._extract_resource_pack_zips(modpack_path)
         await self._load_resourcepack_files(modpack_path, result)
         await self._load_resources_overlay_files(modpack_path, result)
 
@@ -236,58 +250,6 @@ class ModpackScanner:
             logger.error("Glob failed for pattern %s: %s", pattern, e)
             return []
 
-    async def _extract_all_zip_files(self, modpack_path: Path) -> None:
-        """Extract ZIP files from modpack."""
-        pattern = self._normalize_glob_path(modpack_path / "**" / "*.zip")
-        logger.info("Searching for ZIP files with pattern: %s", pattern)
-
-        try:
-            # Get list for progress tracking
-            zip_files = await self._safe_iglob(str(pattern), recursive=True)
-            total_zips = len(zip_files)
-
-            for i, zip_path in enumerate(zip_files):
-                if self.progress_callback:
-                    zip_name = os.path.basename(zip_path)
-                    self._report_progress(
-                        "ZIP 파일 추출 중...",
-                        0,
-                        7,
-                        f"압축 해제 중 ({i + 1}/{total_zips}): {zip_name}",
-                    )
-
-                try:
-                    await self._extract_zip_file(zip_path)
-                except (zipfile.BadZipFile, OSError) as e:
-                    logger.error("Failed to extract ZIP file (%s): %s", zip_path, e)
-        except (OSError, TypeError, ValueError) as e:
-            logger.error("ZIP search failed: %s", e)
-
-    @staticmethod
-    def _extract_zip_file_sync(zip_path: str) -> None:
-        """Extract a single ZIP file if relevant."""
-        try:
-            zip_path_lower = zip_path.lower()
-
-            # Only process paxi or openloader ZIPs
-            if not ("paxi" in zip_path_lower or "openloader" in zip_path_lower):
-                return
-
-            extract_dir = zip_path + ".zip_extracted"
-            if os.path.exists(extract_dir):
-                return
-
-            os.makedirs(extract_dir, exist_ok=True)
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                logger.info("Extracting ZIP file: %s", zip_path)
-                zf.extractall(extract_dir)
-        except (zipfile.BadZipFile, OSError) as e:
-            logger.error("Failed to extract zip file %s: %s", zip_path, e)
-
-    async def _extract_zip_file(self, zip_path: str) -> None:
-        """Extract a single ZIP file if relevant."""
-        await asyncio.to_thread(self._extract_zip_file_sync, zip_path)
-
     @staticmethod
     def _extract_resource_pack_sync(zip_path: str, extract_dir: str) -> None:
         """Extract a Minecraft resource pack ZIP into the given directory.
@@ -304,40 +266,47 @@ class ModpackScanner:
             zf.extractall(extract_dir)
 
     async def _extract_resource_pack_zips(self, modpack_path: Path) -> None:
-        """Unpack every ZIP found directly under ``resourcepacks/``.
+        """Unpack resource-pack ZIPs from every root a pack can be installed in.
 
-        We intentionally do NOT extract ``datapacks/*.zip`` here: the
-        output router (``route_for`` in output/generator.py) treats any
-        ``.mct_cache`` path containing ``data/`` as a JAR-mod candidate,
-        so extracting datapacks would mis-route their contents.
+        Covers ``resourcepacks/`` plus the folders OpenLoader and Paxi mount
+        their own packs from. Contents land under
+        ``.mct_cache/resourcepacks/<root-slug>/`` so two roots shipping the
+        same file name cannot overwrite each other, and ``route_for`` sees a
+        ``.mct_cache`` asset path and routes it into the resource pack.
+
+        Data packs are deliberately left alone: the output router treats any
+        ``.mct_cache`` path containing ``data/`` as a JAR-mod candidate and
+        would skip the extracted files anyway.
         """
-        pattern = self._normalize_glob_path(
-            modpack_path / "resourcepacks" / "*.zip"
-        )
-        zip_files = await self._safe_iglob(str(pattern), recursive=False)
-        if not zip_files:
-            return
-
         cache_root = modpack_path / ".mct_cache" / "resourcepacks"
 
-        for zip_path in zip_files:
-            zip_name = os.path.basename(zip_path)
-            extract_dir = cache_root / zip_name
-
-            if await asyncio.to_thread(extract_dir.exists):
-                logger.debug("Resource pack already extracted: %s", zip_name)
+        for rel_root, file_type in PACK_ROOTS:
+            if file_type != "resourcepacks":
                 continue
 
-            try:
-                await asyncio.to_thread(
-                    self._extract_resource_pack_sync,
-                    zip_path,
-                    str(extract_dir),
-                )
-            except (zipfile.BadZipFile, OSError) as e:
-                logger.error(
-                    "Failed to extract resource pack (%s): %s", zip_path, e
-                )
+            pattern = self._normalize_glob_path(modpack_path / rel_root / "*.zip")
+            zip_files = await self._safe_iglob(str(pattern), recursive=False)
+            if not zip_files:
+                continue
+
+            slug = rel_root.replace("/", "_")
+            for zip_path in zip_files:
+                extract_dir = cache_root / slug / os.path.basename(zip_path)
+
+                if await asyncio.to_thread(extract_dir.exists):
+                    logger.debug("Resource pack already extracted: %s", zip_path)
+                    continue
+
+                try:
+                    await asyncio.to_thread(
+                        self._extract_resource_pack_sync,
+                        zip_path,
+                        str(extract_dir),
+                    )
+                except (zipfile.BadZipFile, OSError) as e:
+                    logger.error(
+                        "Failed to extract resource pack (%s): %s", zip_path, e
+                    )
 
     async def _load_config_files(self, modpack_path: Path, result: ScanResult) -> None:
         """Load translation files from config folder (excluding ftbquests)."""
@@ -524,16 +493,15 @@ class ModpackScanner:
     ) -> None:
         """Load translation files from resource packs and data packs.
 
-        Each folder is scanned in two locations:
-        - The original ``resourcepacks/`` / ``datapacks/`` directory for
-          loose (already unzipped) packs.
-        - The ``.mct_cache/<folder>/`` directory holding contents of ZIP
-          packs we extracted in :meth:`_extract_resource_pack_zips`.
+        Scans every root in :data:`PACK_ROOTS` for loose (already unzipped)
+        packs, plus the ``.mct_cache/<file_type>/`` trees holding contents of
+        the ZIPs :meth:`_extract_resource_pack_zips` unpacked.
         """
-        scan_targets: list[tuple[str, Path]] = []
-        for folder in ["resourcepacks", "datapacks"]:
-            scan_targets.append((folder, modpack_path / folder))
-            scan_targets.append((folder, modpack_path / ".mct_cache" / folder))
+        scan_targets: list[tuple[str, Path]] = [
+            (file_type, modpack_path / rel_root) for rel_root, file_type in PACK_ROOTS
+        ]
+        for file_type in ("resourcepacks", "datapacks"):
+            scan_targets.append((file_type, modpack_path / ".mct_cache" / file_type))
 
         for folder, root in scan_targets:
             pattern = self._normalize_glob_path(root / "**" / "*.*")

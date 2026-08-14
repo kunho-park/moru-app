@@ -81,6 +81,9 @@ export interface SessionSummary {
   export_overrides_zip_path: string | null;
 }
 
+/** Engine's largest allowed entries page; bulk walks use it to cut round-trips. */
+const FAILED_PAGE_SIZE = 500;
+
 export const api = {
   startScan: (params: ScanParams) =>
     request<Job>("/jobs", { method: "POST", body: JSON.stringify({ type: "scan", params }) }),
@@ -107,6 +110,22 @@ export const api = {
       `/translate/${jobId}/entries?filter=${filter}&page=${page}&page_size=${pageSize}` +
         (search === "" ? "" : `&search=${encodeURIComponent(search)}`),
     ),
+  /**
+   * Every failed entry's identity, walked across pages.
+   *
+   * The review screen holds one PAGE_SIZE slice, so a bulk retry driven off
+   * the rows in view silently skips failures sitting on other pages.
+   */
+  allFailedRefs: async (jobId: string): Promise<{ key: string; file: string }[]> => {
+    const refs: { key: string; file: string }[] = [];
+    for (let page = 1; ; page += 1) {
+      const slice = await api.entries(jobId, "failed", page, FAILED_PAGE_SIZE);
+      if (slice.entries.length === 0) break;
+      refs.push(...slice.entries.map((e) => ({ key: e.key, file: e.file })));
+      if (refs.length >= slice.total) break;
+    }
+    return refs;
+  },
   patchEntry: (jobId: string, key: string, translatedText: string, file?: string) =>
     request<Entry>(`/translate/${jobId}/entries/${encodeURIComponent(key)}`, {
       method: "PATCH",

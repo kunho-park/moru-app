@@ -12,6 +12,8 @@ anonymous desktop uploads.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -39,15 +41,38 @@ def _auth_headers(api_token: str | None) -> dict[str, str]:
     return headers
 
 
+def _retry_after_minutes(raw: str | None) -> int | None:
+    """Minutes to wait from a ``Retry-After`` header (delta-seconds or HTTP date)."""
+    if not raw:
+        return None
+    text = raw.strip()
+    try:
+        seconds = int(text)
+    except ValueError:
+        try:
+            delta = parsedate_to_datetime(text) - datetime.now(UTC)
+        except (TypeError, ValueError):
+            return None
+        seconds = int(delta.total_seconds())
+    return max(1, (seconds + 59) // 60) if seconds > 0 else None
+
+
 async def _ensure_ok(resp: aiohttp.ClientResponse, step: str) -> None:
-    """Raise WebUploadError for 4xx/5xx, surfacing the body's error message."""
+    """Raise WebUploadError for 4xx/5xx, surfacing the body's error message.
+
+    A rate-limited upload is the one failure the user can act on, so 429 gets
+    its own message carrying the wait from ``Retry-After``. Edge layers answer
+    429 with an HTML page instead of the API's JSON, so a body that does not
+    parse as JSON is dropped rather than pasted into the message - raw markup
+    in an error dialog tells the user nothing about what went wrong.
+    """
     if resp.status < 400:
         return
     try:
         body = await resp.text()
     except Exception:  # noqa: BLE001 — body is best-effort diagnostics
         body = ""
-    detail = body
+    detail = ""
     try:
         parsed = json.loads(body)
     except ValueError:
@@ -56,6 +81,14 @@ async def _ensure_ok(resp: aiohttp.ClientResponse, step: str) -> None:
         if isinstance(parsed, dict):
             detail = str(parsed.get("error") or parsed.get("detail") or "")
     detail = detail.strip()[:300]
+
+    if resp.status == 429:
+        minutes = _retry_after_minutes(resp.headers.get("Retry-After"))
+        wait = f"약 {minutes}분 후" if minutes else "잠시 후"
+        raise WebUploadError(
+            f"업로드 요청 한도를 초과했습니다. {wait} 다시 시도해 주세요."
+        )
+
     message = f"{step} failed: HTTP {resp.status}"
     raise WebUploadError(f"{message} - {detail}" if detail else message)
 

@@ -281,6 +281,8 @@ export function W5Review() {
   const [draft, setDraft] = useState("");
   const [colorPreview, setColorPreview] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Entries retranslated so far by the bulk retry, for its progress label.
+  const [bulkDone, setBulkDone] = useState(0);
 
   const searchRef = useRef<HTMLInputElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
@@ -368,13 +370,24 @@ export function W5Review() {
   });
 
   const bulkMut = useMutation({
-    mutationFn: async (refs: EntryRef[]) => {
+    // Retries every failed entry, not just the ones on screen: `rows` holds
+    // one PAGE_SIZE slice, so a run with more failures than that used to
+    // need the user to walk the pager and click once per page.
+    mutationFn: async () => {
+      const jobId = translateJobId as string;
+      const refs = await api.allFailedRefs(jobId);
+      setBulkDone(0);
       for (const ref of refs) {
-        await api.retranslateEntry(translateJobId as string, ref.key, ref.file);
+        await api.retranslateEntry(jobId, ref.key, ref.file);
+        setBulkDone((n) => n + 1);
       }
+      return refs.length;
     },
     onError: (err) => setActionError(errorText(err)),
-    onSettled: () => invalidate(),
+    onSettled: () => {
+      setBulkDone(0);
+      invalidate();
+    },
   });
 
   const failedTotal = counts.failed ?? Object.keys(failedKeys).length;
@@ -483,9 +496,6 @@ export function W5Review() {
     );
   }
 
-  const failedOnPage: EntryRef[] = rows
-    .filter((e) => e.status === "failed")
-    .map((e) => ({ key: e.key, file: e.file }));
   const remaining = Math.max(0, total - page * PAGE_SIZE);
   const selColor = selected === null ? "#6A7C74" : STATUS_COLOR[selected.status];
   const detailColors =
@@ -601,8 +611,8 @@ export function W5Review() {
         </button>
         <div className="flex-1" />
         <button
-          onClick={() => bulkMut.mutate(failedOnPage)}
-          disabled={failedOnPage.length === 0 || bulkMut.isPending}
+          onClick={() => bulkMut.mutate()}
+          disabled={failedTotal === 0 || bulkMut.isPending}
           className="flex items-center gap-[6px] border border-edge px-3 py-[6px] text-[11px] font-semibold text-text2 hover:border-edge2 hover:text-text disabled:cursor-default disabled:opacity-50"
         >
           {bulkMut.isPending ? (
@@ -613,7 +623,12 @@ export function W5Review() {
               <path d="M11 6 L9 4 M11 6 L9 8" />
             </svg>
           )}
-          {t("w5.bulkRetranslate")}
+          {bulkMut.isPending
+            ? t("w5.bulkProgress", {
+                done: formatInt(bulkDone),
+                total: formatInt(failedTotal),
+              })
+            : t("w5.bulkRetranslate", { n: formatInt(failedTotal) })}
         </button>
       </div>
 

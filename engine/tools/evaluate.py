@@ -91,6 +91,24 @@ def main() -> int:
     )
     parser.add_argument("--model", required=True, help="LiteLLM model under test")
     parser.add_argument("--api-base", default=None, help="override base URL (Ollama)")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="student sampling temperature (default: engine default)",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="student completion token cap (default: engine default)",
+    )
+    parser.add_argument(
+        "--effort",
+        default=None,
+        help="reasoning_effort for the STUDENT LM ('disable' stops hosted "
+        "reasoning models burning the completion budget on thinking)",
+    )
     parser.add_argument("--judge-model", default=None, help="absolute LLM judge (optional)")
     parser.add_argument("--judge-api-base", default=None)
     parser.add_argument("--source", default="en_us")
@@ -133,7 +151,14 @@ def main() -> int:
     setup_logging(logging.INFO)
 
     pairs = parse_pairs(args)
-    lm = build_lm(args.model, api_base=args.api_base)
+    student_extra: dict[str, object] = {}
+    if args.temperature is not None:
+        student_extra["temperature"] = args.temperature
+    if args.max_tokens is not None:
+        student_extra["max_tokens"] = args.max_tokens
+    if args.effort:
+        student_extra["reasoning_effort"] = args.effort
+    lm = build_lm(args.model, api_base=args.api_base, **student_extra)
     split = build_evalset(
         pairs=pairs,
         vanilla_samples=args.vanilla_samples,

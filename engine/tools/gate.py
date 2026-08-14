@@ -88,6 +88,24 @@ def main() -> int:
     parser.add_argument("--model", required=True, help="LiteLLM task model")
     parser.add_argument("--api-base", default=None)
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="student sampling temperature (default: engine default)",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="student completion token cap (default: engine default)",
+    )
+    parser.add_argument(
+        "--effort",
+        default=None,
+        help="reasoning_effort for the STUDENT LM ('disable' stops hosted "
+        "reasoning models burning the completion budget on thinking)",
+    )
+    parser.add_argument(
         "--candidate", required=True, help="candidate program JSON to validate"
     )
     parser.add_argument(
@@ -163,7 +181,14 @@ def main() -> int:
     run_dir = Path(args.run_dir or f"runs/gate_{kind}_{time.strftime('%Y%m%d_%H%M%S')}")
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    lm = build_lm(args.model, api_base=args.api_base)
+    student_extra: dict[str, object] = {}
+    if args.temperature is not None:
+        student_extra["temperature"] = args.temperature
+    if args.max_tokens is not None:
+        student_extra["max_tokens"] = args.max_tokens
+    if args.effort:
+        student_extra["reasoning_effort"] = args.effort
+    lm = build_lm(args.model, api_base=args.api_base, **student_extra)
     configure_engine(lm)
     judge = (
         PairwiseJudge(

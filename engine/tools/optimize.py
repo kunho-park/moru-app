@@ -115,6 +115,25 @@ def main() -> int:
     parser.add_argument("--model", required=True, help="LiteLLM model under optimization")
     parser.add_argument("--api-base", default=None, help="override base URL for the model under optimization (Ollama)")
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="student sampling temperature (default: engine default)",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="student completion token cap (default: engine default)",
+    )
+    parser.add_argument(
+        "--effort",
+        default=None,
+        help="reasoning_effort for the STUDENT LM ('disable' stops hosted "
+        "reasoning models burning the completion budget on thinking and "
+        "returning empty text; Ollama already defaults to disable)",
+    )
+    parser.add_argument(
         "--reflection-model",
         default="anthropic/claude-sonnet-4-6",
         help="large model for GEPA reflection",
@@ -183,7 +202,14 @@ def main() -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     pairs = parse_pairs(args)
-    lm = build_lm(args.model, api_base=args.api_base)
+    student_extra: dict[str, object] = {}
+    if args.temperature is not None:
+        student_extra["temperature"] = args.temperature
+    if args.max_tokens is not None:
+        student_extra["max_tokens"] = args.max_tokens
+    if args.effort:
+        student_extra["reasoning_effort"] = args.effort
+    lm = build_lm(args.model, api_base=args.api_base, **student_extra)
     configure_engine(lm)
 
     reflection_extra: dict[str, object] = {}

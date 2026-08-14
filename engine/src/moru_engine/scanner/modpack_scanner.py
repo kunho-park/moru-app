@@ -724,14 +724,17 @@ class ModpackScanner:
             path_lower = tf.input_path.replace("\\", "/").lower()
 
             # Skip files with other locale codes
-            if any(locale in path_lower for locale in other_locales):
+            if any(
+                self._path_has_locale(path_lower, locale)
+                for locale in other_locales
+            ):
                 logger.debug("Skipping other locale file: %s", tf.input_path)
                 continue
 
-            if self.source_locale in path_lower:
+            if self._path_has_locale(path_lower, self.source_locale):
                 tf.lang_type = "source"
                 source_files[base_path] = tf
-            elif self.target_locale in path_lower:
+            elif self._path_has_locale(path_lower, self.target_locale):
                 tf.lang_type = "target"
                 target_files[base_path] = tf
             else:
@@ -773,15 +776,28 @@ class ModpackScanner:
             if base_path not in matched_targets:
                 result.target_only_files.append(Path(target_tf.input_path))
 
+    #: A locale-shaped chunk counts only at a real boundary: preceded by a
+    #: non-alphanumeric (start, /, \, _, -) and followed by a separator or
+    #: the end. An optional prefix here once made "act_ii.snbt" and
+    #: "act_iv.snbt" both normalize to ".../a/LOCALE.snbt" ("ct_ii"/"ct_iv"
+    #: read as locales), so one chapter silently overwrote the other in the
+    #: pairing dict — which file survived depended on glob order.
+    _LOCALE_CHUNK_RE = re.compile(r"(?<![a-z0-9])[a-z]{2}_[a-z]{2}(?=[/\\.]|$)")
+
+    @classmethod
+    def _path_has_locale(cls, path_lower: str, locale: str) -> bool:
+        """True when ``locale`` appears in the path at a locale boundary."""
+        return any(
+            match.group() == locale
+            for match in cls._LOCALE_CHUNK_RE.finditer(path_lower)
+        )
+
     def _get_base_path(self, file_path: str) -> str:
         """Get base path without locale for matching."""
         path_normalized = file_path.replace("\\", "/").lower()
-        # Remove locale codes to get base path
-        # Use a more general pattern to match any locale code (xx_yy format)
-        base_path = re.sub(
-            r"[/\\]?([a-z]{2}_[a-z]{2})([/\\.])", r"/LOCALE\2", path_normalized
-        )
-        return base_path
+        # Replace boundary-anchored locale codes so source/target paths of
+        # the same file collapse to one matching key.
+        return self._LOCALE_CHUNK_RE.sub("LOCALE", path_normalized)
 
     def _extract_namespace(
         self, file_path: Path, tf: TranslationFile

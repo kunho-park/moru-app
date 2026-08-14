@@ -33,6 +33,9 @@ engine/evalset_snapshot.json
 # GEPA optimization run outputs (checkpoints, reports) — operator-local
 engine/runs/
 
+# harvested modpack goldsets (community pack text) — operator-local
+engine/goldsets/
+
 # runtime artifacts when running against the repo fixture
 moru_output/
 

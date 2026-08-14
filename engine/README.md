@@ -43,7 +43,9 @@ uv run pytest
 
 - `optimize.py` — GEPA로 번역 프로그램을 컴파일해 아티팩트 JSON 생성 (릴리스에 번들)
 - `evaluate.py` — 현재 프로그램/아티팩트의 테스트 스플릿 점수 기록
-- `build_evalset.py` — 평가셋(바닐라 + 스트레스 케이스) 스냅샷 생성
+- `build_evalset.py` — 평가셋(바닐라 + 스트레스 케이스 + modtext 골드셋) 스냅샷 생성
+- `harvest_modpack_pairs.py` — 사람이 번역한 모드팩(zip/디렉토리)에서 문장 단위
+  골드셋 추출 → `optimize.py`/`evaluate.py`의 `--modtext` 입력
 - `build_vanilla_glossary.py` — 바닐라 공식 번역에서 용어집 생성
 
 ## 구조

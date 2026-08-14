@@ -153,6 +153,15 @@ def main() -> int:
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--vanilla-samples", type=int, default=900, help="narrow-strata entries per pair")
     parser.add_argument("--wide-samples", type=int, default=None, help="production-packed entries per pair (default vanilla//3)")
+    parser.add_argument(
+        "--modtext",
+        action="append",
+        type=Path,
+        default=None,
+        help="harvested modpack goldset JSON (tools/harvest_modpack_pairs.py, "
+        "repeatable); adds the modtext stratum for its language pair",
+    )
+    parser.add_argument("--modtext-samples", type=int, default=900, help="modtext entries taken per goldset")
     parser.add_argument("--batch-size", type=int, default=6, help="narrow-strata entries per example")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-refine", type=int, default=2)
@@ -206,6 +215,8 @@ def main() -> int:
         wide_samples=args.wide_samples,
         batch_size=args.batch_size,
         seed=args.seed,
+        modtext_paths=args.modtext,
+        modtext_samples=args.modtext_samples,
     )
     metric = make_metric()
     tier = resolve_tier(args.model)

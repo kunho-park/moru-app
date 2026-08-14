@@ -102,6 +102,15 @@ def main() -> int:
     parser.add_argument("--pairs", default=None, help="comma list of source:target")
     parser.add_argument("--vanilla-samples", type=int, default=900)
     parser.add_argument("--wide-samples", type=int, default=None)
+    parser.add_argument(
+        "--modtext",
+        action="append",
+        type=Path,
+        default=None,
+        help="harvested modpack goldset JSON (tools/harvest_modpack_pairs.py, "
+        "repeatable); adds the modtext stratum for its language pair",
+    )
+    parser.add_argument("--modtext-samples", type=int, default=900, help="modtext entries taken per goldset")
     parser.add_argument("--batch-size", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--threads", type=int, default=8)
@@ -173,6 +182,8 @@ def main() -> int:
         pairs=pairs,
         vanilla_samples=args.vanilla_samples,
         wide_samples=args.wide_samples,
+        modtext_paths=args.modtext,
+        modtext_samples=args.modtext_samples,
         confirmation_samples=args.confirmation_samples if args.final else 0,
         batch_size=args.batch_size,
         seed=args.seed,

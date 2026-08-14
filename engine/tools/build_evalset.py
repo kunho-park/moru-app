@@ -89,6 +89,15 @@ def main() -> int:
     parser.add_argument("--source", default="en_us")
     parser.add_argument("--target", default="ko_kr")
     parser.add_argument("--vanilla-samples", type=int, default=400)
+    parser.add_argument(
+        "--modtext",
+        action="append",
+        type=Path,
+        default=None,
+        help="harvested modpack goldset JSON (tools/harvest_modpack_pairs.py, "
+        "repeatable); adds the modtext stratum for its language pair",
+    )
+    parser.add_argument("--modtext-samples", type=int, default=900, help="modtext entries taken per goldset")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--corrections-url", default=None)
     parser.add_argument("--since", default=None)
@@ -97,7 +106,12 @@ def main() -> int:
 
     setup_logging(logging.INFO)
     split = build_evalset(
-        args.source, args.target, vanilla_samples=args.vanilla_samples, seed=args.seed
+        args.source,
+        args.target,
+        vanilla_samples=args.vanilla_samples,
+        modtext_paths=args.modtext,
+        modtext_samples=args.modtext_samples,
+        seed=args.seed,
     )
     if args.corrections_url:
         corrections = asyncio.run(

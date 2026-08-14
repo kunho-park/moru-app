@@ -32,6 +32,46 @@ export interface EntryPage {
   entries: Entry[];
 }
 
+/** /translate/{jobId}/graph — translation-graph snapshot for the canvas. */
+export interface TranslationGraphNode {
+  id: string;
+  kind: "term" | "entry";
+  label: string;
+  settled: boolean;
+  /** term only: settled translation (null while pending). */
+  target?: string | null;
+  /** term only */
+  category?: string;
+  definers?: number;
+  mentions?: number;
+  /** entry only */
+  file?: string;
+}
+
+export interface TranslationGraphEdge {
+  source: string;
+  target: string;
+  kind: "defines" | "mentions" | "sibling";
+}
+
+export interface TranslationGraphSnapshot {
+  version: number;
+  job_finished: boolean;
+  truncated: boolean;
+  stats: { entries: number; terms: number; mentions: number; sibling_groups: number };
+  nodes: TranslationGraphNode[];
+  edges: TranslationGraphEdge[];
+}
+
+/** known_version matched: the payload-free polling short form. */
+export interface TranslationGraphUnchanged {
+  version: number;
+  unchanged: true;
+  job_finished: boolean;
+}
+
+export type TranslationGraphResponse = TranslationGraphSnapshot | TranslationGraphUnchanged;
+
 export interface ScanFile {
   path: string;
   entry_count: number;

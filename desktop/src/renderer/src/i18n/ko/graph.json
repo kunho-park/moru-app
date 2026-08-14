@@ -1,0 +1,34 @@
+{
+  "title": "번역 그래프",
+  "live": "실시간",
+  "search": "용어 검색…",
+  "status": {
+    "all": "전체",
+    "settled": "확정",
+    "pending": "미확정"
+  },
+  "refresh": "새로고침",
+  "truncated": "일부만 표시됨",
+  "stats": "용어 {{terms}} · 언급 {{mentions}} · 그룹 {{groups}}",
+  "loading": "그래프 불러오는 중…",
+  "empty": "표시할 관계가 아직 없습니다",
+  "unavailable": "이 작업에서는 번역 그래프가 비활성화되어 있거나 아직 준비되지 않았습니다",
+  "legend": {
+    "settledTerm": "확정 용어",
+    "pendingTerm": "미확정 용어",
+    "entry": "엔트리"
+  },
+  "detail": {
+    "term": "용어",
+    "entry": "엔트리",
+    "source": "원문",
+    "target": "번역",
+    "pending": "미확정",
+    "category": "분류",
+    "definers": "정의",
+    "mentions": "언급",
+    "key": "키",
+    "file": "파일",
+    "settled": "번역됨"
+  }
+}

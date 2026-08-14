@@ -340,6 +340,14 @@ class TranslationPipeline:
         #: prepare phase; rebuilt from entries for post-run paths).
         self._graph: TranslationGraph | None = None
 
+    @property
+    def graph(self) -> TranslationGraph | None:
+        """The live run's relationship graph (None before prepare or when
+        use_translation_graph is off). Read-only view for the server's
+        graph endpoint; snapshots must stay synchronous (same-loop
+        cooperative access, see TranslationGraph.snapshot)."""
+        return self._graph
+
     # -- events ------------------------------------------------------------
 
     def _emit(self, event: str, payload: dict[str, object]) -> None:
@@ -1524,11 +1532,19 @@ async def run_pipeline(
     *,
     on_event: Callable[[str, dict[str, object]], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    on_pipeline: Callable[[TranslationPipeline], None] | None = None,
 ) -> PipelineResult:
-    """Convenience wrapper: build, run, close."""
+    """Convenience wrapper: build, run, close.
+
+    ``on_pipeline`` receives the pipeline instance before the run starts —
+    the server uses it to expose the live translation graph while the job
+    is running.
+    """
     pipeline = TranslationPipeline(
         config, on_event=on_event, cancel_check=cancel_check
     )
+    if on_pipeline is not None:
+        on_pipeline(pipeline)
     try:
         return await pipeline.run()
     finally:

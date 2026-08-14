@@ -36,6 +36,7 @@ from ..cli_providers import (
 )
 from ..community import sync_community
 from ..dspy_modules import build_lm
+from ..graph import TranslationGraph
 from ..pipeline import (
     EntryStatus,
     PipelineResult,
@@ -522,6 +523,56 @@ def create_app(
             "page": page,
             "entries": [_entry_payload(e) for e in page_entries],
         }
+
+    @api.get("/translate/{job_id}/graph")
+    async def translate_graph(
+        job_id: str,
+        q: str | None = Query(None, max_length=200),
+        status: Literal["all", "settled", "pending"] = "all",
+        limit_terms: int = Query(300, ge=1, le=2000),
+        mentions_per_term: int = Query(10, ge=0, le=50),
+        known_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Translation-graph snapshot for the desktop's graph canvas.
+
+        A running job serves the live pipeline graph (synchronous
+        same-loop snapshot, always consistent); a finished job — session
+        restorations included — serves a graph rebuilt once from
+        result.entries and cached on the record. ``known_version`` lets
+        the polling client skip unchanged payloads.
+        """
+        record = _get_typed_job(job_id, JobType.TRANSLATE)
+        graph: TranslationGraph
+        if record.pipeline is not None and not record.finished:
+            live = record.pipeline.graph
+            if live is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="translation graph is disabled for this job or "
+                    "not built yet",
+                )
+            graph = live
+        else:
+            _, result = _get_pipeline_result(job_id)
+            if record.graph_cache is None:
+                record.graph_cache = TranslationGraph.from_entries(
+                    result.entries
+                )
+            graph = record.graph_cache
+        if known_version is not None and known_version == graph.version:
+            return {
+                "version": graph.version,
+                "unchanged": True,
+                "job_finished": record.finished,
+            }
+        payload = graph.snapshot(
+            q=q,
+            status=status,
+            limit_terms=limit_terms,
+            mentions_per_term=mentions_per_term,
+        )
+        payload["job_finished"] = record.finished
+        return payload
 
     async def _persist_session(record: JobRecord) -> None:
         """Persist a post-run edit without failing the request that made it.

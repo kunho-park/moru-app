@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from moru_engine import __version__
+from moru_engine.graph import TranslationGraph
 from moru_engine.pipeline import (
     EntryResult,
     EntryStatus,
@@ -1418,3 +1419,115 @@ def test_shutdown_schedules_handler(
     response = client.post("/shutdown", headers=AUTH)
     assert response.status_code == 202
     assert shutdown_flag.wait(timeout=2.0), "shutdown handler was not invoked"
+
+
+# -- translate graph endpoint ---------------------------------------------------
+
+
+def test_translate_graph_finished_job_rebuilds_and_short_circuits(
+    client: TestClient, done_translate_job: JobRecord
+) -> None:
+    res = client.get(f"/translate/{done_translate_job.id}/graph", headers=AUTH)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["job_finished"] is True
+    assert body["version"] == 1
+    assert body["stats"]["entries"] == 1
+    assert isinstance(body["nodes"], list) and isinstance(body["edges"], list)
+    # rebuilt graph is cached on the record
+    assert done_translate_job.graph_cache is not None
+
+    unchanged = client.get(
+        f"/translate/{done_translate_job.id}/graph",
+        params={"known_version": body["version"]},
+        headers=AUTH,
+    )
+    assert unchanged.status_code == 200
+    assert unchanged.json() == {
+        "version": body["version"],
+        "unchanged": True,
+        "job_finished": True,
+    }
+
+
+def test_translate_graph_live_pipeline_and_version_polling(
+    client: TestClient,
+) -> None:
+    graph = TranslationGraph.build(
+        [
+            (
+                "lang/en_us.json",
+                {"item.m.core": "Ember Core"},
+                {},
+            ),
+            (
+                "q.snbt",
+                {"quests[0].description[0]": "Craft the Ember Core."},
+                {},
+            ),
+        ]
+    )
+
+    class _StubPipeline:
+        """Only the .graph attribute is read by the endpoint."""
+
+        def __init__(self, g: TranslationGraph) -> None:
+            self.graph = g
+
+    record = JobRecord(
+        id=f"translate-{uuid.uuid4()}",
+        type=JobType.TRANSLATE,
+        params={},
+        status=JobStatus.RUNNING,
+        pipeline=_StubPipeline(graph),  # type: ignore[arg-type]
+    )
+    client.app.state.job_manager.register_job(record)
+
+    first = client.get(f"/translate/{record.id}/graph", headers=AUTH).json()
+    assert first["job_finished"] is False
+    assert first["version"] == 1
+    term = next(n for n in first["nodes"] if n["kind"] == "term")
+    assert term["settled"] is False
+
+    # unchanged poll costs nothing…
+    poll = client.get(
+        f"/translate/{record.id}/graph",
+        params={"known_version": 1},
+        headers=AUTH,
+    ).json()
+    assert poll == {"version": 1, "unchanged": True, "job_finished": False}
+
+    # …until a settlement bumps the version
+    graph.record_translation("lang/en_us.json", "item.m.core", "잉걸불 핵")
+    changed = client.get(
+        f"/translate/{record.id}/graph",
+        params={"known_version": 1},
+        headers=AUTH,
+    ).json()
+    assert changed["version"] == 2
+    term = next(n for n in changed["nodes"] if n["kind"] == "term")
+    assert term["settled"] is True and term["target"] == "잉걸불 핵"
+
+
+def test_translate_graph_running_without_graph_is_409(
+    client: TestClient,
+) -> None:
+    record = JobRecord(
+        id=f"translate-{uuid.uuid4()}",
+        type=JobType.TRANSLATE,
+        params={},
+        status=JobStatus.RUNNING,
+    )
+    client.app.state.job_manager.register_job(record)
+    res = client.get(f"/translate/{record.id}/graph", headers=AUTH)
+    assert res.status_code == 409
+
+
+def test_translate_graph_unknown_or_wrong_type_is_404(
+    client: TestClient, scan_job: dict[str, Any]
+) -> None:
+    assert client.get("/translate/nope/graph", headers=AUTH).status_code == 404
+    assert (
+        client.get(f"/translate/{scan_job['id']}/graph", headers=AUTH).status_code
+        == 404
+    )

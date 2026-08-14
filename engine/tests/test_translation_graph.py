@@ -355,3 +355,115 @@ def test_sibling_context_newlines_flattened() -> None:
     )
     block = graph.sibling_context("file.snbt", ["q.text"], exclude={"q.text"})
     assert block == '- q.title: "Multi Line Title" => "여러 줄 제목"'
+
+
+# -- snapshot -----------------------------------------------------------------
+
+
+def test_snapshot_shape_and_edge_integrity() -> None:
+    snap = build_graph().snapshot()
+    assert snap["version"] == 1
+    assert snap["truncated"] is False
+    assert snap["stats"]["entries"] == 6
+
+    nodes = {n["id"]: n for n in snap["nodes"]}
+    assert nodes["term:void orb"] == {
+        "id": "term:void orb",
+        "kind": "term",
+        "label": "Void Orb",
+        "target": "공허의 보주",
+        "settled": True,
+        "category": "item",
+        "definers": 1,
+        "mentions": 1,
+    }
+    lone = nodes["term:lone slab"]
+    assert lone["settled"] is False and lone["target"] is None
+
+    definer_id = (
+        "entry:kubejs/assets/testmod/lang/en_us.json\u0000item.testmod.void_orb"
+    )
+    assert nodes[definer_id]["kind"] == "entry"
+    assert nodes[definer_id]["settled"] is True
+
+    kinds = {e["kind"] for e in snap["edges"]}
+    assert {"defines", "mentions"} <= kinds
+    # every edge endpoint must resolve to a node in the same payload
+    for edge in snap["edges"]:
+        assert edge["source"] in nodes and edge["target"] in nodes
+
+
+def test_snapshot_version_bumps_only_on_real_settlement() -> None:
+    graph = build_graph()
+    file = "kubejs/assets/testmod/lang/en_us.json"
+    assert graph.version == 1
+    graph.record_translation(file, "block.testmod.lone_slab", "외로운 반블록")
+    assert graph.version == 2
+    # identical value and unknown nodes are no-ops
+    graph.record_translation(file, "block.testmod.lone_slab", "외로운 반블록")
+    graph.record_translation("nope.json", "nope", "x")
+    assert graph.version == 2
+
+    snap = graph.snapshot()
+    assert snap["version"] == 2
+    lone = next(n for n in snap["nodes"] if n["id"] == "term:lone slab")
+    assert lone["settled"] is True and lone["target"] == "외로운 반블록"
+
+
+def test_snapshot_filters_and_caps() -> None:
+    graph = build_graph()
+
+    q_terms = [
+        n for n in graph.snapshot(q="void")["nodes"] if n["kind"] == "term"
+    ]
+    assert [n["label"] for n in q_terms] == ["Void Orb"]
+
+    settled = graph.snapshot(status="settled")
+    assert [
+        n["id"] for n in settled["nodes"] if n["kind"] == "term"
+    ] == ["term:void orb"]
+    pending = graph.snapshot(status="pending")
+    assert [
+        n["id"] for n in pending["nodes"] if n["kind"] == "term"
+    ] == ["term:lone slab"]
+
+    capped = graph.snapshot(limit_terms=1)
+    assert capped["truncated"] is True
+    # mention-count ordering keeps the mentioned term
+    assert [
+        n["id"] for n in capped["nodes"] if n["kind"] == "term"
+    ] == ["term:void orb"]
+
+    no_mentions = graph.snapshot(mentions_per_term=0)
+    assert no_mentions["truncated"] is True
+    assert not [e for e in no_mentions["edges"] if e["kind"] == "mentions"]
+
+
+def test_snapshot_sibling_edges_chain_included_entries_only() -> None:
+    graph = TranslationGraph.build(
+        [
+            (
+                "lang/en_us.json",
+                {"item.m.gem": "Sky Gem"},
+                {"item.m.gem": "하늘 보석"},
+            ),
+            (
+                "q.snbt",
+                {
+                    "quests[0].title": "Find the Sky Gem",
+                    "quests[0].description[0]": "The Sky Gem hums.",
+                    "quests[0].description[1]": "Nothing here.",
+                },
+                {},
+            ),
+        ]
+    )
+    snap = graph.snapshot()
+    siblings = [e for e in snap["edges"] if e["kind"] == "sibling"]
+    # title and description[0] both mention the term and are included;
+    # description[1] mentions nothing, so the chain has exactly one edge.
+    assert len(siblings) == 1
+    assert {siblings[0]["source"], siblings[0]["target"]} == {
+        "entry:q.snbt\u0000quests[0].title",
+        "entry:q.snbt\u0000quests[0].description[0]",
+    }

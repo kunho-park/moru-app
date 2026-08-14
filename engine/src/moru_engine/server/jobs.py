@@ -45,7 +45,9 @@ from . import upload
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Mapping
+    from ..graph import TranslationGraph
     from ..models import LanguageFilePair
+    from ..pipeline import TranslationPipeline
     from .sessions import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -204,6 +206,13 @@ class JobRecord:
         default_factory=set
     )
     task: asyncio.Task[None] | None = None
+    #: Live pipeline while a translate job runs — /translate/{id}/graph
+    #: reads its graph. Cleared when the run returns; execution-internal,
+    #: never serialized (same as task/subscribers).
+    pipeline: TranslationPipeline | None = None
+    #: Post-run graph rebuilt once from result.entries by the graph
+    #: endpoint, cached here so repeated views stay O(1).
+    graph_cache: TranslationGraph | None = None
 
     def to_public(self) -> dict[str, Any]:
         """Contract ``Job`` schema representation."""
@@ -707,9 +716,18 @@ class JobManager:
         def cancel_check() -> bool:
             return record.cancel_requested
 
-        result = await run_pipeline(
-            config, on_event=on_event, cancel_check=cancel_check
-        )
+        def on_pipeline(pipeline: TranslationPipeline) -> None:
+            record.pipeline = pipeline
+
+        try:
+            result = await run_pipeline(
+                config,
+                on_event=on_event,
+                cancel_check=cancel_check,
+                on_pipeline=on_pipeline,
+            )
+        finally:
+            record.pipeline = None
         # Normal and partial-cancelled results expose the same cumulative
         # counters to the desktop terminal frame.
         record.done_payload = {"stats": result.stats.model_dump()}

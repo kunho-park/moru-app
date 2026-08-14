@@ -1,0 +1,34 @@
+{
+  "title": "Translation graph",
+  "live": "live",
+  "search": "Search terms…",
+  "status": {
+    "all": "All",
+    "settled": "Settled",
+    "pending": "Pending"
+  },
+  "refresh": "Refresh",
+  "truncated": "partially shown",
+  "stats": "terms {{terms}} · mentions {{mentions}} · groups {{groups}}",
+  "loading": "Loading graph…",
+  "empty": "No relationships to show yet",
+  "unavailable": "The translation graph is disabled for this job or not ready yet",
+  "legend": {
+    "settledTerm": "Settled term",
+    "pendingTerm": "Pending term",
+    "entry": "Entry"
+  },
+  "detail": {
+    "term": "Term",
+    "entry": "Entry",
+    "source": "Source",
+    "target": "Translation",
+    "pending": "pending",
+    "category": "Category",
+    "definers": "Definitions",
+    "mentions": "Mentions",
+    "key": "Key",
+    "file": "File",
+    "settled": "Translated"
+  }
+}

@@ -163,6 +163,9 @@ class TranslationGraph:
     """Relationship index: name definitions, mentions, sibling groups."""
 
     def __init__(self) -> None:
+        #: Bumped whenever record_translation settles an entry, so pollers
+        #: (the desktop graph view) can skip unchanged snapshots.
+        self.version: int = 1
         self._entries: dict[_NodeId, GraphEntry] = {}
         #: surface (lowercased) -> defining nodes.
         self._defines: dict[str, list[_NodeId]] = {}
@@ -286,10 +289,41 @@ class TranslationGraph:
     def record_translation(self, file: str, key: str, translated: str) -> None:
         """Settle a node's translation (freshly produced by this run)."""
         entry = self._entries.get((file, key))
-        if entry is not None:
+        if entry is not None and entry.translated != translated:
             entry.translated = translated
+            self.version += 1
 
     # -- queries ---------------------------------------------------------------
+
+    def _definition_candidates(
+        self, definers: list[_NodeId], *, max_chars: int | None = None
+    ) -> list[tuple[_NodeId, str]]:
+        """(node, cleaned target) for definers with a real translation.
+
+        Untranslated source copies never count; ``max_chars`` optionally
+        drops over-long targets (bindings' plausible-name cap).
+        """
+        candidates: list[tuple[_NodeId, str]] = []
+        for node in definers:
+            entry = self._entries[node]
+            if not entry.translated:
+                continue
+            if is_untranslated_copy(entry.source, entry.translated):
+                continue
+            target = clean_text(entry.translated)
+            if not target or (max_chars is not None and len(target) > max_chars):
+                continue
+            candidates.append((node, target))
+        return candidates
+
+    @staticmethod
+    def _chosen_target(candidates: list[tuple[_NodeId, str]]) -> str:
+        """Most frequent target; ties resolve to the smallest (file, key)."""
+        counts = Counter(value for _, value in candidates)
+        top = max(counts.values())
+        tied = {value for value, count in counts.items() if count == top}
+        return next(value for _, value in sorted(candidates) if value in tied)
+
 
     def bindings(self, base: Glossary) -> list[TermRule]:
         """Settled name translations as term rules, ready to merge.
@@ -317,27 +351,12 @@ class TranslationGraph:
                 continue
             if not self._mentions.get(surface):
                 continue
-            candidates: list[tuple[_NodeId, str]] = []
-            for node in definers:
-                entry = self._entries[node]
-                if not entry.translated:
-                    continue
-                if is_untranslated_copy(entry.source, entry.translated):
-                    continue
-                target = clean_text(entry.translated)
-                if not target or len(target) > _MAX_TARGET_CHARS:
-                    continue
-                candidates.append((node, target))
+            candidates = self._definition_candidates(
+                definers, max_chars=_MAX_TARGET_CHARS
+            )
             if not candidates:
                 continue
-            counts = Counter(value for _, value in candidates)
-            top = max(counts.values())
-            tied = {value for value, count in counts.items() if count == top}
-            chosen = next(
-                value
-                for _, value in sorted(candidates)
-                if value in tied
-            )
+            chosen = self._chosen_target(candidates)
             display = clean_text(self._entries[min(definers)].source)
             rules.append(
                 TermRule(
@@ -397,4 +416,123 @@ class TranslationGraph:
             "terms": len(self._defines),
             "mentions": sum(len(nodes) for nodes in self._mentions.values()),
             "sibling_groups": len(self._sibling_groups),
+        }
+
+    def snapshot(
+        self,
+        *,
+        q: str | None = None,
+        status: str = "all",
+        limit_terms: int = 300,
+        mentions_per_term: int = 10,
+    ) -> dict[str, object]:
+        """Visualization payload: term/entry nodes plus defines/mentions/
+        sibling edges, capped for canvas rendering.
+
+        Built fully synchronously (no awaits): the running pipeline mutates
+        the graph on the same asyncio loop, so a snapshot taken between
+        awaits always sees a consistent state without locking.
+
+        Args:
+            q: case-insensitive substring over surface, display source, and
+                settled target.
+            status: "all" | "settled" | "pending" — settled means at least
+                one defining entry carries a real translation.
+            limit_terms: term-node cap; terms are kept by descending
+                mention count (ties: surface order).
+            mentions_per_term: mention-edge cap per term.
+        """
+        needle = q.strip().lower() if q and q.strip() else None
+        terms: list[tuple[str, str, str | None, list[_NodeId], list[_NodeId]]] = []
+        for surface, definers in self._defines.items():
+            candidates = self._definition_candidates(definers)
+            target = self._chosen_target(candidates) if candidates else None
+            if status == "settled" and target is None:
+                continue
+            if status == "pending" and target is not None:
+                continue
+            display = clean_text(self._entries[min(definers)].source)
+            if needle is not None and not (
+                needle in surface
+                or needle in display.lower()
+                or (target is not None and needle in target.lower())
+            ):
+                continue
+            terms.append(
+                (surface, display, target, definers, self._mentions.get(surface, []))
+            )
+        terms.sort(key=lambda t: (-len(t[4]), t[0]))
+        truncated = len(terms) > limit_terms
+        terms = terms[:limit_terms]
+
+        nodes: list[dict[str, object]] = []
+        edges: list[dict[str, str]] = []
+        included: dict[_NodeId, str] = {}  # node -> payload id
+
+        def entry_id(node: _NodeId) -> str:
+            """Add the entry node on first sight; return its payload id."""
+            payload_id = included.get(node)
+            if payload_id is None:
+                payload_id = f"entry:{node[0]}\u0000{node[1]}"
+                included[node] = payload_id
+                entry = self._entries[node]
+                nodes.append(
+                    {
+                        "id": payload_id,
+                        "kind": "entry",
+                        "label": node[1],
+                        "file": node[0],
+                        "settled": bool(entry.translated)
+                        and not is_untranslated_copy(
+                            entry.source, entry.translated or ""
+                        ),
+                    }
+                )
+            return payload_id
+
+        for surface, display, target, definers, mentions in terms:
+            term_id = f"term:{surface}"
+            nodes.append(
+                {
+                    "id": term_id,
+                    "kind": "term",
+                    "label": display,
+                    "target": target,
+                    "settled": target is not None,
+                    "category": self._categories[surface],
+                    "definers": len(definers),
+                    "mentions": len(mentions),
+                }
+            )
+            for node in definers:
+                edges.append(
+                    {"source": term_id, "target": entry_id(node), "kind": "defines"}
+                )
+            if len(mentions) > mentions_per_term:
+                truncated = True
+            for node in mentions[:mentions_per_term]:
+                edges.append(
+                    {"source": entry_id(node), "target": term_id, "kind": "mentions"}
+                )
+
+        # Sibling edges only BETWEEN entry nodes already in the payload, as
+        # a chain in group order (a clique adds quadratic edges for zero
+        # extra information on a canvas).
+        for group in self._sibling_groups.values():
+            present = [node for node in group if node in included]
+            for left, right in zip(present, present[1:]):
+                edges.append(
+                    {
+                        "source": included[left],
+                        "target": included[right],
+                        "kind": "sibling",
+                    }
+                )
+
+        return {
+            "version": self.version,
+            "truncated": truncated,
+            "stats": self.stats(),
+            "nodes": nodes,
+            "edges": edges,
         }

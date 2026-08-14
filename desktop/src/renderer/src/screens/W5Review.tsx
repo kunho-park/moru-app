@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { Entry, EntryStatus } from "../../../shared/engine";
+import { TranslationGraphView } from "@/components/TranslationGraphView";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
 import { formatInt } from "@/lib/format";
@@ -545,6 +546,11 @@ export function W5Review() {
   return (
     <div className="animate-fade-in-up px-10 py-[28px]">
       {stepHeader}
+
+      {/* Translation graph of the finished run (collapsible) */}
+      <div className="mb-5">
+        <TranslationGraphView jobId={translateJobId} live={false} />
+      </div>
 
       {/* Header + summary */}
       <div className="mb-5 flex items-end justify-between gap-6">

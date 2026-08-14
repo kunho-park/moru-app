@@ -19,6 +19,7 @@ import type {
   ScanResult,
   TmStats,
   TranslateParams,
+  TranslationGraphResponse,
   UploadParams,
 } from "../../../shared/engine";
 import { useEngineStore } from "../stores/engine";
@@ -136,6 +137,34 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ file }),
     }),
+  /**
+   * Translation-graph snapshot (live while running, rebuilt after).
+   * `knownVersion` short-circuits an unchanged poll server-side; the
+   * caller must only send it when q/status match the snapshot it holds —
+   * the version check ignores filters.
+   */
+  translationGraph: (
+    jobId: string,
+    opts: {
+      q?: string;
+      status?: "all" | "settled" | "pending";
+      limitTerms?: number;
+      mentionsPerTerm?: number;
+      knownVersion?: number;
+    } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (opts.q !== undefined && opts.q !== "") params.set("q", opts.q);
+    if (opts.status !== undefined) params.set("status", opts.status);
+    if (opts.limitTerms !== undefined) params.set("limit_terms", String(opts.limitTerms));
+    if (opts.mentionsPerTerm !== undefined)
+      params.set("mentions_per_term", String(opts.mentionsPerTerm));
+    if (opts.knownVersion !== undefined) params.set("known_version", String(opts.knownVersion));
+    const qs = params.toString();
+    return request<TranslationGraphResponse>(
+      `/translate/${jobId}/graph${qs === "" ? "" : `?${qs}`}`,
+    );
+  },
 
   glossary: (sourceLang: string, targetLang: string) =>
     request<Glossary>(`/glossary?source_lang=${sourceLang}&target_lang=${targetLang}`),

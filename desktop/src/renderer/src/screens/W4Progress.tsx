@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { TranslationGraphView } from "@/components/TranslationGraphView";
 import {
   formatCompact,
   formatDuration,
@@ -908,6 +909,13 @@ export function W4Progress() {
           )}
         </div>
       </div>
+
+      {/* Translation graph (collapsible, live-polling while running) */}
+      {wizard.translateJobId !== null && (
+        <div className="mt-5">
+          <TranslationGraphView jobId={wizard.translateJobId} live={running} />
+        </div>
+      )}
 
       {/* Cancel confirmation dialog */}
       {showCancel && (

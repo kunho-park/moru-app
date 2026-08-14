@@ -129,6 +129,48 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/EntryPage" }
+  /translate/{jobId}/graph:
+    get:
+      summary: >
+        Translation-graph snapshot for the desktop graph canvas. Serves the
+        live pipeline graph while the job runs; after completion (session
+        restorations included) the graph is rebuilt from result entries.
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - name: q
+          in: query
+          description: >-
+            Case-insensitive substring over term surface, display source and
+            settled target.
+          schema: { type: string, maxLength: 200 }
+        - name: status
+          in: query
+          description: settled = at least one defining entry is translated
+          schema: { type: string, enum: [all, settled, pending], default: all }
+        - name: limit_terms
+          in: query
+          description: term-node cap, kept by descending mention count
+          schema: { type: integer, minimum: 1, maximum: 2000, default: 300 }
+        - name: mentions_per_term
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 50, default: 10 }
+        - name: known_version
+          in: query
+          description: >-
+            Client's last-seen graph version; when it still matches, the
+            response is the tiny {version, unchanged, job_finished} form so
+            live polling costs nothing between settlements.
+          schema: { type: integer }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TranslationGraphSnapshot" }
+        "404": { description: unknown job or not a translate job }
+        "409":
+          description: >-
+            graph unavailable — job still starting, translation graph
+            disabled for the run, or no result to rebuild from
   /translate/{jobId}/entries/{entryKey}:
     patch:
       summary: Manual edit of one entry (review screen)
@@ -595,6 +637,48 @@ components:
         entries:
           type: array
           items: { $ref: "#/components/schemas/Entry" }
+    TranslationGraphSnapshot:
+      type: object
+      description: >-
+        Either the full snapshot or, when known_version matched, the
+        {version, unchanged, job_finished} short form.
+      required: [version, job_finished]
+      properties:
+        version: { type: integer }
+        job_finished: { type: boolean }
+        unchanged: { type: boolean }
+        truncated: { type: boolean }
+        stats:
+          type: object
+          properties:
+            entries: { type: integer }
+            terms: { type: integer }
+            mentions: { type: integer }
+            sibling_groups: { type: integer }
+        nodes:
+          type: array
+          items:
+            type: object
+            required: [id, kind, label, settled]
+            properties:
+              id: { type: string }
+              kind: { type: string, enum: [term, entry] }
+              label: { type: string }
+              settled: { type: boolean }
+              target: { type: string, nullable: true }
+              category: { type: string }
+              definers: { type: integer }
+              mentions: { type: integer }
+              file: { type: string }
+        edges:
+          type: array
+          items:
+            type: object
+            required: [source, target, kind]
+            properties:
+              source: { type: string }
+              target: { type: string }
+              kind: { type: string, enum: [defines, mentions, sibling] }
     Glossary:
       type: object
       properties:

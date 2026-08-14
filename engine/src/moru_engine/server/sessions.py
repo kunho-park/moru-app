@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from dataclasses import asdict
@@ -26,6 +27,23 @@ from .jobs import JobRecord, JobStatus, JobType
 logger = logging.getLogger(__name__)
 
 SESSION_FORMAT_VERSION = "1.0"
+
+#: A session id reaches the filesystem as "<id>.moru". Ids arrive from the
+#: desktop (params.session_id) and from inside imported files, so everything
+#: outside this set is replaced before the id is ever joined to a path.
+_UNSAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]+")
+#: Statuses a persisted session may claim. A restored record is always
+#: finished=True, so a non-terminal status would advertise a reopenable job
+#: with no task behind it.
+_TERMINAL_STATUSES = frozenset(
+    {JobStatus.DONE, JobStatus.CANCELLED, JobStatus.FAILED}
+)
+
+
+def _safe_session_id(session_id: str) -> str:
+    """Filesystem-safe stem for a session id (no separators, no traversal)."""
+    stem = _UNSAFE_ID_RE.sub("-", session_id).strip("-")
+    return stem[:120] or "session"
 
 
 def _default_session_dir() -> Path:
@@ -65,7 +83,7 @@ class SessionStore:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
     def _session_file_path(self, session_id: str) -> Path:
-        return self.sessions_dir / f"{session_id}.moru"
+        return self.sessions_dir / f"{_safe_session_id(session_id)}.moru"
 
     def save_job_session(self, record: JobRecord) -> Path | None:
         """Serialize a completed/cancelled translate JobRecord and persist to disk."""
@@ -113,15 +131,19 @@ class SessionStore:
             "include_categories": config.include_categories,
         }
 
+        stats_source = res.stats
         if res.stats.total_entries == 0 and res.entries:
-            res.stats.total_entries = len(res.entries)
-            res.stats.translated_entries = sum(1 for e in res.entries if e.status in (EntryStatus.PASSED, EntryStatus.MODIFIED))
-            res.stats.failed_entries = sum(1 for e in res.entries if e.status == EntryStatus.FAILED or e.errors)
-            res.stats.tm_hits = sum(1 for e in res.entries if e.status == EntryStatus.TM_HIT)
-            res.stats.skipped_entries = sum(1 for e in res.entries if e.status == EntryStatus.SKIPPED)
-            res.stats.finalize()
+            # Recompute onto a copy: a save is a read from the caller's point
+            # of view and must not mutate the result the live job still shares.
+            stats_source = res.stats.model_copy(deep=True)
+            stats_source.total_entries = len(res.entries)
+            stats_source.translated_entries = sum(1 for e in res.entries if e.status in (EntryStatus.PASSED, EntryStatus.MODIFIED))
+            stats_source.failed_entries = sum(1 for e in res.entries if e.status == EntryStatus.FAILED or e.errors)
+            stats_source.tm_hits = sum(1 for e in res.entries if e.status == EntryStatus.TM_HIT)
+            stats_source.skipped_entries = sum(1 for e in res.entries if e.status == EntryStatus.SKIPPED)
+            stats_source.finalize()
 
-        stats_data = res.stats.model_dump()
+        stats_data = stats_source.model_dump()
 
         modpack_name = record.params.get("modpack_name") or config.modpack_path.name
         if identity_dict and identity_dict.get("name"):
@@ -176,11 +198,16 @@ class SessionStore:
         if not isinstance(data, dict) or "entries" not in data:
             return None
 
-        return self.deserialize_job_session(data)
+        try:
+            return self.deserialize_job_session(data)
+        except (ValueError, KeyError):
+            logger.exception("Ignoring unusable session file %s", path)
+            return None
 
     def deserialize_job_session(self, data: dict[str, Any]) -> JobRecord:
         """Convert a session payload dict into a JobRecord."""
-        session_id = data.get("id") or str(uuid.uuid4())
+        raw_id = data.get("id")
+        session_id = _safe_session_id(str(raw_id)) if raw_id else str(uuid.uuid4())
         config_data = data.get("config") or {}
 
         config = PipelineConfig(
@@ -229,10 +256,13 @@ class SessionStore:
             except ValueError:
                 pass
 
-        status_str = data.get("status", "done")
-        job_status = JobStatus.DONE
-        if status_str in (JobStatus.CANCELLED.value, JobStatus.FAILED.value):
+        status_str = str(data.get("status", JobStatus.DONE.value))
+        try:
             job_status = JobStatus(status_str)
+        except ValueError as exc:
+            raise ValueError(f"unknown session status: {status_str!r}") from exc
+        if job_status not in _TERMINAL_STATUSES:
+            raise ValueError(f"session status {status_str!r} is not finished")
 
         record = JobRecord(
             id=session_id,

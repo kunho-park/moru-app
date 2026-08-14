@@ -24,8 +24,14 @@ win.moru ??= {};
 
 const fetchCalls = [];
 let nextResponse = null;
+/** url substring -> response, consulted before the shared nextResponse. */
+const routeResponses = new Map();
 globalThis.fetch = async (url) => {
-  fetchCalls.push(String(url));
+  const href = String(url);
+  fetchCalls.push(href);
+  for (const [needle, response] of routeResponses) {
+    if (href.includes(needle)) return response;
+  }
   return nextResponse;
 };
 
@@ -84,7 +90,10 @@ test("gone when the session has no registered engine job and disk session restor
   useSessions.getState().upsert(record("s1", "done"));
   fetchCalls.length = 0;
   expect(await useWizard.getState().reopenSession("s1")).toBe("gone");
-  expect(fetchCalls.length).toBe(2); // probes api.entries and falls back to api.restoreSession
+  // Probe the entries endpoint first, then fall back to the disk session.
+  expect(fetchCalls).toHaveLength(2);
+  expect(fetchCalls[0]).toContain("/translate/s1/entries");
+  expect(fetchCalls[1]).toContain("/sessions/s1/restore");
 });
 
 test("hydrates W5/W6 state after a successful probe", async () => {
@@ -145,4 +154,27 @@ test("failed records never reopen even with a live job", async () => {
   const before = fetchCalls.length;
   expect(await useWizard.getState().reopenSession("s3")).toBe("gone");
   expect(fetchCalls.length).toBe(before); // status gate precedes the probe
+});
+
+test("restores the scan screen only when the session carries a scan payload", async () => {
+  const scanPayload = { modpack_path: "/packs/s4", categories: [], identity: null };
+  useSessions.getState().upsert(record("s4", "done"));
+  useSessionJobs.getState().register("s4", "job-4");
+  nextResponse = okPage;
+  routeResponses.set("/scan/", { ok: true, json: async () => scanPayload });
+
+  expect(await useWizard.getState().reopenSession("s4")).toBe("ok");
+  expect(useWizard.getState().scanResult).toEqual(scanPayload);
+  expect(useWizard.getState().scanState).toBe("done"); // otherwise w3 is unreachable
+
+  // A different session with no persisted payload: the scan screen stays
+  // idle rather than half-restored. (Reopening s4 again would short-circuit
+  // on the already-live path and keep its state.)
+  useSessions.getState().upsert(record("s5", "done"));
+  useSessionJobs.getState().register("s5", "job-5");
+  routeResponses.set("/scan/", notFound);
+  expect(await useWizard.getState().reopenSession("s5")).toBe("ok");
+  expect(useWizard.getState().scanResult).toBe(null);
+  expect(useWizard.getState().scanState).toBe("idle");
+  routeResponses.clear();
 });

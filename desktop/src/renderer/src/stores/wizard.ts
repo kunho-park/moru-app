@@ -455,6 +455,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
     const sessionId = state.sessionId ?? crypto.randomUUID();
     const params: TranslateParams = {
       session_id: sessionId,
+      scan_job_id: state.scanJobId ?? undefined,
       modpack_path: state.modpackPath,
       source_locale: state.sourceLocale,
       target_locale: state.targetLocale,

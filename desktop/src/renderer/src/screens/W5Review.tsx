@@ -26,6 +26,12 @@ import { useSessionJobs, useWizard } from "@/stores/wizard";
 
 const PAGE_SIZE = 100;
 
+/** One entry's identity. A key is only unique within its own source file. */
+interface EntryRef {
+  key: string;
+  file: string;
+}
+
 type EntryFilter = "all" | "failed" | "warning" | "modified";
 const FILTERS: readonly EntryFilter[] = ["all", "failed", "warning", "modified"];
 
@@ -324,7 +330,7 @@ export function W5Review() {
   const rows = entries;
 
   const selected: Entry | null =
-    rows.find((e) => `${e.file}:${e.key}` === selectedKey || e.key === selectedKey) ??
+    rows.find((e) => `${e.file}:${e.key}` === selectedKey) ??
     rows[0] ??
     null;
 
@@ -338,9 +344,11 @@ export function W5Review() {
     void queryClient.invalidateQueries({ queryKey: ["w5", translateJobId] });
   };
 
+  // Mutations carry file + key: the same key can live in two source files,
+  // and the engine would otherwise patch whichever one it finds first.
   const patchMut = useMutation({
-    mutationFn: ({ key, text }: { key: string; text: string }) =>
-      api.patchEntry(translateJobId as string, key, text),
+    mutationFn: ({ key, file, text }: EntryRef & { text: string }) =>
+      api.patchEntry(translateJobId as string, key, text, file),
     onSuccess: () => {
       setActionError(null);
       invalidate();
@@ -349,7 +357,8 @@ export function W5Review() {
   });
 
   const retransMut = useMutation({
-    mutationFn: (key: string) => api.retranslateEntry(translateJobId as string, key),
+    mutationFn: ({ key, file }: EntryRef) =>
+      api.retranslateEntry(translateJobId as string, key, file),
     onSuccess: (entry) => {
       setActionError(null);
       setDraft(entry.translated_text);
@@ -359,9 +368,9 @@ export function W5Review() {
   });
 
   const bulkMut = useMutation({
-    mutationFn: async (keys: string[]) => {
-      for (const key of keys) {
-        await api.retranslateEntry(translateJobId as string, key);
+    mutationFn: async (refs: EntryRef[]) => {
+      for (const ref of refs) {
+        await api.retranslateEntry(translateJobId as string, ref.key, ref.file);
       }
     },
     onError: (err) => setActionError(errorText(err)),
@@ -411,7 +420,7 @@ export function W5Review() {
         editRef.current?.focus();
       } else if ((e.key === "r" || e.key === "R") && selected !== null && !retransMut.isPending) {
         e.preventDefault();
-        retransMut.mutate(selected.key);
+        retransMut.mutate({ key: selected.key, file: selected.file });
       }
     };
     window.addEventListener("keydown", onKey);
@@ -474,7 +483,9 @@ export function W5Review() {
     );
   }
 
-  const failedOnPage = rows.filter((e) => e.status === "failed").map((e) => e.key);
+  const failedOnPage: EntryRef[] = rows
+    .filter((e) => e.status === "failed")
+    .map((e) => ({ key: e.key, file: e.file }));
   const remaining = Math.max(0, total - page * PAGE_SIZE);
   const selColor = selected === null ? "#6A7C74" : STATUS_COLOR[selected.status];
   const detailColors =
@@ -827,7 +838,7 @@ export function W5Review() {
               {/* Actions */}
               <div className="grid grid-cols-2 gap-[6px]">
                 <button
-                  onClick={() => retransMut.mutate(selected.key)}
+                  onClick={() => retransMut.mutate({ key: selected.key, file: selected.file })}
                   disabled={retransMut.isPending}
                   className="flex items-center justify-center gap-[6px] bg-accent p-[10px] text-[12px] font-bold text-[#0A100D] hover:bg-accent-hi disabled:opacity-60"
                 >
@@ -846,7 +857,9 @@ export function W5Review() {
                   {retransMut.isPending ? t("w5.detail.retranslating") : t("w5.detail.retranslate")}
                 </button>
                 <button
-                  onClick={() => patchMut.mutate({ key: selected.key, text: draft })}
+                  onClick={() =>
+                    patchMut.mutate({ key: selected.key, file: selected.file, text: draft })
+                  }
                   disabled={patchMut.isPending || draft === selected.translated_text}
                   className="bg-line2 p-[10px] text-[12px] font-semibold text-text hover:bg-edge disabled:opacity-60"
                 >
@@ -893,7 +906,7 @@ export function W5Review() {
               <path d="M6 8V2M6 8L3 5M6 8L9 5" />
               <path d="M2 10H10" />
             </svg>
-            {useSettings.getState().uiLanguage === "ko" ? "세션 저장 (.moru)" : "Save session (.moru)"}
+            {t("w5.detail.exportSession")}
           </button>
         </div>
         <div className="flex items-center gap-3">

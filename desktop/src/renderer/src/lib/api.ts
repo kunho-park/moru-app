@@ -107,15 +107,15 @@ export const api = {
       `/translate/${jobId}/entries?filter=${filter}&page=${page}&page_size=${pageSize}` +
         (search === "" ? "" : `&search=${encodeURIComponent(search)}`),
     ),
-  patchEntry: (jobId: string, key: string, translatedText: string) =>
+  patchEntry: (jobId: string, key: string, translatedText: string, file?: string) =>
     request<Entry>(`/translate/${jobId}/entries/${encodeURIComponent(key)}`, {
       method: "PATCH",
-      body: JSON.stringify({ translated_text: translatedText }),
+      body: JSON.stringify({ translated_text: translatedText, file }),
     }),
-  retranslateEntry: (jobId: string, key: string) =>
+  retranslateEntry: (jobId: string, key: string, file?: string) =>
     request<Entry>(`/translate/${jobId}/entries/${encodeURIComponent(key)}/retranslate`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ file }),
     }),
 
   glossary: (sourceLang: string, targetLang: string) =>

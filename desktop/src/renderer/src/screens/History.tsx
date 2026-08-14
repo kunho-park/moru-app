@@ -367,7 +367,7 @@ export function HistoryScreen(): React.JSX.Element {
     try {
       const res = await api.importSession(filePath);
       if (res.status === "ok" && res.session) {
-        const s = res.session as any;
+        const s = res.session;
         const rec: SessionRecord = {
           id: s.id,
           modpackPath: s.modpack_path || "",
@@ -375,16 +375,16 @@ export function HistoryScreen(): React.JSX.Element {
           sourceLocale: s.source_locale || "en_us",
           targetLocale: s.target_locale || "ko_kr",
           model: s.model || "",
-          status: s.status || "done",
+          status: s.status === "cancelled" || s.status === "failed" ? s.status : "done",
           createdAt: parseTimestamp(s.created_at) ?? Date.now(),
           finishedAt: parseTimestamp(s.finished_at),
           doneEntries: s.done_entries ?? 0,
           totalEntries: s.total_entries ?? 0,
-          stats: s.stats ?? null,
-          error: s.error ?? null,
+          stats: (s.stats as SessionRecord["stats"]) ?? null,
+          error: null,
           exportZipPath: s.export_zip_path ?? null,
           exportOverridesZipPath: s.export_overrides_zip_path ?? null,
-          sharedUrl: s.shared_url ?? null,
+          sharedUrl: null,
         };
         useSessions.getState().upsert(rec);
         useSessionJobs.getState().register(rec.id, res.job.id);
@@ -588,7 +588,13 @@ export function HistoryScreen(): React.JSX.Element {
               <button
                 className="bg-red px-3.5 py-2 text-[12px] font-bold text-[#0A100D] hover:bg-[#f58585]"
                 onClick={() => {
-                  remove(confirmTarget.id);
+                  const id = confirmTarget.id;
+                  const jobId = useSessionJobs.getState().jobs[id] ?? id;
+                  remove(id);
+                  useSessionJobs.getState().unregister(id);
+                  // Drop the .moru file too, or the engine keeps serving a
+                  // session the history screen no longer lists.
+                  void api.deleteSession(jobId).catch(() => undefined);
                   setConfirmId(null);
                 }}
               >

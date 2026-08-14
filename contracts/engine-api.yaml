@@ -147,11 +147,18 @@ paths:
               required: [translated_text]
               properties:
                 translated_text: { type: string }
+                file:
+                  type: string
+                  description: >
+                    Source file of the entry. Required to address a key that
+                    appears in more than one file; omitted, the engine edits
+                    the first entry with that key.
       responses:
         "200":
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Entry" }
+        "404": { description: unknown entry }
   /translate/{jobId}/entries/{entryKey}/retranslate:
     post:
       summary: >
@@ -166,6 +173,17 @@ paths:
           in: path
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  description: >
+                    Source file of the entry, to disambiguate a shared key.
       responses:
         "200":
           content:

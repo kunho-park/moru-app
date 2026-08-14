@@ -14,6 +14,7 @@ import hashlib
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,7 +37,8 @@ from ..glossary.pair_harvester import (
     is_untranslated_copy,
 )
 from ..glossary.term_miner import TermCandidate, mine_candidates
-from ..handlers.base import create_default_registry
+from ..graph import SIBLING_CONTEXT_HEADER, TranslationGraph, is_name_entry
+from ..handlers.base import ContentHandler, create_default_registry
 from ..models import Glossary, TermRule, ValidationSeverity
 from ..models.glossary_filter import GlossaryFilter
 from ..output import (
@@ -54,7 +56,7 @@ from ..tm import LocalTM
 from ..validator import TranslationValidator
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from ..models import LanguageFilePair
 
@@ -178,6 +180,11 @@ class PipelineConfig(BaseModel):
 
     use_tm: bool = True
     tm_db_path: Path | None = None
+    #: Build the in-memory entry relationship graph: name-defining entries
+    #: translate in a first wave, their settled translations merge into the
+    #: run glossary as bindings, and already-translated sibling entries are
+    #: injected as batch context.
+    use_translation_graph: bool = True
     #: Include origin="vanilla" rows synced from the server into the user
     #: glossary store (the web-published vanilla bundle). No local vanilla
     #: glossary is bundled anymore; disabling this only drops those rows.
@@ -260,6 +267,30 @@ def category_stats(result: PipelineResult) -> dict[str, int]:
     return categories
 
 
+@dataclass
+class _PreparedFile:
+    """Per-file state carried across the prepare/translate/finalize phases."""
+
+    pair: LanguageFilePair
+    rel: str
+    handler: ContentHandler
+    source_data: dict[str, str]
+    existing_keys: set[str]
+    work_total: int
+    #: Output values settled so far: existing + identity skips + TM hits,
+    #: later extended with validated fresh translations.
+    final: dict[str, str] = field(default_factory=dict)
+    file_entries: list[EntryResult] = field(default_factory=list)
+    protected_map: dict[str, ProtectedText] = field(default_factory=dict)
+    #: Keys still awaiting an LLM outcome (protected text). Waves drain it.
+    to_translate: dict[str, str] = field(default_factory=dict)
+    #: Real pre-settled translations (existing + TM hits) for graph builds.
+    known_translations: dict[str, str] = field(default_factory=dict)
+    #: Fresh restored translations accumulated across waves.
+    translated_raw: dict[str, str] = field(default_factory=dict)
+    was_cancelled: bool = False
+
+
 class TranslationPipeline:
     """Orchestrates one translation session over a scanned modpack."""
 
@@ -305,6 +336,9 @@ class TranslationPipeline:
         self._entry_counter = 0
         #: Monotonic provider-request id for live concurrent-work events.
         self._request_counter = 0
+        #: Entry relationship graph of the current run (built after the
+        #: prepare phase; rebuilt from entries for post-run paths).
+        self._graph: TranslationGraph | None = None
 
     # -- events ------------------------------------------------------------
 
@@ -694,24 +728,61 @@ class TranslationPipeline:
 
     # -- per-file processing -------------------------------------------------
 
-    async def _process_pair(
+    async def _extract_for_graph(
+        self, pair: LanguageFilePair
+    ) -> tuple[str, dict[str, str], dict[str, str]] | None:
+        """Extract a translate-scope-excluded file as graph evidence only.
+
+        Returns ``(rel, source_data, real_existing_translations)`` or None.
+        Best-effort like the harvest path: one broken file skips that
+        file only.
+        """
+        handler = self.registry.get_handler(pair.source_path)
+        if handler is None:
+            return None
+        try:
+            async with self._file_semaphore:
+                source_data = dict(await handler.extract(pair.source_path))
+                existing: dict[str, str] = {}
+                if pair.target_path is not None and pair.target_path.exists():
+                    existing = dict(await handler.extract(pair.target_path))
+        except Exception:  # noqa: BLE001 — enhancement path, never fatal
+            logger.warning(
+                "Graph extraction failed for %s",
+                pair.source_path,
+                exc_info=True,
+            )
+            return None
+        if not source_data:
+            return None
+        known = {
+            key: existing[key]
+            for key, text in source_data.items()
+            if key in existing and not is_untranslated_copy(text, existing[key])
+        }
+        return self._relative(pair.source_path), source_data, known
+
+    async def _prepare_pair(
         self,
         pair: LanguageFilePair,
-        glossary: Glossary,
         glossary_version: str,
-        validator: TranslationValidator,
-        result: PipelineResult,
-    ) -> None:
+    ) -> _PreparedFile | None:
+        """Phase 0 for one file: extract, classify, protect, TM lookup.
+
+        I/O bound, so the file semaphore only covers this phase; LLM
+        concurrency during the translation waves stays bounded by
+        ``_llm_semaphore`` alone.
+        """
         async with self._file_semaphore:
             self._check_cancelled()
             handler = self.registry.get_handler(pair.source_path)
             if handler is None:
                 logger.warning("No handler for %s", pair.source_path)
-                return
+                return None
             rel = self._relative(pair.source_path)
             source_data = dict(await handler.extract(pair.source_path))
             if not source_data:
-                return
+                return None
 
             existing: dict[str, str] = {}
             if pair.target_path is not None and pair.target_path.exists():
@@ -725,18 +796,21 @@ class TranslationPipeline:
                 for key, text in source_data.items()
                 if not is_untranslated_copy(text, existing.get(key, ""))
             }
-            work_total = len(source_data) - len(existing_keys)
+            prepared = _PreparedFile(
+                pair=pair,
+                rel=rel,
+                handler=handler,
+                source_data=source_data,
+                existing_keys=existing_keys,
+                work_total=len(source_data) - len(existing_keys),
+            )
 
-            final: dict[str, str] = {}
-            file_entries: list[EntryResult] = []
             protector = PlaceholderProtector()
-            protected_map: dict[str, ProtectedText] = {}
-            to_translate: dict[str, str] = {}
-
             for key, text in source_data.items():
                 if key in existing_keys:
-                    final[key] = existing[key]
-                    file_entries.append(
+                    prepared.final[key] = existing[key]
+                    prepared.known_translations[key] = existing[key]
+                    prepared.file_entries.append(
                         EntryResult(
                             key=key,
                             file=rel,
@@ -752,8 +826,8 @@ class TranslationPipeline:
                     or not text.strip()
                     or looks_like_identifier(text)
                 ):
-                    final[key] = text
-                    file_entries.append(
+                    prepared.final[key] = text
+                    prepared.file_entries.append(
                         EntryResult(
                             key=key,
                             file=rel,
@@ -763,13 +837,12 @@ class TranslationPipeline:
                         )
                     )
                     continue
-                protected_map[key] = protected
-                to_translate[key] = protected.protected
+                prepared.protected_map[key] = protected
+                prepared.to_translate[key] = protected.protected
 
             # TM lookup on raw source text
-            tm_hits: dict[str, str] = {}
-            if self.tm is not None and to_translate:
-                raw = {k: source_data[k] for k in to_translate}
+            if self.tm is not None and prepared.to_translate:
+                raw = {k: source_data[k] for k in prepared.to_translate}
                 tm_hits = await asyncio.to_thread(
                     self.tm.lookup_many,
                     raw,
@@ -777,9 +850,10 @@ class TranslationPipeline:
                     glossary_version,
                 )
                 for key, translated in tm_hits.items():
-                    final[key] = translated
-                    to_translate.pop(key, None)
-                    file_entries.append(
+                    prepared.final[key] = translated
+                    prepared.known_translations[key] = translated
+                    prepared.to_translate.pop(key, None)
+                    prepared.file_entries.append(
                         EntryResult(
                             key=key,
                             file=rel,
@@ -789,179 +863,274 @@ class TranslationPipeline:
                         )
                     )
 
-            if work_total > 0:
+            if prepared.work_total > 0:
                 self._emit(
                     "progress",
                     {
                         "stage": "translate",
                         "file": rel,
-                        "done": len(final) - len(existing_keys),
-                        "total": work_total,
+                        "done": len(prepared.final) - len(existing_keys),
+                        "total": prepared.work_total,
                     },
                 )
-            context = f"file: {rel}; handler: {handler.name}"
-            translated_raw: dict[str, str] = {}
+            return prepared
 
-            async def translate_one(
-                batch: dict[str, str],
-            ) -> tuple[
-                dict[str, str],
-                dict[str, str],
-                dict[str, list[str]],
-            ]:
-                self._check_cancelled()
-                # Prompt only the glossary rules relevant to THIS batch —
-                # rendering the whole store (a synced vanilla set alone is
-                # thousands of rules) blows up the prompt and derails small
-                # models.
-                batch_glossary = GlossaryFilter.filter_for_texts(
-                    glossary, {k: source_data[k] for k in batch}
-                ).to_context_string()
-                translations, failed = await self._translate_batch(
-                    batch, batch_glossary, context, file=rel
-                )
-                return batch, translations, failed
+    async def _translate_wave(
+        self,
+        prepared: _PreparedFile,
+        keys: list[str],
+        glossary: Glossary,
+        graph: TranslationGraph | None,
+    ) -> None:
+        """Translate a subset of one file's pending entries.
 
-            batch_tasks = [
-                asyncio.create_task(translate_one(batch))
-                for batch in self._make_batches(to_translate)
-            ]
-            was_cancelled = False
-            try:
-                for completed in asyncio.as_completed(batch_tasks):
-                    batch, translations, failed = await completed
-                    for key in batch:
-                        protected = protected_map[key]
-                        out = translations.get(key)
-                        errors = list(failed.get(key, []))
-                        if out is None:
-                            file_entries.append(
-                                EntryResult(
-                                    key=key,
-                                    file=rel,
-                                    source_text=source_data[key],
-                                    status=EntryStatus.FAILED,
-                                    errors=errors or ["no translation returned"],
-                                )
-                            )
-                            continue
-                        try:
-                            restored = protected.restore(out)
-                        except PlaceholderError as exc:
-                            file_entries.append(
-                                EntryResult(
-                                    key=key,
-                                    file=rel,
-                                    source_text=source_data[key],
-                                    translated_text=out,
-                                    status=EntryStatus.FAILED,
-                                    errors=[*errors, str(exc)],
-                                )
-                            )
-                            continue
-                        translated_raw[key] = restored
-                        self._entry_counter += 1
-                        if self._entry_counter % ENTRY_TICKER_INTERVAL == 1:
-                            # Sampled live preview pair for the GUI ticker.
-                            self._emit(
-                                "entry_done",
-                                {
-                                    "key": key,
-                                    "source": source_data[key][:TICKER_TEXT_LIMIT],
-                                    "translated": restored[:TICKER_TEXT_LIMIT],
-                                },
-                            )
-                    self._emit(
-                        "progress",
-                        {
-                            "stage": "translate",
-                            "file": rel,
-                            # Existing target-locale keys are excluded from the
-                            # scan totals and therefore from live progress.
-                            "done": len(final)
-                            - len(existing_keys)
-                            + len(translated_raw),
-                            "total": work_total,
-                        },
-                    )
-                    # lm.history aggregation is O(calls); once per completed
-                    # batch keeps live token/cost counters current.
-                    self._emit("tokens", token_usage(self.lm))
-            except asyncio.CancelledError:
-                was_cancelled = True
-            finally:
-                for task in batch_tasks:
-                    if not task.done():
-                        task.cancel()
-                if batch_tasks:
-                    await asyncio.gather(*batch_tasks, return_exceptions=True)
+        Every key of a completed batch leaves ``to_translate`` (success,
+        placeholder failure, or model failure alike get a terminal
+        outcome), so a later wave never re-sends it. Cancellation flushes
+        the completed batches and sets ``was_cancelled`` instead of
+        re-raising - the caller finalizes partial results either way.
+        """
+        pending = {
+            key: prepared.to_translate[key]
+            for key in keys
+            if key in prepared.to_translate
+        }
+        if not pending:
+            return
+        rel = prepared.rel
+        source_data = prepared.source_data
+        base_context = f"file: {rel}; handler: {prepared.handler.name}"
 
-            # Post-restore validation with the full validator
-            if translated_raw:
-                report = validator.validate(
-                    {k: source_data[k] for k in translated_raw}, translated_raw
-                )
-                issues_by_key: dict[str, list[str]] = {}
-                error_keys: set[str] = set()
-                for issue in report.issues:
-                    issues_by_key.setdefault(issue.key, []).append(issue.message)
-                    if issue.severity == ValidationSeverity.ERROR:
-                        error_keys.add(issue.key)
-                for key, translated in translated_raw.items():
-                    issues = issues_by_key.get(key, [])
-                    if key in error_keys:
-                        file_entries.append(
+        async def translate_one(
+            batch: dict[str, str],
+        ) -> tuple[
+            dict[str, str],
+            dict[str, str],
+            dict[str, list[str]],
+        ]:
+            self._check_cancelled()
+            context = self._with_sibling_context(
+                base_context, graph, rel, batch.keys()
+            )
+            # Prompt only the glossary rules relevant to THIS batch —
+            # rendering the whole store (a synced vanilla set alone is
+            # thousands of rules) blows up the prompt and derails small
+            # models.
+            batch_glossary = GlossaryFilter.filter_for_texts(
+                glossary, {k: source_data[k] for k in batch}
+            ).to_context_string()
+            translations, failed = await self._translate_batch(
+                batch, batch_glossary, context, file=rel
+            )
+            return batch, translations, failed
+
+        batch_tasks = [
+            asyncio.create_task(translate_one(batch))
+            for batch in self._make_batches(pending)
+        ]
+        try:
+            for completed in asyncio.as_completed(batch_tasks):
+                batch, translations, failed = await completed
+                for key in batch:
+                    prepared.to_translate.pop(key, None)
+                    protected = prepared.protected_map[key]
+                    out = translations.get(key)
+                    errors = list(failed.get(key, []))
+                    if out is None:
+                        prepared.file_entries.append(
                             EntryResult(
                                 key=key,
                                 file=rel,
                                 source_text=source_data[key],
-                                translated_text=translated,
                                 status=EntryStatus.FAILED,
-                                errors=issues,
+                                errors=errors or ["no translation returned"],
                             )
                         )
-                        self._emit(
-                            "entry_failed", {"key": key, "errors": issues}
+                        continue
+                    try:
+                        restored = protected.restore(out)
+                    except PlaceholderError as exc:
+                        prepared.file_entries.append(
+                            EntryResult(
+                                key=key,
+                                file=rel,
+                                source_text=source_data[key],
+                                translated_text=out,
+                                status=EntryStatus.FAILED,
+                                errors=[*errors, str(exc)],
+                            )
                         )
                         continue
-                    final[key] = translated
+                    prepared.translated_raw[key] = restored
+                    if graph is not None:
+                        graph.record_translation(rel, key, restored)
+                    self._entry_counter += 1
+                    if self._entry_counter % ENTRY_TICKER_INTERVAL == 1:
+                        # Sampled live preview pair for the GUI ticker.
+                        self._emit(
+                            "entry_done",
+                            {
+                                "key": key,
+                                "source": source_data[key][:TICKER_TEXT_LIMIT],
+                                "translated": restored[:TICKER_TEXT_LIMIT],
+                            },
+                        )
+                self._emit(
+                    "progress",
+                    {
+                        "stage": "translate",
+                        "file": rel,
+                        # Existing target-locale keys are excluded from the
+                        # scan totals and therefore from live progress.
+                        "done": len(prepared.final)
+                        - len(prepared.existing_keys)
+                        + len(prepared.translated_raw),
+                        "total": prepared.work_total,
+                    },
+                )
+                # lm.history aggregation is O(calls); once per completed
+                # batch keeps live token/cost counters current.
+                self._emit("tokens", token_usage(self.lm))
+        except asyncio.CancelledError:
+            prepared.was_cancelled = True
+        finally:
+            for task in batch_tasks:
+                if not task.done():
+                    task.cancel()
+            if batch_tasks:
+                await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+    @staticmethod
+    def _with_sibling_context(
+        base_context: str,
+        graph: TranslationGraph | None,
+        file: str,
+        keys: Iterable[str],
+    ) -> str:
+        """Append already-settled sibling entry lines to a batch context."""
+        if graph is None:
+            return base_context
+        keys = list(keys)
+        block = graph.sibling_context(file, keys, exclude=set(keys))
+        if not block:
+            return base_context
+        return f"{base_context}\n{SIBLING_CONTEXT_HEADER}\n{block}"
+
+    def _ensure_graph(self, result: PipelineResult) -> TranslationGraph | None:
+        """The run's graph if alive, else a rebuild from result entries.
+
+        The server creates a fresh pipeline per retranslate call, so the
+        in-run graph is usually gone; entries carry enough state (file,
+        key, source, translation) to rebuild an equivalent one.
+        """
+        if not self.config.use_translation_graph:
+            return None
+        if self._graph is None:
+            self._graph = TranslationGraph.from_entries(result.entries)
+        return self._graph
+
+    async def _gather_waves(
+        self,
+        work: list[tuple[_PreparedFile, list[str]]],
+        glossary: Glossary,
+        graph: TranslationGraph | None,
+    ) -> None:
+        """One wave across files. Only external cancellation escapes."""
+        tasks = [
+            asyncio.create_task(self._translate_wave(prepared, keys, glossary, graph))
+            for prepared, keys in work
+            if keys and not prepared.was_cancelled
+        ]
+        if not tasks:
+            return
+        try:
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            # gather propagates cancellation before child cleanup is
+            # necessarily visible. Wait for every wave to flush its
+            # completed batches into the per-file partial state.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+    async def _finalize_pair(
+        self,
+        prepared: _PreparedFile,
+        validator: TranslationValidator,
+        result: PipelineResult,
+        glossary_version: str,
+    ) -> None:
+        """Phase 3 for one file: validate, order, extend result, TM store."""
+        rel = prepared.rel
+        source_data = prepared.source_data
+        translated_raw = prepared.translated_raw
+        file_entries = prepared.file_entries
+
+        # Post-restore validation with the full validator
+        if translated_raw:
+            report = validator.validate(
+                {k: source_data[k] for k in translated_raw}, translated_raw
+            )
+            issues_by_key: dict[str, list[str]] = {}
+            error_keys: set[str] = set()
+            for issue in report.issues:
+                issues_by_key.setdefault(issue.key, []).append(issue.message)
+                if issue.severity == ValidationSeverity.ERROR:
+                    error_keys.add(issue.key)
+            for key, translated in translated_raw.items():
+                issues = issues_by_key.get(key, [])
+                if key in error_keys:
                     file_entries.append(
                         EntryResult(
                             key=key,
                             file=rel,
                             source_text=source_data[key],
                             translated_text=translated,
-                            status=(
-                                EntryStatus.WARNING if issues else EntryStatus.PASSED
-                            ),
+                            status=EntryStatus.FAILED,
                             errors=issues,
                         )
                     )
-
-            # Concurrent batches finish out of order; restore source order for
-            # review rows and generated language files. Extend before the
-            # optional TM write so cancellation still preserves these entries.
-            key_order = {key: index for index, key in enumerate(source_data)}
-            file_entries.sort(key=lambda entry: key_order[entry.key])
-            result.entries.extend(file_entries)
-
-            # Persist fresh translations into TM only on the normal path.
-            if self.tm is not None and not was_cancelled:
-                stored = [
-                    (source_data[k], v)
-                    for k, v in translated_raw.items()
-                    if k in final
-                ]
-                if stored:
-                    await asyncio.to_thread(
-                        self.tm.store_many,
-                        stored,
-                        self.config.target_locale,
-                        glossary_version,
+                    self._emit(
+                        "entry_failed", {"key": key, "errors": issues}
                     )
+                    continue
+                prepared.final[key] = translated
+                file_entries.append(
+                    EntryResult(
+                        key=key,
+                        file=rel,
+                        source_text=source_data[key],
+                        translated_text=translated,
+                        status=(
+                            EntryStatus.WARNING if issues else EntryStatus.PASSED
+                        ),
+                        errors=issues,
+                    )
+                )
 
-            if was_cancelled:
-                raise asyncio.CancelledError("file translation cancelled")
+        # Concurrent batches finish out of order; restore source order for
+        # review rows and generated language files. Extend before the
+        # optional TM write so cancellation still preserves these entries.
+        key_order = {key: index for index, key in enumerate(source_data)}
+        file_entries.sort(key=lambda entry: key_order[entry.key])
+        result.entries.extend(file_entries)
+
+        # Persist fresh translations into TM only on the normal path.
+        if self.tm is not None and not prepared.was_cancelled:
+            stored = [
+                (source_data[k], v)
+                for k, v in translated_raw.items()
+                if k in prepared.final
+            ]
+            if stored:
+                await asyncio.to_thread(
+                    self.tm.store_many,
+                    stored,
+                    self.config.target_locale,
+                    glossary_version,
+                )
+
+        if prepared.was_cancelled:
+            raise asyncio.CancelledError("file translation cancelled")
 
     def _relative(self, path: Path) -> str:
         try:
@@ -993,18 +1162,25 @@ class TranslationPipeline:
             result.scan_result = scan_result
             result.artifact_id = self.artifact_id
 
-            pairs = scan_result.all_translation_pairs
+            all_pairs = scan_result.all_translation_pairs
+            pairs = all_pairs
+            #: Pairs excluded from translation but still graph evidence: a
+            #: quests-only run wants mod-lang names (and their existing
+            #: translations) as binding sources - same principle as the
+            #: harvest scope below.
+            out_of_scope: list[LanguageFilePair] = []
             if self.config.include_categories is not None:
                 allowed = set(self.config.include_categories)
                 category_by_path = {
                     str(Path(tf.input_path)): tf.category or tf.file_type
                     for tf in scan_result.translation_files
                 }
-                pairs = [
-                    p
-                    for p in pairs
-                    if category_by_path.get(str(p.source_path)) in allowed
-                ]
+                pairs = []
+                for p in all_pairs:
+                    if category_by_path.get(str(p.source_path)) in allowed:
+                        pairs.append(p)
+                    else:
+                        out_of_scope.append(p)
             result.stats.total_files = len(pairs)
 
             self._emit("progress", {"stage": "glossary", "done": 0, "total": 1})
@@ -1019,23 +1195,131 @@ class TranslationPipeline:
                 glossary if glossary.has_rules else None
             )
 
-            pair_tasks = [
-                asyncio.create_task(
-                    self._process_pair(
-                        pair, glossary, glossary_version, validator, result
-                    )
-                )
-                for pair in pairs
-            ]
+            prepared_files: list[_PreparedFile] = []
+            interrupted = False
             try:
-                await asyncio.gather(*pair_tasks)
+                prepare_tasks = [
+                    asyncio.create_task(self._prepare_pair(pair, glossary_version))
+                    for pair in pairs
+                ]
+                try:
+                    prepared_files = [
+                        prepared
+                        for prepared in await asyncio.gather(*prepare_tasks)
+                        if prepared is not None
+                    ]
+                except asyncio.CancelledError:
+                    # gather propagates cancellation before child cleanup is
+                    # necessarily visible. Keep what completed so its skipped
+                    # and TM-hit entries still reach the result.
+                    gathered = await asyncio.gather(
+                        *prepare_tasks, return_exceptions=True
+                    )
+                    prepared_files = [
+                        prepared
+                        for prepared in gathered
+                        if isinstance(prepared, _PreparedFile)
+                    ]
+                    raise
+
+                graph: TranslationGraph | None = None
+                if self.config.use_translation_graph:
+                    outside = await asyncio.gather(
+                        *(self._extract_for_graph(pair) for pair in out_of_scope)
+                    )
+                    graph = TranslationGraph.build(
+                        [
+                            (
+                                prepared.rel,
+                                prepared.source_data,
+                                prepared.known_translations,
+                            )
+                            for prepared in prepared_files
+                        ]
+                        + [row for row in outside if row is not None]
+                    )
+                    self._graph = graph
+                    graph_stats = graph.stats()
+                    logger.info(
+                        "translation graph: %d terms, %d mentions, "
+                        "%d sibling groups over %d entries",
+                        graph_stats["terms"],
+                        graph_stats["mentions"],
+                        graph_stats["sibling_groups"],
+                        graph_stats["entries"],
+                    )
+
+                    # Wave 1: name-defining entries. Their settled
+                    # translations become glossary bindings for the rest.
+                    await self._gather_waves(
+                        [
+                            (
+                                prepared,
+                                [
+                                    key
+                                    for key in prepared.to_translate
+                                    if is_name_entry(
+                                        key, prepared.source_data[key]
+                                    )
+                                ],
+                            )
+                            for prepared in prepared_files
+                        ],
+                        glossary,
+                        graph,
+                    )
+                    # Merge bindings even when wave 1 was empty: pre-settled
+                    # names (existing translations, TM hits) bind too. The TM
+                    # fingerprint intentionally stays at the base glossary -
+                    # bindings are model-output-derived and would invalidate
+                    # the TM on every run.
+                    bindings = graph.bindings(glossary)
+                    glossary = glossary.merge_with(
+                        Glossary(
+                            locale_source=self.config.source_locale,
+                            locale_target=self.config.target_locale,
+                            term_rules=bindings,
+                        )
+                    )
+                    result.glossary = glossary
+                    validator = TranslationValidator(
+                        glossary if glossary.has_rules else None
+                    )
+                    if bindings:
+                        logger.info(
+                            "translation graph: %d name bindings merged "
+                            "into the run glossary",
+                            len(bindings),
+                        )
+
+                # Final wave: everything still pending (all of it when the
+                # graph is disabled).
+                await self._gather_waves(
+                    [
+                        (prepared, list(prepared.to_translate))
+                        for prepared in prepared_files
+                    ],
+                    glossary,
+                    graph,
+                )
             except asyncio.CancelledError:
-                # gather propagates cancellation before child cleanup is
-                # necessarily visible. Wait for every file task to flush its
-                # completed batches into the shared partial result.
-                if pair_tasks:
-                    await asyncio.gather(*pair_tasks, return_exceptions=True)
-                raise
+                interrupted = True
+                for prepared in prepared_files:
+                    prepared.was_cancelled = True
+
+            # Finalize EVERY prepared file - a cancelled run still validates
+            # and preserves its completed batches - then surface the
+            # cancellation once.
+            cancelled_files = interrupted
+            for prepared in prepared_files:
+                try:
+                    await self._finalize_pair(
+                        prepared, validator, result, glossary_version
+                    )
+                except asyncio.CancelledError:
+                    cancelled_files = True
+            if cancelled_files:
+                raise asyncio.CancelledError("file translation cancelled")
             self._check_cancelled()
         except asyncio.CancelledError:
             # Cancellation is a successful partial-result boundary, not a
@@ -1108,6 +1392,7 @@ class TranslationPipeline:
         for entry in failed:
             by_file.setdefault(entry.file, []).append(entry)
 
+        graph = self._ensure_graph(result)
         for rel, entries in by_file.items():
             protector = PlaceholderProtector()
             protected = {e.key: protector.protect(e.source_text) for e in entries}
@@ -1115,8 +1400,11 @@ class TranslationPipeline:
             batch_glossary = GlossaryFilter.filter_for_texts(
                 glossary, {e.key: e.source_text for e in entries}
             ).to_context_string()
+            context = self._with_sibling_context(
+                f"retry; file: {rel}", graph, rel, batch
+            )
             translations, failures = await self._translate_batch(
-                batch, batch_glossary, f"retry; file: {rel}"
+                batch, batch_glossary, context
             )
             for entry in entries:
                 out = translations.get(entry.key)
@@ -1137,6 +1425,8 @@ class TranslationPipeline:
                 entry.translated_text = restored
                 entry.status = EntryStatus.MODIFIED
                 entry.errors = []
+                if graph is not None:
+                    graph.record_translation(rel, entry.key, restored)
         self._refresh_stats(result)
         return result
 
@@ -1165,15 +1455,19 @@ class TranslationPipeline:
             glossary, _ = await self._build_glossary([])
         validator = TranslationValidator(glossary if glossary.has_rules else None)
 
+        graph = self._ensure_graph(result)
         protector = PlaceholderProtector()
         protected = protector.protect(entry.source_text)
         batch_glossary = GlossaryFilter.filter_for_texts(
             glossary, {entry.key: entry.source_text}
         ).to_context_string()
+        context = self._with_sibling_context(
+            f"retranslate; file: {entry.file}", graph, entry.file, [entry.key]
+        )
         translations, failures = await self._translate_batch(
             {entry.key: protected.protected},
             batch_glossary,
-            f"retranslate; file: {entry.file}",
+            context,
         )
 
         errors: list[str]
@@ -1201,6 +1495,8 @@ class TranslationPipeline:
         entry.translated_text = restored
         entry.status = EntryStatus.MODIFIED
         entry.errors = []
+        if graph is not None:
+            graph.record_translation(entry.file, entry.key, restored)
         self._refresh_stats(result)
         return entry
 

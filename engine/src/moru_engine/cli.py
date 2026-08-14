@@ -144,6 +144,7 @@ async def _cmd_translate(args: argparse.Namespace) -> int:
         model=args.model,
         api_base=args.api_base,
         use_tm=not args.no_tm,
+        use_translation_graph=not args.no_graph,
         extract_glossary=args.extract_glossary,
         use_mod_translations=not args.no_mod_terms,
         max_refine=args.max_refine,
@@ -201,6 +202,12 @@ def build_parser() -> argparse.ArgumentParser:
     translate.add_argument("--api-base", default=None, help="override base URL (Ollama)")
     translate.add_argument("--output", default=None, help="output directory")
     translate.add_argument("--no-tm", action="store_true", help="disable translation memory")
+    translate.add_argument(
+        "--no-graph",
+        action="store_true",
+        help="disable the entry relationship graph "
+        "(name-first waves, glossary bindings, sibling context)",
+    )
     translate.add_argument(
         "--extract-glossary",
         action="store_true",

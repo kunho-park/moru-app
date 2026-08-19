@@ -996,14 +996,18 @@ class TranslationPipeline:
                     out = translations.get(key)
                     errors = list(failed.get(key, []))
                     if out is None:
+                        reported = errors or ["no translation returned"]
                         prepared.file_entries.append(
                             EntryResult(
                                 key=key,
                                 file=rel,
                                 source_text=source_data[key],
                                 status=EntryStatus.FAILED,
-                                errors=errors or ["no translation returned"],
+                                errors=reported,
                             )
+                        )
+                        self._emit(
+                            "entry_failed", {"key": key, "errors": reported}
                         )
                         continue
                     try:
@@ -1018,6 +1022,10 @@ class TranslationPipeline:
                                 status=EntryStatus.FAILED,
                                 errors=[*errors, str(exc)],
                             )
+                        )
+                        self._emit(
+                            "entry_failed",
+                            {"key": key, "errors": [*errors, str(exc)]},
                         )
                         continue
                     prepared.translated_raw[key] = restored
@@ -1041,9 +1049,9 @@ class TranslationPipeline:
                         "file": rel,
                         # Existing target-locale keys are excluded from the
                         # scan totals and therefore from live progress.
-                        "done": len(prepared.final)
-                        - len(prepared.existing_keys)
-                        + len(prepared.translated_raw),
+                        # Every key removed from to_translate has reached a
+                        # terminal outcome, including failed model batches.
+                        "done": prepared.work_total - len(prepared.to_translate),
                         "total": prepared.work_total,
                     },
                 )

@@ -420,14 +420,11 @@ def test_migration_scan_refreshes_when_launcher_metadata_changes(
     assert captured["migration"] is None
 
 
-def test_translate_without_migration_keeps_normal_fresh_scan_path(
+def test_translate_without_migration_reuses_matching_v1_scan(
     client: TestClient,
     scan_job: dict[str, Any],
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    different = tmp_path / "ordinary-translate"
-    different.mkdir()
     captured: dict[str, Any] = {}
 
     async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
@@ -441,7 +438,7 @@ def test_translate_without_migration_keeps_normal_fresh_scan_path(
         json={
             "type": "translate",
             "params": {
-                "modpack_path": str(different),
+                "modpack_path": str(MODPACK),
                 "scan_job_id": scan_job["id"],
                 "use_tm": False,
             },
@@ -450,7 +447,8 @@ def test_translate_without_migration_keeps_normal_fresh_scan_path(
     assert response.status_code == 201, response.text
     final = _wait_for_job(client, response.json()["id"])
     assert final["status"] == "done", final
-    assert captured["scan_result"] is None
+    stored = client.app.state.job_manager._jobs[scan_job["id"]].result
+    assert captured["scan_result"] is stored.scan
     assert captured["migration"] is None
 
 

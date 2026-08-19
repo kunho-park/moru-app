@@ -295,7 +295,7 @@ test("hydrates a finished run from snapshot then verifies review result", async 
       ]),
     ),
     okPage,
-    response({ modpack_path: "/packs/s1", categories: [], identity: null }),
+    notFound,
   );
 
   expect(await useWizard.getState().reopenSession("s1")).toBe("ok");
@@ -385,8 +385,9 @@ test("restores the scan screen only when the session carries a scan payload", as
   const scanPayload = { modpack_path: "/packs/s4", categories: [], identity: null };
   useSessions.getState().upsert(record("s4", "done"));
   useSessionJobs.getState().register("s4", "job-4");
-  nextResponse = okPage;
-  routeResponses.set("/scan/", { ok: true, json: async () => scanPayload });
+  routeResponses.set("/jobs/job-4/snapshot", response(snapshot("job-4", "done")));
+  routeResponses.set("/translate/job-4/entries", okPage);
+  routeResponses.set("/scan/job-4/result", response(scanPayload));
 
   expect(await useWizard.getState().reopenSession("s4")).toBe("ok");
   expect(useWizard.getState().scanResult).toEqual(scanPayload);
@@ -395,9 +396,11 @@ test("restores the scan screen only when the session carries a scan payload", as
   // A different session with no persisted payload: the scan screen stays
   // idle rather than half-restored. (Reopening s4 again would short-circuit
   // on the already-live path and keep its state.)
-  useSessions.getState().upsert(record("s5", "done"));
+  useSessions.getState().upsert(record("s5", "done", { scanTotals: null }));
   useSessionJobs.getState().register("s5", "job-5");
-  routeResponses.set("/scan/", notFound);
+  routeResponses.set("/jobs/job-5/snapshot", response(snapshot("job-5", "done")));
+  routeResponses.set("/translate/job-5/entries", okPage);
+  routeResponses.set("/scan/job-5/result", notFound);
   expect(await useWizard.getState().reopenSession("s5")).toBe("ok");
   expect(useWizard.getState().scanResult).toBe(null);
   expect(useWizard.getState().scanState).toBe("idle");

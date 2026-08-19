@@ -181,6 +181,14 @@ def scan_result_payload(enriched: EnrichedScanResult) -> dict[str, Any]:
                     "entry_count": meta.entry_count,
                     "char_count": meta.char_count,
                     "sample": meta.sample,
+                    **(
+                        {
+                            "migration_entry_count": meta.migration_entry_count,
+                            "migration_char_count": meta.migration_char_count,
+                        }
+                        if enriched.migration is not None
+                        else {}
+                    ),
                 }
                 for path, meta in files
             ],
@@ -193,6 +201,17 @@ def scan_result_payload(enriched: EnrichedScanResult) -> dict[str, Any]:
         # Launcher-metadata identity for upload prefill / CurseForge linking;
         # always present (folder-name fallback), null only for legacy records.
         "identity": asdict(enriched.identity) if enriched.identity else None,
+        "migration": (
+            {
+                "entry_count": enriched.migration_entries,
+                "char_count": enriched.migration_chars,
+                "resourcepack_asset_count": (
+                    enriched.migration.stats.preserved_resourcepack_assets
+                ),
+            }
+            if enriched.migration is not None
+            else None
+        ),
     }
 
 

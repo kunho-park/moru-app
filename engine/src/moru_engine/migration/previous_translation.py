@@ -607,15 +607,17 @@ def _source_archive_name(path: Path) -> str | None:
     """Return the JAR/resource-pack ZIP wrapper used by the C scanner."""
     parts = path.as_posix().split("/")
     lowered = [part.lower() for part in parts]
-    for marker in ("extracted", "resourcepacks"):
-        for index, part in enumerate(lowered):
-            if part != marker or index + 1 >= len(parts):
-                continue
-            if marker == "resourcepacks" and (
-                index == 0 or lowered[index - 1] != ".mct_cache"
-            ):
-                continue
+    for index, part in enumerate(lowered):
+        if part == "extracted" and index + 1 < len(parts):
             return parts[index + 1]
+        if part != "resourcepacks" or index == 0 or lowered[index - 1] != ".mct_cache":
+            continue
+        # v1.0 isolates each configured resource-pack root below a slug:
+        # .mct_cache/resourcepacks/<root-slug>/<archive.zip>/assets/...
+        # Older scans placed <archive.zip> directly after resourcepacks.
+        for candidate in parts[index + 1 :]:
+            if Path(candidate).suffix.casefold() in _ARCHIVE_SUFFIXES:
+                return candidate
     return None
 
 

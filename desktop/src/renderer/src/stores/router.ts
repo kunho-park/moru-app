@@ -11,6 +11,7 @@ export type Screen =
   | "w4"
   | "w5"
   | "w6"
+  | "queue"
   | "history"
   | "glossary"
   | "settings";

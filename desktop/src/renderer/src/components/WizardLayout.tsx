@@ -46,6 +46,7 @@ export function WizardLayout({ children }: { children: React.ReactNode }) {
     w5: wizard.runState === "done" && screen !== "w5" && wizard.exportState !== "idle",
     w6: wizard.exportState === "done",
     home: false,
+    queue: false,
     onboarding: false,
     history: false,
     glossary: false,

@@ -19,7 +19,11 @@ import { providerIdOf } from "../lib/models";
 import { moru } from "../lib/bridge";
 import { WEB_URL } from "../lib/web";
 import { useSessions, type SessionScanTotals } from "./sessions";
-import { useSettings } from "./settings";
+import {
+  snapshotTranslationSettings,
+  useSettings,
+  type TranslationRunSettings,
+} from "./settings";
 
 export interface TickerPair {
   key: string;
@@ -138,7 +142,7 @@ interface WizardStore {
   exportError: string | null;
 
   /* actions */
-  startSession: (path: string, probe: ModpackProbe) => void;
+  startSession: (path: string, probe: ModpackProbe, targetLocale?: string) => void;
   resumeSession: (sessionId: string) => boolean;
   /** Reopens a finished session on W5/W6 after verifying the engine job. */
   reopenSession: (sessionId: string) => Promise<"ok" | "busy" | "gone">;
@@ -151,7 +155,7 @@ interface WizardStore {
   toggleCategory: (name: string, included: boolean) => void;
   setCategories: (names: string[], included: boolean) => void;
   startScan: () => Promise<void>;
-  startTranslate: () => Promise<void>;
+  startTranslate: (settingsOverride?: TranslationRunSettings) => Promise<void>;
   handleTranslationFrame: (frame: JobEventFrame, sessionId: string) => void;
   cancelTranslate: () => Promise<void>;
   updateReviewStats: (stats: PipelineStats) => void;
@@ -198,6 +202,70 @@ export function selectedScanTotals(state: {
     migrationChars,
     translationEntries: Math.max(0, entries - migrationEntries),
     translationChars: Math.max(0, chars - migrationChars),
+  };
+}
+
+type TranslateParamState = Pick<
+  WizardStore,
+  | "sourceLocale"
+  | "targetLocale"
+  | "migrationEnabled"
+  | "previousModpackPath"
+  | "previousResourcepackPath"
+  | "previousOverridesPath"
+  | "scanJobId"
+  | "scanResult"
+  | "excludedCategories"
+> & { modpackPath: string };
+
+/** Pure request builder shared by manual and queued ordinary translations. */
+export function buildTranslateParams(
+  state: TranslateParamState,
+  settings: TranslationRunSettings,
+  apiKey?: string,
+): TranslateParams {
+  const providerId = providerIdOf(settings.model);
+  const apiBase =
+    providerId === "ollama"
+      ? settings.ollamaBaseUrl
+      : providerId === "openai-compatible"
+        ? settings.openaiCompatBaseUrl
+        : undefined;
+  return {
+    modpack_path: state.modpackPath,
+    source_locale: state.sourceLocale,
+    target_locale: state.targetLocale,
+    model: settings.model,
+    api_key: apiKey,
+    api_base: apiBase,
+    temperature: settings.temperature,
+    batch_size: settings.batchSize,
+    max_concurrent: settings.maxConcurrent,
+    max_refine: settings.maxRefine,
+    reasoning_effort: settings.thinkingEnabled ? settings.thinkingEffort : undefined,
+    use_tm: settings.useTm,
+    use_vanilla_glossary: settings.useVanillaGlossary,
+    extract_glossary: settings.extractGlossary,
+    glossary_max_terms: settings.glossaryMaxTerms,
+    include_categories:
+      state.excludedCategories.length > 0 && state.scanResult !== null
+        ? state.scanResult.categories
+            .map((category) => category.name)
+            .filter((name) => !state.excludedCategories.includes(name))
+        : undefined,
+    output_dir: settings.outputDir ?? undefined,
+    // Reuse the completed W2 scan through the official v1.0 session pipeline.
+    // Migration scans receive an additional A/B/C fingerprint check server-side.
+    scan_job_id: state.scanJobId ?? undefined,
+    ...(state.migrationEnabled && state.previousModpackPath !== null
+      ? { previous_modpack_path: state.previousModpackPath }
+      : {}),
+    ...(state.migrationEnabled && state.previousResourcepackPath !== null
+      ? { previous_resourcepack_path: state.previousResourcepackPath }
+      : {}),
+    ...(state.migrationEnabled && state.previousOverridesPath !== null
+      ? { previous_overrides_path: state.previousOverridesPath }
+      : {}),
   };
 }
 
@@ -429,7 +497,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
   previousOverridesPath: null,
   ...initialJobState,
 
-  startSession: (path, probe) => {
+  startSession: (path, probe, targetLocale) => {
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
@@ -438,7 +506,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
       modpackPath: path,
       modpackName: probe.name,
       probe,
-      targetLocale: useSettings.getState().targetLocale,
+      targetLocale: targetLocale ?? useSettings.getState().targetLocale,
       migrationEnabled: false,
       previousModpackPath: null,
       previousResourcepackPath: null,
@@ -711,56 +779,23 @@ export const useWizard = create<WizardStore>((set, get) => ({
     }
   },
 
-  startTranslate: async () => {
+  startTranslate: async (settingsOverride) => {
     const state = get();
     if (state.modpackPath === null || state.runState === "running") return;
-    const settings = useSettings.getState();
+    const settings = settingsOverride ?? snapshotTranslationSettings();
     const scanTotals = selectedScanTotals(state);
     closeTranslateEvents?.();
 
     const providerId = providerIdOf(settings.model);
     const apiKey = (await moru.secrets.get(`apikey:${providerId}`)) ?? undefined;
-    const apiBase =
-      providerId === "ollama"
-        ? settings.ollamaBaseUrl
-        : providerId === "openai-compatible"
-          ? settings.openaiCompatBaseUrl
-          : undefined;
     const sessionId = state.sessionId ?? crypto.randomUUID();
     const params: TranslateParams = {
+      ...buildTranslateParams(
+        { ...state, modpackPath: state.modpackPath },
+        settings,
+        apiKey,
+      ),
       session_id: sessionId,
-      scan_job_id: state.scanJobId ?? undefined,
-      modpack_path: state.modpackPath,
-      source_locale: state.sourceLocale,
-      target_locale: state.targetLocale,
-      model: settings.model,
-      api_key: apiKey,
-      api_base: apiBase,
-      temperature: settings.temperature,
-      batch_size: settings.batchSize,
-      max_concurrent: settings.maxConcurrent,
-      max_refine: settings.maxRefine,
-      reasoning_effort: settings.thinkingEnabled ? settings.thinkingEffort : undefined,
-      use_tm: settings.useTm,
-      use_vanilla_glossary: settings.useVanillaGlossary,
-      extract_glossary: settings.extractGlossary,
-      glossary_max_terms: settings.glossaryMaxTerms,
-      include_categories:
-        state.excludedCategories.length > 0 && state.scanResult !== null
-          ? state.scanResult.categories
-              .map((c) => c.name)
-              .filter((name) => !state.excludedCategories.includes(name))
-          : undefined,
-      output_dir: settings.outputDir ?? undefined,
-      ...(state.migrationEnabled && state.previousModpackPath !== null
-        ? { previous_modpack_path: state.previousModpackPath }
-        : {}),
-      ...(state.migrationEnabled && state.previousResourcepackPath !== null
-        ? { previous_resourcepack_path: state.previousResourcepackPath }
-        : {}),
-      ...(state.migrationEnabled && state.previousOverridesPath !== null
-        ? { previous_overrides_path: state.previousOverridesPath }
-        : {}),
     };
 
     set({

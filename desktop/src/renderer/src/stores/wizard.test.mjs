@@ -47,7 +47,7 @@ class FakeWebSocket {
 }
 globalThis.WebSocket = FakeWebSocket;
 
-const { selectedScanTotals, useWizard, useSessionJobs } = await import("./wizard.ts");
+const { buildTranslateParams, selectedScanTotals, useWizard, useSessionJobs } = await import("./wizard.ts");
 const { useSessions } = await import("./sessions.ts");
 const { useEngineStore } = await import("./engine.ts");
 const bridge = await import("../lib/bridge.ts");
@@ -65,6 +65,37 @@ const totals = {
   migrationChars: 100,
   translationEntries: 40,
   translationChars: 400,
+};
+
+const runSettings = {
+  outputDir: null,
+  model: "openai/gpt-test",
+  temperature: 0.3,
+  batchSize: 30,
+  maxConcurrent: 4,
+  maxRefine: 2,
+  thinkingEnabled: false,
+  thinkingEffort: "medium",
+  useTm: true,
+  useVanillaGlossary: true,
+  extractGlossary: true,
+  glossaryMaxTerms: 3000,
+  ollamaBaseUrl: "http://localhost:11434",
+  openaiCompatBaseUrl: "http://localhost:1234/v1",
+  targetLocale: "ko_kr",
+};
+
+const translateState = {
+  modpackPath: "C:/packs/current",
+  sourceLocale: "en_us",
+  targetLocale: "ko_kr",
+  migrationEnabled: false,
+  previousModpackPath: "C:/packs/old",
+  previousResourcepackPath: "C:/translations/old-rp.zip",
+  previousOverridesPath: "C:/translations/old-overrides.zip",
+  scanJobId: "w2-scan",
+  scanResult: null,
+  excludedCategories: [],
 };
 
 function record(id, status, overrides = {}) {
@@ -191,6 +222,26 @@ test("uses compact persisted totals after the full scan tree is gone", () => {
   expect(
     selectedScanTotals({ scanResult: null, scanTotals: totals, excludedCategories: [] }),
   ).toEqual(totals);
+});
+
+test("ordinary queued/manual translation reuses the completed v1.0 W2 scan", () => {
+  const params = buildTranslateParams(translateState, runSettings, "secret");
+  expect(params.scan_job_id).toBe("w2-scan");
+  expect(params.previous_modpack_path).toBeUndefined();
+  expect(params.previous_resourcepack_path).toBeUndefined();
+  expect(params.previous_overrides_path).toBeUndefined();
+  expect(params.include_categories).toBeUndefined();
+});
+
+test("A/B/C migration alone reuses its W2 scan and previous inputs", () => {
+  const params = buildTranslateParams(
+    { ...translateState, migrationEnabled: true },
+    runSettings,
+  );
+  expect(params.scan_job_id).toBe("w2-scan");
+  expect(params.previous_modpack_path).toBe("C:/packs/old");
+  expect(params.previous_resourcepack_path).toEndWith("old-rp.zip");
+  expect(params.previous_overrides_path).toEndWith("old-overrides.zip");
 });
 
 test("review stat updates reach both the live wizard and persisted session", () => {

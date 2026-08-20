@@ -44,6 +44,7 @@ const STATUS_COLOR: Record<EntryStatus, string> = {
   failed: "#F26B6B",
   modified: "#6BB3F5",
   tm_hit: "#A78BFA",
+  migrated: "#2DD4BF",
   skipped: "#6A7C74",
 };
 
@@ -85,6 +86,14 @@ function StatusIcon({ status, size = 12 }: { status: EntryStatus; size?: number 
         <svg width={s} height={s} viewBox="0 0 8 8" shapeRendering="crispEdges">
           <rect x="1" y="1" width="6" height="2" fill="#0A100D" />
           <rect x="1" y="5" width="6" height="2" fill="#0A100D" />
+        </svg>
+      );
+      break;
+    case "migrated":
+      glyph = (
+        <svg width={s} height={s} viewBox="0 0 8 8" fill="none" stroke="#0A100D" strokeWidth="1.5">
+          <path d="M1 2 H5 V1 L7 3 L5 5 V4 H1 Z" fill="#0A100D" />
+          <path d="M7 6 H3 V7 L1 5 L3 3 V4 H7 Z" fill="#0A100D" />
         </svg>
       );
       break;
@@ -265,7 +274,9 @@ export function W5Review() {
   const modpackName = useWizard((s) => s.modpackName);
   const translateJobId = useWizard((s) => s.translateJobId);
   const failedKeys = useWizard((s) => s.failedKeys);
+  const failedEntryCount = useWizard((s) => s.failedEntryCount);
   const stats = useWizard((s) => s.stats);
+  const updateReviewStats = useWizard((s) => s.updateReviewStats);
   const scanState = useWizard((s) => s.scanState);
   const sourceLocale = useWizard((s) => s.sourceLocale);
   const targetLocale = useWizard((s) => s.targetLocale);
@@ -350,21 +361,29 @@ export function W5Review() {
   // Mutations carry file + key: the same key can live in two source files,
   // and the engine would otherwise patch whichever one it finds first.
   const patchMut = useMutation({
-    mutationFn: ({ key, file, text }: EntryRef & { text: string }) =>
-      api.patchEntry(translateJobId as string, key, text, file),
-    onSuccess: () => {
+    mutationFn: async ({ key, file, text }: EntryRef & { text: string }) => {
+      const entry = await api.patchEntry(translateJobId as string, key, text, file);
+      const refreshedStats = await api.translateStats(translateJobId as string);
+      return { entry, stats: refreshedStats };
+    },
+    onSuccess: (result) => {
       setActionError(null);
+      updateReviewStats(result.stats);
       invalidate();
     },
     onError: (err) => setActionError(errorText(err)),
   });
 
   const retransMut = useMutation({
-    mutationFn: ({ key, file }: EntryRef) =>
-      api.retranslateEntry(translateJobId as string, key, file),
-    onSuccess: (entry) => {
+    mutationFn: async ({ key, file }: EntryRef) => {
+      const entry = await api.retranslateEntry(translateJobId as string, key, file);
+      const refreshedStats = await api.translateStats(translateJobId as string);
+      return { entry, stats: refreshedStats };
+    },
+    onSuccess: (result) => {
       setActionError(null);
-      setDraft(entry.translated_text);
+      setDraft(result.entry.translated_text);
+      updateReviewStats(result.stats);
       invalidate();
     },
     onError: (err) => setActionError(errorText(err)),
@@ -378,11 +397,25 @@ export function W5Review() {
       const jobId = translateJobId as string;
       const refs = await api.allFailedRefs(jobId);
       setBulkDone(0);
-      for (const ref of refs) {
-        await api.retranslateEntry(jobId, ref.key, ref.file);
-        setBulkDone((n) => n + 1);
+      try {
+        for (const ref of refs) {
+          await api.retranslateEntry(jobId, ref.key, ref.file);
+          setBulkDone((n) => n + 1);
+        }
+      } catch (error) {
+        // Earlier entries may already have succeeded when a later one fails.
+        // Reconcile what did succeed without hiding the original error.
+        try {
+          updateReviewStats(await api.translateStats(jobId));
+        } catch {
+          // Entry invalidation below still refreshes the visible review rows.
+        }
+        throw error;
       }
-      return refs.length;
+      return { count: refs.length, stats: await api.translateStats(jobId) };
+    },
+    onSuccess: (result) => {
+      updateReviewStats(result.stats);
     },
     onError: (err) => setActionError(errorText(err)),
     onSettled: () => {
@@ -391,7 +424,7 @@ export function W5Review() {
     },
   });
 
-  const failedTotal = counts.failed ?? Object.keys(failedKeys).length;
+  const failedTotal = counts.failed ?? Math.max(failedEntryCount, Object.keys(failedKeys).length);
   const allTotal = counts.all ?? stats?.total_entries ?? null;
   const passRate =
     stats !== null
@@ -453,6 +486,8 @@ export function W5Review() {
         return t("common.status.modified");
       case "tm_hit":
         return t("common.status.tmHit");
+      case "migrated":
+        return t("common.status.migrated");
       default:
         return t("common.status.skipped");
     }

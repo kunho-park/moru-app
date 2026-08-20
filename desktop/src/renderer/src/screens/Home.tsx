@@ -12,6 +12,7 @@ import { useAccount } from "@/stores/account";
 import { useRouter } from "@/stores/router";
 import { aggregateStats, useSessions, type SessionRecord } from "@/stores/sessions";
 import { useSettings } from "@/stores/settings";
+import { useTranslationQueue } from "@/stores/translationQueue";
 import { useWizard } from "@/stores/wizard";
 
 /**
@@ -408,7 +409,14 @@ export function HomeScreen() {
   const removeSession = useSessions((s) => s.remove);
   const startSession = useWizard((s) => s.startSession);
   const resumeSession = useWizard((s) => s.resumeSession);
+  const reopenSession = useWizard((s) => s.reopenSession);
   const recentFolders = useSettings((s) => s.recentFolders);
+  const queueActive = useTranslationQueue(
+    (s) =>
+      s.phase === "running" ||
+      s.phase === "pausing" ||
+      s.items.some((item) => item.status === "scanning" || item.status === "translating"),
+  );
   const [dragOver, setDragOver] = useState(false);
 
   const stats = useMemo(() => aggregateStats(sessions), [sessions]);
@@ -423,24 +431,39 @@ export function HomeScreen() {
   const recentFolder: string | null = recentFolders[0] ?? null;
 
   const beginSession = async (path: string) => {
+    if (queueActive) {
+      go("queue");
+      return;
+    }
     const probe = await moru.probeModpack(path);
     startSession(path, probe);
     go("w1");
   };
 
   const handleImport = async () => {
+    if (queueActive) {
+      go("queue");
+      return;
+    }
     const path = await moru.pickFolder();
     if (path === null) return;
     await beginSession(path);
   };
 
-  const handleResume = (id: string) => {
-    const live = useWizard.getState().sessionId === id;
-    if (!resumeSession(id)) return;
-    go(live ? "w4" : "w3");
+  const handleResume = async (id: string) => {
+    if (queueActive) {
+      go("queue");
+      return;
+    }
+    const result = await reopenSession(id);
+    if (result === "ok") go("w4");
   };
 
   const handleRetry = (id: string) => {
+    if (queueActive) {
+      go("queue");
+      return;
+    }
     if (!resumeSession(id)) return;
     go("w1");
   };
@@ -470,6 +493,13 @@ export function HomeScreen() {
           </h1>
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={() => go("queue")}
+            className="flex items-center gap-1.5 border border-edge bg-raised px-3.5 py-2 text-xs font-medium text-text2 hover:border-edge2 hover:text-text"
+          >
+            <span className="font-mono">≡</span>
+            {t("home.queue")}
+          </button>
           <button
             onClick={() => void handleImport()}
             className="flex items-center gap-1.5 border border-edge bg-raised px-3.5 py-2 text-xs font-medium text-text2 hover:border-edge2 hover:text-text"
@@ -562,7 +592,13 @@ export function HomeScreen() {
               <div className="mb-1 text-[13px] font-bold text-text">{t("home.empty.title")}</div>
               <div className="mb-4 text-xs text-text3">{t("home.empty.desc")}</div>
               <button
-                onClick={() => go("w1")}
+                onClick={() => {
+                  if (queueActive) go("queue");
+                  else {
+                    useWizard.getState().reset();
+                    go("w1");
+                  }
+                }}
                 className="bg-accent px-4 py-2.5 text-[13px] font-bold text-bar hover:bg-accent-hi"
               >
                 {t("home.empty.cta")}
@@ -575,7 +611,7 @@ export function HomeScreen() {
               <RecentJobCard
                 key={record.id}
                 record={record}
-                onResume={() => handleResume(record.id)}
+                onResume={() => void handleResume(record.id)}
                 onRetry={() => handleRetry(record.id)}
                 onRemove={() => removeSession(record.id)}
               />

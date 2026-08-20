@@ -311,6 +311,13 @@ export function W6Export() {
                   count: formatInt(stats.tm_hits),
                 })}
               </span>
+              {(stats.migration_hits ?? 0) > 0 && (
+                <span className="text-blue">
+                  {t("w6.banner.migrationReuse", {
+                    count: formatInt(stats.migration_hits ?? 0),
+                  })}
+                </span>
+              )}
               <span className="text-blue">
                 {t("w6.banner.quality", { score: trim1(stats.quality_score * 100) })}
               </span>

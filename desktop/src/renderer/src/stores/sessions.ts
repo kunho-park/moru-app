@@ -11,6 +11,17 @@ import type { PipelineStats } from "../../../shared/engine";
 
 export type SessionStatus = "running" | "done" | "failed" | "cancelled";
 
+/** Compact W2 totals retained without persisting the full scan tree. */
+export interface SessionScanTotals {
+  files: number;
+  entries: number;
+  chars: number;
+  migrationEntries: number;
+  migrationChars: number;
+  translationEntries: number;
+  translationChars: number;
+}
+
 export interface SessionRecord {
   id: string;
   modpackPath: string;
@@ -24,6 +35,10 @@ export interface SessionRecord {
   /** live counters while running; final stats when done */
   doneEntries: number;
   totalEntries: number;
+  /** Process-scoped engine job id; probed before every restore. */
+  translateJobId: string | null;
+  /** W4 estimates/progress denominator when the full scan state is gone. */
+  scanTotals: SessionScanTotals | null;
   stats: PipelineStats | null;
   error: string | null;
   exportZipPath: string | null;
@@ -36,6 +51,39 @@ interface SessionsStore {
   upsert: (record: SessionRecord) => void;
   patch: (id: string, patch: Partial<SessionRecord>) => void;
   remove: (id: string) => void;
+}
+
+/** Normalize older persisted records before Zustand merges in store actions. */
+export function migrateSessionsState(persisted: unknown, now = Date.now()): unknown {
+  const state = persisted as Partial<SessionsStore>;
+  return {
+    ...state,
+    sessions: (state.sessions ?? []).map((session) => {
+      const translateJobId = session.translateJobId ?? null;
+      // Before job ids were persisted, a renderer/app restart could leave a
+      // record permanently labelled running even though no engine job could
+      // possibly be reattached. Do not keep presenting that zombie as live.
+      const orphaned = session.status === "running" && translateJobId === null;
+      return {
+        ...session,
+        doneEntries: session.doneEntries ?? 0,
+        totalEntries: session.totalEntries ?? 0,
+        translateJobId,
+        scanTotals: session.scanTotals ?? null,
+        status: orphaned ? ("failed" as const) : session.status,
+        finishedAt: orphaned
+          ? (session.finishedAt ?? now)
+          : (session.finishedAt ?? null),
+        stats: session.stats ?? null,
+        error: orphaned
+          ? (session.error ?? "앱 재시작 후 작업 상태를 복원할 수 없습니다.")
+          : (session.error ?? null),
+        exportZipPath: session.exportZipPath ?? null,
+        exportOverridesZipPath: session.exportOverridesZipPath ?? null,
+        sharedUrl: session.sharedUrl ?? null,
+      };
+    }),
+  };
 }
 
 export const useSessions = create<SessionsStore>()(
@@ -54,25 +102,12 @@ export const useSessions = create<SessionsStore>()(
     }),
     {
       name: "moru-sessions",
-      version: 2,
+      version: 4,
       // Records persisted by older builds may miss later-added fields
       // (undefined breaks the `=== null` checks the UI relies on).
-      migrate: (persisted) => {
-        const state = persisted as SessionsStore;
-        return {
-          ...state,
-          sessions: (state.sessions ?? []).map((s) => ({
-            ...s,
-            doneEntries: s.doneEntries ?? 0,
-            totalEntries: s.totalEntries ?? 0,
-            stats: s.stats ?? null,
-            error: s.error ?? null,
-            exportZipPath: s.exportZipPath ?? null,
-            exportOverridesZipPath: s.exportOverridesZipPath ?? null,
-            sharedUrl: s.sharedUrl ?? null,
-          })),
-        };
-      },
+      // Zustand passes the old schema version as migrate's second argument;
+      // do not accidentally use that small integer as an epoch timestamp.
+      migrate: (persisted) => migrateSessionsState(persisted),
     },
   ),
 );

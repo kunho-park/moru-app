@@ -1,0 +1,60 @@
+{
+  "eyebrow": "순차 자동 번역",
+  "title": "모드팩 번역 대기열",
+  "subtitle": "여러 모드팩을 한 번에 추가하면 기존 번역 파이프라인으로 한 팩씩 순서대로 처리합니다.",
+  "status": {
+    "pending": "대기",
+    "scanning": "스캔 중",
+    "translating": "번역 중",
+    "done": "완료",
+    "failed": "실패",
+    "cancelled": "중단됨"
+  },
+  "phase": {
+    "idle": "시작 대기",
+    "running": "대기열 실행 중",
+    "pausing": "현재 팩 완료 후 일시정지",
+    "paused": "일시정지됨",
+    "complete": "대기열 완료",
+    "recovering": "이전 작업 상태 확인 중"
+  },
+  "summary": {
+    "total": "전체",
+    "pending": "대기",
+    "done": "완료",
+    "failed": "실패·중단"
+  },
+  "policy": {
+    "title": "실행 방식:",
+    "body": "시작 시점의 번역 설정과 전체 카테고리를 공통 적용합니다. 실패한 팩은 기록하고 다음 팩을 계속 처리하며, 검수와 내보내기는 작업 기록에서 개별 수행합니다.",
+    "lockedModel": "고정 모델: {{model}}"
+  },
+  "progress": {
+    "scanning": "모드팩 파일 확인 중",
+    "translating": "{{done}} / {{total}} 엔트리"
+  },
+  "action": {
+    "addPacks": "여러 팩 추가",
+    "checking": "팩 확인 중…",
+    "start": "대기열 시작",
+    "resume": "대기열 계속",
+    "pause": "현재 팩 후 일시정지",
+    "pausing": "일시정지 예약됨",
+    "clear": "대기열 비우기",
+    "remove": "삭제",
+    "retry": "다시 대기",
+    "history": "작업 기록",
+    "moveUp": "위로 이동",
+    "moveDown": "아래로 이동"
+  },
+  "empty": {
+    "title": "대기열이 비어 있습니다",
+    "desc": "여러 모드팩 폴더를 선택해 순차 번역을 준비하세요."
+  },
+  "validation": {
+    "notFound": "폴더를 찾을 수 없습니다: {{path}}",
+    "notDirectory": "폴더가 아닙니다: {{path}}",
+    "noMods": "mods 폴더가 없어 제외했습니다: {{path}}",
+    "failed": "팩을 확인하지 못했습니다: {{path}} ({{error}})"
+  }
+}

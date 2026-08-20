@@ -8,6 +8,7 @@
   "nav": {
     "newTranslation": "New Translation",
     "home": "Home",
+    "queue": "Translation Queue",
     "history": "History",
     "glossary": "Glossary",
     "community": "Community",
@@ -57,6 +58,7 @@
     "passed": "Passed",
     "modified": "Modified",
     "tmHit": "TM reuse",
+    "migrated": "Previous translation",
     "skipped": "Skipped",
     "shared": "Shared"
   },

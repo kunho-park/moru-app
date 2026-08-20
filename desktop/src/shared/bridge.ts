@@ -78,6 +78,7 @@ export interface MoruBridge {
   };
 
   pickFolder(): Promise<string | null>;
+  pickFolders(): Promise<string[]>;
   pickFile(filters?: { name: string; extensions: string[] }[]): Promise<string | null>;
   saveFile(defaultPath?: string): Promise<string | null>;
   probeModpack(path: string): Promise<ModpackProbe>;

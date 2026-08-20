@@ -8,10 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import dspy
-import pytest
-
 import moru_engine.dspy_modules.lm as lm_module
 import moru_engine.pipeline.orchestrator as orchestrator
+import pytest
 from moru_engine.models import Glossary, LanguageFilePair, TermRule
 from moru_engine.pipeline.orchestrator import (
     EntryResult,
@@ -80,6 +79,15 @@ class RecordingTranslator:
         )
 
 
+class FailingTranslator:
+    async def acall(self, **kwargs: Any) -> dspy.Prediction:
+        entries = kwargs["entries"]
+        return dspy.Prediction(
+            translations={},
+            failed={key: ["provider rejected request"] for key in entries},
+        )
+
+
 @pytest.mark.asyncio
 async def test_identifier_source_is_skipped_before_the_llm(
     tmp_path: Path,
@@ -120,6 +128,56 @@ async def test_identifier_source_is_skipped_before_the_llm(
     assert entry.translated_text == identifier
     assert translator.batches == [{"normal": "Hello world"}]
     assert result.stats.categories == {"scripts": 2}
+
+
+@pytest.mark.asyncio
+async def test_failed_batches_still_reach_full_progress_and_emit_failures(
+    tmp_path: Path,
+) -> None:
+    modpack_path = tmp_path / "modpack"
+    source_path = modpack_path / "kubejs/assets/test/lang/en_us.json"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(
+        json.dumps({"one": "Hello one", "two": "Hello two"}),
+        encoding="utf-8",
+    )
+    pair = LanguageFilePair(source_path=source_path)
+    scan_result = ScanResult(
+        modpack_path=modpack_path,
+        source_only_files=[pair],
+        translation_files=[
+            TranslationFile(input_path=str(source_path), file_type="kubejs")
+        ],
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    pipeline = TranslationPipeline(
+        PipelineConfig(
+            modpack_path=modpack_path,
+            output_dir=tmp_path / "out",
+            batch_size=2,
+            use_tm=False,
+            use_mod_translations=False,
+            use_user_glossary=False,
+            use_vanilla_glossary=False,
+        ),
+        lm=dspy.utils.DummyLM([]),
+        on_event=lambda event, payload: events.append((event, payload)),
+    )
+    pipeline.translator = FailingTranslator()
+    try:
+        result = await pipeline.run(scan_result)
+    finally:
+        pipeline.close()
+
+    failures = [payload for event, payload in events if event == "entry_failed"]
+    progress = [
+        payload
+        for event, payload in events
+        if event == "progress" and payload.get("stage") == "translate"
+    ]
+    assert {str(payload["key"]) for payload in failures} == {"one", "two"}
+    assert progress[-1]["done"] == progress[-1]["total"] == 2
+    assert result.stats.failed_entries == 2
 
 
 class GlossaryRecordingTranslator:
@@ -367,6 +425,60 @@ def test_category_stats_bucket_refresh_and_upload_payload(
         **expected,
         "quests": 3,
     }
+
+
+def test_refresh_stats_reclassifies_migrated_and_cached_entries(
+    tmp_path: Path,
+) -> None:
+    result = PipelineResult(
+        config=PipelineConfig(modpack_path=tmp_path / "modpack"),
+        entries=[
+            EntryResult(
+                key="migrated",
+                file="lang/en_us.json",
+                source_text="Old source",
+                translated_text="이전 수동 번역",
+                status=EntryStatus.MIGRATED,
+            ),
+            EntryResult(
+                key="cached",
+                file="lang/en_us.json",
+                source_text="Cached source",
+                translated_text="TM 번역",
+                status=EntryStatus.TM_HIT,
+            ),
+            EntryResult(
+                key="skipped",
+                file="lang/en_us.json",
+                source_text="Identifier",
+                status=EntryStatus.SKIPPED,
+            ),
+            EntryResult(
+                key="failed",
+                file="lang/en_us.json",
+                source_text="Failed source",
+                status=EntryStatus.FAILED,
+            ),
+        ],
+    )
+
+    TranslationPipeline._refresh_stats(result)
+    assert result.stats.total_entries == 4
+    assert result.stats.migration_hits == 1
+    assert result.stats.tm_hits == 1
+    assert result.stats.skipped_entries == 1
+    assert result.stats.failed_entries == 1
+    assert result.stats.translated_entries == 0
+    assert result.stats.coverage_percent == 66.67
+
+    result.entries[0].status = EntryStatus.MODIFIED
+    result.entries[0].translated_text = "새 번역"
+    TranslationPipeline._refresh_stats(result)
+    assert result.stats.migration_hits == 0
+    assert result.stats.tm_hits == 1
+    assert result.stats.translated_entries == 1
+    assert result.stats.coverage_percent == 66.67
+    assert result.stats.coverage_percent <= 100
 
 
 def _pack_payload(result: PipelineResult) -> dict[str, Any]:

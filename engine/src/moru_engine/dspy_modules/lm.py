@@ -16,7 +16,7 @@ import logging
 
 import dspy
 
-from ..cli_providers import register_cli_providers, to_wire_model
+from ..cli_providers import CLI_PROVIDER_IDS, register_cli_providers, to_wire_model
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,16 @@ def build_lm(
             body["reasoning"] = reasoning
         else:
             extra["extra_body"] = {"reasoning": reasoning}
+    provider = model.partition("/")[0]
+    if provider in CLI_PROVIDER_IDS and "reasoning_effort" in extra:
+        # LiteLLM validates OpenAI-style parameters before dispatching to a
+        # CustomLLM.  Our CLI handlers consume reasoning_effort themselves,
+        # so explicitly allow it through that pre-dispatch gate. Without this
+        # every Codex batch fails before CodexLLM.acompletion is reached.
+        allowed = list(extra.get("allowed_openai_params") or [])
+        if "reasoning_effort" not in allowed:
+            allowed.append("reasoning_effort")
+        extra["allowed_openai_params"] = allowed
     kwargs.update(extra)
     if api_key:
         kwargs["api_key"] = api_key

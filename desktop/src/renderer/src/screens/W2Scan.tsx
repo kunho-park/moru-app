@@ -602,8 +602,9 @@ function DoneState() {
 
   const totals = selectedScanTotals({ scanResult, excludedCategories });
   const usage = estimateUsage({
-    chars: totals.chars,
-    entries: totals.entries,
+    chars: totals.translationChars,
+    entries: totals.translationEntries,
+    glossaryEntries: totals.entries,
     batchSize,
     maxRefine,
     glossary: useVanillaGlossary,
@@ -617,7 +618,7 @@ function DoneState() {
   const costText = estCostUsd !== null ? formatUsd(estCostUsd) : "—";
   const recommendedPrice = estimatePriceForModel(pricingTable, RECOMMENDED_MODEL);
   const recommendedCostUsd =
-    model !== RECOMMENDED_MODEL && recommendedPrice !== null && totals.chars > 0
+    model !== RECOMMENDED_MODEL && recommendedPrice !== null && usage.totalTokens > 0
       ? costUsd(usage, recommendedPrice)
       : null;
   const selectedCount = categories.filter((c) => !excludedCategories.includes(c.name)).length;
@@ -698,6 +699,39 @@ function DoneState() {
           )}
         </div>
       </div>
+
+      {scanResult?.migration !== null && scanResult?.migration !== undefined && (
+        <div className="-mt-4 mb-6 flex items-center justify-between gap-4 border border-purple/40 bg-[rgba(167,139,250,0.06)] px-3.5 py-2.5">
+          <div className="min-w-0">
+            <div className="mb-0.5 flex items-center gap-2 text-[12px] font-bold text-purple">
+              <span className="h-1.5 w-1.5 bg-purple" />
+              {t("w2.migration.title")}
+            </div>
+            <div className="text-[11px] text-text2">
+              {totals.migrationEntries > 0
+                ? t("w2.migration.summary", {
+                    reused: formatInt(totals.migrationEntries),
+                    translate: formatInt(totals.translationEntries),
+                  })
+                : t("w2.migration.zero")}
+            </div>
+          </div>
+          <div className="flex shrink-0 gap-5 text-right font-mono">
+            <div>
+              <div className="text-[10px] text-text3 uppercase">{t("w2.migration.reused")}</div>
+              <div className="text-[18px] font-bold text-purple">
+                {formatInt(totals.migrationEntries)}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] text-text3 uppercase">{t("w2.migration.assets")}</div>
+              <div className="text-[18px] font-bold text-text">
+                {formatInt(scanResult.migration.resourcepack_asset_count)}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Recommended-combo estimate (hidden when it is already selected) */}
       {recommendedCostUsd !== null && (
@@ -850,6 +884,13 @@ function DoneState() {
         <div className="flex items-center gap-3">
           <span className="font-mono text-[11px] text-text3">
             {t("w2.footer.entriesPart", { entries: formatInt(totals.entries) })}
+            {totals.migrationEntries > 0 && (
+              <span className="text-purple">
+                {t("w2.footer.reusedPart", {
+                  reused: formatInt(totals.migrationEntries),
+                })}
+              </span>
+            )}
             <span className="text-accent">
               {price !== null
                 ? costText

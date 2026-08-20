@@ -29,6 +29,23 @@
   "badge": {
     "translated": "이미 번역됨"
   },
+  "migration": {
+    "title": "이전 번역 이어쓰기",
+    "subtitle": "구버전 원본과 번역을 비교해 그대로인 문장은 재사용하고 변경분만 번역합니다.",
+    "on": "사용 중",
+    "off": "선택 사항",
+    "selectCurrentFirst": "먼저 신버전을 선택하세요",
+    "oldModpack": "A · 구버전 원본 모드팩",
+    "resourcepack": "B · 이전 리소스팩",
+    "overrides": "B · 이전 overrides",
+    "required": "필수 · 폴더 또는 CurseForge ZIP",
+    "optional": "둘 중 하나 이상 · 폴더 또는 ZIP",
+    "notSelected": "선택되지 않음",
+    "folder": "폴더",
+    "zipFilter": "모드팩 또는 번역 ZIP",
+    "ready": "준비 완료 · 리소스팩과 overrides는 각각 원래 출력 채널로 이어집니다.",
+    "incomplete": "A와 B(리소스팩 또는 overrides)를 선택해 주세요."
+  },
   "jarCount": "{{n}} mods",
   "selectedStatus": "{{name}} 선택됨",
   "next": "다음: 스캔"

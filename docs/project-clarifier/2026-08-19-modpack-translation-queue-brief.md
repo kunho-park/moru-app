@@ -62,8 +62,8 @@ a time without further input between packs.
 
 - Unit tests cover persisted-state migration, deduplication, ordering, removal,
   retry, pause-after-current, sequential advancement, and continue-on-failure.
-- Regression tests prove a queued normal run does not enable migration or reuse
-  the W2 scan in the W4 normal path.
+- Regression tests prove a queued normal run does not enable migration and
+  preserves v1.0's matching W2-scan reuse in the W4 normal path.
 - Run desktop tests, TypeScript checks, production build, and packaged Windows
   installer build.
 

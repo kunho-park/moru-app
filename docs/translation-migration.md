@@ -68,9 +68,9 @@ text follows the normal translation pipeline.
   asset cache remains only for the sidecar session so review edits can safely
   regenerate the output, and is removed when the sidecar shuts down.
 - W2's parsed A/B/C index is reused only when a lightweight path/size/mtime
-  fingerprint is unchanged at W4. If any input changed, W4 automatically
-  rebuilds the scan and migration index. Normal translation always keeps its
-  established fresh W4 scan.
+  fingerprint is unchanged at W4. If any migration input changed, W4
+  automatically rebuilds the scan and migration index. Ordinary translation
+  keeps v1.0's established behavior of reusing a matching completed W2 scan.
 - Existing Moru behavior is unchanged when migration inputs are absent.
 
 ## Failure handling

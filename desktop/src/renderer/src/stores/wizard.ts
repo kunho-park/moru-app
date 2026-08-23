@@ -924,10 +924,25 @@ export const useWizard = create<WizardStore>((set, get) => ({
   },
 
   updateReviewStats: (stats) => {
-    set({ stats });
+    // Any successful review mutation makes previously built archives stale.
+    // The engine already drops zip paths from its persisted done payload;
+    // mirror that invalidation in the renderer and local history so W6 offers
+    // "Create export" again instead of only opening the obsolete artifact.
+    set({
+      stats,
+      exportJobId: null,
+      exportState: "idle",
+      exportZipPath: null,
+      exportOverridesZipPath: null,
+      exportError: null,
+    });
     const sessionId = get().sessionId;
     if (sessionId !== null) {
-      useSessions.getState().patch(sessionId, { stats });
+      useSessions.getState().patch(sessionId, {
+        stats,
+        exportZipPath: null,
+        exportOverridesZipPath: null,
+      });
     }
   },
 

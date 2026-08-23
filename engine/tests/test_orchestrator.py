@@ -88,6 +88,109 @@ class FailingTranslator:
         )
 
 
+class DuplicateConsistencyTranslator:
+    """Translate one duplicate and copy the others unchanged."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def acall(self, **kwargs: Any) -> dspy.Prediction:
+        self.calls += 1
+        entries = kwargs["entries"]
+        return dspy.Prediction(
+            translations={
+                key: "고급 상점" if key == "title" else text
+                for key, text in entries.items()
+            },
+            failed={},
+        )
+
+
+class UnchangedThenTranslatedTranslator:
+    """Exercise the one-shot unchanged-output retry."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.contexts: list[str] = []
+
+    async def acall(self, **kwargs: Any) -> dspy.Prediction:
+        self.calls += 1
+        self.contexts.append(kwargs["context"])
+        entries = kwargs["entries"]
+        return dspy.Prediction(
+            translations={
+                key: (text if self.calls == 1 else "외로운 항목")
+                for key, text in entries.items()
+            },
+            failed={},
+        )
+
+
+async def _run_lang_fixture(
+    tmp_path: Path, payload: dict[str, str], translator: Any
+) -> PipelineResult:
+    modpack_path = tmp_path / "modpack"
+    source_path = modpack_path / "kubejs/assets/test/lang/en_us.json"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    scan_result = ScanResult(
+        modpack_path=modpack_path,
+        source_only_files=[LanguageFilePair(source_path=source_path)],
+        translation_files=[
+            TranslationFile(input_path=str(source_path), file_type="kubejs")
+        ],
+    )
+    pipeline = TranslationPipeline(
+        PipelineConfig(
+            modpack_path=modpack_path,
+            output_dir=tmp_path / "out",
+            batch_size=20,
+            use_tm=False,
+            use_mod_translations=False,
+            use_user_glossary=False,
+            use_vanilla_glossary=False,
+            use_translation_graph=False,
+        ),
+        lm=dspy.utils.DummyLM([]),
+    )
+    pipeline.translator = translator
+    try:
+        return await pipeline.run(scan_result)
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_source_reuses_successful_translation(tmp_path: Path) -> None:
+    translator = DuplicateConsistencyTranslator()
+    result = await _run_lang_fixture(
+        tmp_path,
+        {
+            "title": "Superior Shop",
+            "sidebar": "Superior Shop",
+            "key_category": "Superior Shop",
+        },
+        translator,
+    )
+
+    assert translator.calls == 1
+    assert {entry.translated_text for entry in result.entries} == {"고급 상점"}
+    assert {entry.status for entry in result.entries} == {EntryStatus.PASSED}
+
+
+@pytest.mark.asyncio
+async def test_unchanged_user_text_is_retried_once(tmp_path: Path) -> None:
+    translator = UnchangedThenTranslatedTranslator()
+    result = await _run_lang_fixture(
+        tmp_path, {"only": "Lonely Item"}, translator
+    )
+
+    assert translator.calls == 2
+    assert "prior attempt copied the source unchanged" in translator.contexts[1]
+    assert result.entries[0].translated_text == "외로운 항목"
+    assert result.entries[0].status is EntryStatus.PASSED
+
+
 @pytest.mark.asyncio
 async def test_identifier_source_is_skipped_before_the_llm(
     tmp_path: Path,

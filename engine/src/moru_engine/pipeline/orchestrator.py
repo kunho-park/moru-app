@@ -940,6 +940,8 @@ class TranslationPipeline:
         keys: list[str],
         glossary: Glossary,
         graph: TranslationGraph | None,
+        *,
+        retry_unchanged: bool = False,
     ) -> None:
         """Translate a subset of one file's pending entries.
 
@@ -959,6 +961,12 @@ class TranslationPipeline:
         rel = prepared.rel
         source_data = prepared.source_data
         base_context = f"file: {rel}; handler: {prepared.handler.name}"
+        if retry_unchanged:
+            base_context += (
+                "; retry: the prior attempt copied the source unchanged; "
+                "translate user-facing natural language while preserving "
+                "intentional proper nouns and placeholders"
+            )
 
         async def translate_one(
             batch: dict[str, str],
@@ -1066,6 +1074,95 @@ class TranslationPipeline:
                     task.cancel()
             if batch_tasks:
                 await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+    @staticmethod
+    def _canonicalize_unchanged_duplicates(
+        prepared_files: Iterable[_PreparedFile],
+        graph: TranslationGraph | None = None,
+    ) -> int:
+        """Reuse the dominant real translation for an identical source.
+
+        A model can translate one occurrence of ``Superior Shop`` and copy
+        another unchanged even inside the same language file.  Existing,
+        migrated, TM, and fresh translations are all valid evidence; only
+        source-equal fresh results are replaced.  Majority vote with
+        first-seen tie breaking avoids arbitrary last-writer behavior.
+        """
+        prepared_files = list(prepared_files)
+        votes: dict[str, dict[str, int]] = {}
+        first_seen: dict[tuple[str, str], int] = {}
+        order = 0
+        for prepared in prepared_files:
+            candidates = {**prepared.final, **prepared.translated_raw}
+            for key, translated in candidates.items():
+                source = prepared.source_data[key]
+                if is_untranslated_copy(source, translated):
+                    continue
+                by_translation = votes.setdefault(source, {})
+                by_translation[translated] = by_translation.get(translated, 0) + 1
+                first_seen.setdefault((source, translated), order)
+                order += 1
+
+        canonical = {
+            source: min(
+                choices,
+                key=lambda translated: (
+                    -choices[translated],
+                    first_seen[(source, translated)],
+                ),
+            )
+            for source, choices in votes.items()
+        }
+        repaired = 0
+        for prepared in prepared_files:
+            for key, translated in list(prepared.translated_raw.items()):
+                source = prepared.source_data[key]
+                replacement = canonical.get(source)
+                if replacement is None or not is_untranslated_copy(source, translated):
+                    continue
+                prepared.translated_raw[key] = replacement
+                if graph is not None:
+                    graph.record_translation(prepared.rel, key, replacement)
+                repaired += 1
+        return repaired
+
+    async def _retry_unchanged_translations(
+        self,
+        prepared_files: Iterable[_PreparedFile],
+        glossary: Glossary,
+        graph: TranslationGraph | None,
+    ) -> int:
+        """Retry fresh user-facing values that remain source-identical once."""
+        work: list[tuple[_PreparedFile, list[str]]] = []
+        count = 0
+        for prepared in prepared_files:
+            keys = [
+                key
+                for key, translated in prepared.translated_raw.items()
+                if is_untranslated_copy(prepared.source_data[key], translated)
+            ]
+            if not keys:
+                continue
+            count += len(keys)
+            for key in keys:
+                prepared.translated_raw.pop(key, None)
+                prepared.to_translate[key] = prepared.protected_map[key].protected
+            work.append((prepared, keys))
+        if not work:
+            return 0
+        await asyncio.gather(
+            *(
+                self._translate_wave(
+                    prepared,
+                    keys,
+                    glossary,
+                    graph,
+                    retry_unchanged=True,
+                )
+                for prepared, keys in work
+            )
+        )
+        return count
 
     @staticmethod
     def _with_sibling_context(
@@ -1413,6 +1510,25 @@ class TranslationPipeline:
                     glossary,
                     graph,
                 )
+
+                repaired = self._canonicalize_unchanged_duplicates(
+                    prepared_files, graph
+                )
+                if repaired:
+                    logger.info(
+                        "Reused consistent translations for %d unchanged model outputs",
+                        repaired,
+                    )
+                retried = await self._retry_unchanged_translations(
+                    prepared_files, glossary, graph
+                )
+                if retried:
+                    logger.info(
+                        "Retried %d user-facing translations copied from source",
+                        retried,
+                    )
+                    # A successful retry can now repair other duplicate copies.
+                    self._canonicalize_unchanged_duplicates(prepared_files, graph)
             except asyncio.CancelledError:
                 interrupted = True
                 for prepared in prepared_files:

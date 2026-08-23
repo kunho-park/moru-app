@@ -245,8 +245,20 @@ test("A/B/C migration alone reuses its W2 scan and previous inputs", () => {
 });
 
 test("review stat updates reach both the live wizard and persisted session", () => {
-  useSessions.getState().upsert(record("s1", "done", { translateJobId: "job-1" }));
-  useWizard.setState({ sessionId: "s1", stats });
+  useSessions.getState().upsert(
+    record("s1", "done", {
+      translateJobId: "job-1",
+      exportZipPath: "/exports/old.zip",
+      exportOverridesZipPath: "/exports/old_overrides.zip",
+    }),
+  );
+  useWizard.setState({
+    sessionId: "s1",
+    stats,
+    exportState: "done",
+    exportZipPath: "/exports/old.zip",
+    exportOverridesZipPath: "/exports/old_overrides.zip",
+  });
   const refreshed = {
     ...stats,
     translated_entries: 31,
@@ -258,6 +270,11 @@ test("review stat updates reach both the live wizard and persisted session", () 
 
   expect(useWizard.getState().stats).toEqual(refreshed);
   expect(useSessions.getState().sessions[0].stats).toEqual(refreshed);
+  expect(useWizard.getState().exportState).toBe("idle");
+  expect(useWizard.getState().exportZipPath).toBe(null);
+  expect(useWizard.getState().exportOverridesZipPath).toBe(null);
+  expect(useSessions.getState().sessions[0].exportZipPath).toBe(null);
+  expect(useSessions.getState().sessions[0].exportOverridesZipPath).toBe(null);
 });
 
 test("falls back to the persisted session id before reporting a missing job", async () => {

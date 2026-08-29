@@ -8,10 +8,12 @@
  */
 
 import type { ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { EntryCounts } from "../../../shared/engine";
 import { STATUS_COLOR, StatusIcon } from "@/components/EntryText";
+import { api } from "@/lib/api";
 import { formatInt } from "@/lib/format";
 import {
   MANUAL_FILTERS,
@@ -54,11 +56,29 @@ export function ManualQueue(): ReactNode {
   const jobFlags = jobId === null ? [] : (flags[jobId] ?? []);
   const jobDrafts = jobId === null ? {} : (drafts[jobId] ?? {});
 
-  const settled = refs.reduce((n, ref) => {
+  // Bucket sizes in one server-side pass. Refetched when the job, the search,
+  // or the number of settled entries changes — committing moves an entry
+  // between buckets, so a stale count would understate the work left.
+  const [counts, setCounts] = useState<EntryCounts | null>(null);
+  const settledCount = refs.reduce((n, ref) => {
     const entry = entries[refId(ref)];
     return entry !== undefined && entry.translated_text !== "" ? n + 1 : n;
   }, 0);
-  const percent = refs.length === 0 ? 0 : (settled / refs.length) * 100;
+  useEffect(() => {
+    if (jobId === null) return;
+    let live = true;
+    api
+      .entryCounts(jobId, search)
+      .then((res) => {
+        if (live) setCounts(res);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [jobId, search, settledCount]);
+
+  const percent = refs.length === 0 ? 0 : (settledCount / refs.length) * 100;
 
   // Follow the cursor. Keyboard navigation is the primary way through the
   // queue, so the focused row has to stay on screen without a mouse.
@@ -79,7 +99,7 @@ export function ManualQueue(): ReactNode {
       <div className="border-b border-line2 px-3 py-[10px]">
         <div className="mb-[6px] flex items-baseline justify-between font-mono text-[11px]">
           <span className="text-text2">
-            {formatInt(settled)}
+            {formatInt(settledCount)}
             <span className="text-text4"> / {formatInt(refs.length)}</span>
           </span>
           <span className="text-accent">{percent.toFixed(1)}%</span>
@@ -116,6 +136,7 @@ export function ManualQueue(): ReactNode {
             >
               <div className="h-[4px] w-[4px]" style={{ background: c }} />
               {t(`w5m.filter.${f}`)}
+              {counts !== null ? ` ${formatInt(counts[f])}` : ""}
             </button>
           );
         })}

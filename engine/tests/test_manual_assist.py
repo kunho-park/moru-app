@@ -59,15 +59,11 @@ def _payload(pack: Path) -> dict:
         "identity": None,
         "scan_result": None,
         # desc2/desc3/desc1 deliberately out of ordinal order.
-        # Untranslated entries use "failed": EntryStatus.PENDING is part of
-        # the blocked manual-seed change in orchestrator.py, so it cannot be
-        # used here yet. Nothing in these tests depends on which status an
-        # untranslated entry carries, only that translated_text is None.
         "entries": [
-            _entry("quest.1.desc2", QUEST, "It will not survive the heat.", None, "failed"),
-            _entry("quest.1.desc3", QUEST, "Netherite is the reward.", None, "failed"),
-            _entry("quest.1.desc1", QUEST, SRC_DESC1, None, "failed"),
-            _entry("quest.1.title", QUEST, "Into the Nether", None, "failed"),
+            _entry("quest.1.desc2", QUEST, "It will not survive the heat.", None, "pending"),
+            _entry("quest.1.desc3", QUEST, "Netherite is the reward.", None, "pending"),
+            _entry("quest.1.desc1", QUEST, SRC_DESC1, None, "pending"),
+            _entry("quest.1.title", QUEST, "Into the Nether", None, "pending"),
             _entry("item.mekanism.ingot_osmium", MEK, SRC_SHARED, "오스미움 주괴", "passed"),
             _entry("item.other.ingot_osmium", MEK, SRC_SHARED, "오스뮴 주괴", "passed"),
         ],

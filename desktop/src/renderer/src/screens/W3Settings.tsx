@@ -1171,6 +1171,24 @@ export function W3Settings() {
               </>
             )}
           </span>
+          {/* Never gated on `canStart`: hand translation calls no provider, so
+              requiring a working API key here would lock out exactly the user
+              this path exists for. */}
+          <button
+            type="button"
+            disabled={wizard.runState === "running"}
+            onClick={() => {
+              void wizard.startManualSeed().then((outcome) => {
+                if (outcome === "started") go("w5m");
+              });
+            }}
+            className="flex cursor-pointer items-center gap-[6px] border border-edge bg-card px-4 py-[10px] text-[12px] font-semibold whitespace-nowrap text-text2 hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M2 10 L4 10 L10 4 L8 2 L2 8 Z" />
+            </svg>
+            {t("w3.footer.startManual")}
+          </button>
           <button
             type="button"
             disabled={!canStart}

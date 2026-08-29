@@ -31,6 +31,7 @@ from moru_engine.server.manual_journal import (
     entry_ref,
     source_sha,
 )
+from moru_engine.server.manual_state import ManualStore
 from moru_engine.server.sessions import SessionStore
 
 AUTH = {"authorization": "Bearer tok"}
@@ -373,3 +374,43 @@ def test_deleting_a_session_removes_its_journal(manual_session):
     assert res.status_code == 200, res.text
     # A later session reusing the id must not inherit these edits.
     assert not manual_session["journal"].is_file()
+
+
+def test_human_translations_resolver_selects_by_provenance(manual_session):
+    """`seed_from_job_id` adopts committed human work, shaped by source file.
+
+    Selection is by the existence of a human commit record, never by content —
+    which is what lets a deliberate "leave this proper noun in English" be
+    adopted even though its target equals its source.
+    """
+    from moru_engine.server.manual_journal import ManualJournal
+
+    journal = ManualJournal(manual_session["journal"])
+    journal.commit(
+        file="a.snbt", key="q.desc1", text="사람 번역", src_sha=None, origin="human"
+    )
+    # A machine-authored commit is not the human's decision.
+    journal.commit(
+        file="a.snbt", key="q.desc2", text="기계 번역", src_sha=None, origin="machine"
+    )
+    # A draft is not a decision either.
+    journal.draft(file="b.snbt", key="q.x", text="초안", src_sha=None)
+    # Target equal to source: still a human decision.
+    journal.commit(
+        file="b.snbt", key="q.brand", text="Mekanism", src_sha=None, origin="human"
+    )
+
+    store = ManualStore(
+        SessionStore(sessions_dir=manual_session["cfg_root"] / "sessions")
+    )
+    resolved = store.human_translations(manual_session["job_id"])
+
+    assert resolved == {
+        "a.snbt": {"q.desc1": "사람 번역"},
+        "b.snbt": {"q.brand": "Mekanism"},
+    }
+
+
+def test_human_translations_resolver_is_empty_without_a_journal(tmp_path):
+    store = ManualStore(SessionStore(sessions_dir=tmp_path / "sessions"))
+    assert store.human_translations("no-such-job") == {}

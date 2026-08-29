@@ -1,6 +1,7 @@
 """Translation memory: local SQLite exact-match cache."""
 
 from .local_tm import (
+    MANUAL_ORIGIN,
     META_LAST_SHARED_VERSION,
     SHARED_GLOSSARY_VERSION,
     LocalTM,
@@ -11,6 +12,7 @@ from .local_tm import (
 )
 
 __all__ = [
+    "MANUAL_ORIGIN",
     "META_LAST_SHARED_VERSION",
     "SHARED_GLOSSARY_VERSION",
     "LocalTM",

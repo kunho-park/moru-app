@@ -52,7 +52,7 @@ from ..pipeline import (
     TranslationPipeline,
 )
 from ..models.glossary import Glossary
-from ..tm import SHARED_GLOSSARY_VERSION, LocalTM
+from ..tm import MANUAL_ORIGIN, SHARED_GLOSSARY_VERSION, LocalTM
 from ..validator import TranslationValidator
 from .assist import (
     build_entry_context,
@@ -355,6 +355,9 @@ def create_app(
     #: Hand-translation editing state, replayed from each session's edit
     #: journal. A cache, never the source of truth.
     manual = ManualStore(session_store)
+    # A translate run started with seed_from_job_id needs the earlier session's
+    # committed hand translations; the journal that records them lives here.
+    manager.set_manual_resolver(manual.human_translations)
 
     #: Aid-panel caches, keyed by locale pair. The validator's constructor
     #: compiles one regex per glossary alias, so a live editor calling it per
@@ -747,6 +750,23 @@ def create_app(
         entry.translated_text = body.translated_text
         entry.status = EntryStatus.MODIFIED
         TranslationPipeline._refresh_stats(result)
+
+        # Propagate the decision. Without this a translator's terminology
+        # choices die with the session and every later run re-asks the model
+        # about strings a human already settled. `is_cacheable_pair` still
+        # applies and is deliberately NOT bypassed: a target equal to its
+        # source is kept in this entry's output but must not become a
+        # permanent global promise, because a TM row is keyed on source text
+        # alone and would suppress translation of that string everywhere.
+        if body.origin == "human" and result.config.use_tm:
+            await asyncio.to_thread(
+                get_tm().store,
+                entry.source_text,
+                result.config.target_locale,
+                SHARED_GLOSSARY_VERSION,
+                body.translated_text,
+                MANUAL_ORIGIN,
+            )
         manager.refresh_translate_stats(record)
         if should_compact:
             await _persist_session(record)

@@ -46,7 +46,14 @@
     "sectionCodes": "§ codes: {{draft}} of {{source}}",
     "siblings": "Continues across",
     "siblingsHint": "These lines are numbered parts of one string. Read them together — a sentence often runs from one into the next.",
-    "runIssues": "Issues from the last run"
+    "glossary": "Glossary",
+    "insertTerm": "Insert at the cursor",
+    "keyScope": "applies to: {{scope}}",
+    "memory": "Translation memory",
+    "tmExact": "Exact match · {{origin}}",
+    "sameSourceAgrees": "Same source elsewhere · matches",
+    "sameSourceDiffers": "Same source elsewhere · DIFFERS",
+    "checks": "Checks"
   },
   "hint": {
     "commit": "⌃↵ save & next",
@@ -55,5 +62,17 @@
     "flag": "⌃B flag",
     "token": "⌃1-9 placeholder",
     "revert": "esc revert"
+  },
+  "issue": {
+    "key_mismatch": "Key mismatch",
+    "empty_translation": "Translation is empty",
+    "untranslated": "Looks untranslated",
+    "placeholder_count": "Placeholder count does not match",
+    "placeholder_order": "Placeholder order differs",
+    "color_code": "Colour code count does not match",
+    "length_ratio": "Unusual length compared to the source",
+    "glossary_term_mismatch": "Glossary term not used",
+    "glossary_noun_mismatch": "Proper noun not used",
+    "format_string": "Format string problem"
   }
 }

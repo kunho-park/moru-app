@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
@@ -11,6 +12,43 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
+
+#: Shape of a dotted lang key: lowercase ``[a-z0-9_]`` segments, no spaces,
+#: at least one dot, and a letter first. Numeric segments count — packs
+#: number their quest lines, and requiring a letter at the start of EVERY
+#: segment was silently letting "susy.quest.ql.1.desc" through as prose.
+_TRANSLATION_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
+
+#: A segment carrying at least one letter, i.e. a name rather than a number.
+_LETTERED_SEGMENT_RE = re.compile(r"[a-z]")
+
+#: A lang key needs a namespace AND a path, so two lettered segments at
+#: least. This is what keeps dotted VERSION strings out: a bare "1.20.1"
+#: or "2.7.5" already fails the shape above (a key starts with a letter),
+#: but "v1.20.1" and "alpha.2.0" do not — they have one lettered segment,
+#: and they are values that really do appear in quest and item text. Do
+#: not simplify this away; misreading a version string as a key silently
+#: drops it from translation.
+_MIN_LETTERED_SEGMENTS = 2
+
+
+def is_translation_key_reference(value: str) -> bool:
+    """Whether a field holds a lang KEY rather than the text itself.
+
+    Quest and guidebook formats let an author write either the prose or a
+    lang key that the game resolves from a language file at runtime. Both
+    arrive as plain strings in the same field, and the difference decides
+    whether translating is right or catastrophic: replacing a key with
+    Korean breaks the lookup and the entry renders as the raw key. The
+    language file it points at is translated on its own by the language
+    handler, so skipping the reference loses nothing.
+    """
+    if _TRANSLATION_KEY_RE.match(value) is None:
+        return False
+    lettered = sum(
+        1 for segment in value.split(".") if _LETTERED_SEGMENT_RE.search(segment)
+    )
+    return lettered >= _MIN_LETTERED_SEGMENTS
 
 
 class ContentHandler(ABC):
@@ -172,7 +210,9 @@ def create_default_registry() -> HandlerRegistry:
         Registry with default handlers registered.
     """
     # Import here to avoid circular imports
+    from .betterquesting import BetterQuestingHandler
     from .ftbquests import FTBQuestsHandler
+    from .heracles import HeraclesHandler
     from .kubejs_display_name import KubeJSDisplayNameHandler
     from .language import LanguageHandler
     from .origins import OriginsHandler
@@ -191,6 +231,8 @@ def create_default_registry() -> HandlerRegistry:
     registry.register(PuffishSkillsHandler())  # priority=11
     registry.register(TConstructHandler())  # priority=11
     registry.register(TheVaultQuestHandler())  # priority=10
+    registry.register(BetterQuestingHandler())  # priority=10
+    registry.register(HeraclesHandler())  # priority=10
     registry.register(LanguageHandler())  # priority=9
 
     logger.info(

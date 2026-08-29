@@ -96,6 +96,21 @@ def _read_json(path: Path) -> Any | None:
         return None
 
 
+def _namespace_map(res: PipelineResult) -> dict[str, str]:
+    """Absolute source path -> resource-pack namespace, for `write_outputs`.
+
+    Prefers the live scan result and falls back to whatever a previous restore
+    already carried, so re-saving a reopened session does not throw the map
+    away.
+    """
+    if res.scan_result is not None:
+        return {
+            pair.source_path.resolve().as_posix(): pair.namespace
+            for pair in res.scan_result.all_translation_pairs
+        }
+    return dict(res.namespaces)
+
+
 class SessionStore:
     """Manages persistent translation sessions on disk and handles import/export (.moru files)."""
 
@@ -186,6 +201,12 @@ class SessionStore:
             "config": config_data,
             "identity": identity_dict,
             "scan_result": record.params.get("scan_result"),
+            # The scanner's ScanResult dataclass is NOT rebuilt on restore, and
+            # the contract-shaped "scan_result" above cannot substitute: it has
+            # no source_path/namespace pairs. So persist just the map
+            # write_outputs actually needs, or a reopened session's export
+            # loses every handler-extracted file's namespace.
+            "namespaces": _namespace_map(res),
             "entries": entries_data,
             "done_payload": record.done_payload,
         }
@@ -306,6 +327,11 @@ class SessionStore:
             config=config,
             entries=entries,
             stats=stats,
+            namespaces=(
+                data.get("namespaces")
+                if isinstance(data.get("namespaces"), dict)
+                else {}
+            ),
         )
 
         created_at = datetime.now(UTC)

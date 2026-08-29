@@ -23,6 +23,7 @@ import {
   StatusIcon,
   TokenText,
   tokenColorMap,
+  useTokenPatterns,
 } from "@/components/EntryText";
 import { TranslationGraphView } from "@/components/TranslationGraphView";
 import { api } from "@/lib/api";
@@ -90,6 +91,9 @@ function errorText(err: unknown): string {
 
 export function W5Review() {
   const { t } = useTranslation();
+  // Shares the engine-installed placeholder grammar with the manual surface,
+  // so both screens agree with the validator about what a placeholder is.
+  useTokenPatterns();
   const go = useRouter((s) => s.go);
   const sessionId = useWizard((s) => s.sessionId);
   const modpackName = useWizard((s) => s.modpackName);

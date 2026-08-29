@@ -28,7 +28,7 @@ from moru_engine.output.mcmeta_text import (
 )
 
 URL = "§amoru.gg"
-NOTE_TRANSLATED = "§a모루§7로 한국어로 번역됨 — §amoru.gg"
+NOTE_TRANSLATED = "§a모루§7로 번역됨 — §amoru.gg"
 NOTE_SOURCE = "§7원문 그대로 — §amoru.gg"
 
 
@@ -130,7 +130,10 @@ def test_a_description_that_already_fits_is_untouched() -> None:
 
 
 def test_overlong_description_keeps_the_url_by_dropping_the_version() -> None:
-    text = f"v1.2.3-really-long-build-tag-here / {NOTE_TRANSLATED}"
+    # A version prefix no real modpack would carry, purely to force the
+    # front-trim path: the shortened note leaves so much margin that every
+    # realistic prefix now fits within the two visual lines on its own.
+    text = f"v1.2.3-nightly-build-20260830-experimental-branch / {NOTE_TRANSLATED}"
     assert not fits(text)
     fitted = fit_description(text)
     assert fits(fitted)

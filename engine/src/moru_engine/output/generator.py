@@ -213,6 +213,35 @@ class OutputConfig:
     resourcepack_seed_dir: Path | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class JarDataLoss:
+    """One translated file that no installable channel can deliver.
+
+    A mod JAR's own ``data/`` tree is the one place a translation cannot
+    reach. Patchouli proves why: ``BookRegistry.init`` walks each mod
+    container's files directly and opens the hit with
+    ``Files.newInputStream(mod.getPath(file))``, so ``book.json`` never
+    passes through the resource-pack OR data-pack stack and nothing
+    outside the JAR can shadow it. The resource pack carries ``assets/``,
+    the overrides tree carries modpack-root files, and neither is a
+    channel for this.
+
+    This is NOT hardcoded text. Hardcoded text has no lang key at all, so
+    it was never translatable and the mod author has to change the mod.
+    Here the string WAS extracted and translated successfully; only
+    delivery is impossible, and patching the JAR is the only fix. The two
+    must stay separate in any report, because the user's next action
+    differs: nothing versus repackage the JAR yourself.
+    """
+
+    #: Path as scanned, inside the extraction cache.
+    source_path: str
+    #: JAR the file came out of, for attribution. "" when unattributable.
+    mod: str
+    #: Translations produced for this file and then dropped.
+    entry_count: int
+
+
 @dataclass(slots=True)
 class GenerationResult:
     resourcepack_dir: Path
@@ -223,8 +252,8 @@ class GenerationResult:
     pack_icon: Path | None = None
     #: Files skipped because every entry already had a translation.
     skipped_existing: int = 0
-    #: Files skipped because they would require .jar patching.
-    skipped_jar_data: int = 0
+    #: Files whose translations were produced and then had nowhere to go.
+    jar_data_losses: list[JarDataLoss] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     #: Bilingual-variant pass, when ``OutputConfig.bilingual_names`` is set.
     bilingual: GenerationResult | None = None
@@ -240,9 +269,38 @@ class GenerationResult:
             files.extend(self.bilingual.all_files)
         return files
 
+    @property
+    def skipped_jar_data(self) -> int:
+        """Translated files lost to a JAR's internal ``data/`` tree."""
+        return len(self.jar_data_losses)
+
+    @property
+    def jar_data_loss_mods(self) -> list[str]:
+        """JARs owning at least one lost file, in first-seen order."""
+        seen: dict[str, None] = {}
+        for loss in self.jar_data_losses:
+            if loss.mod:
+                seen.setdefault(loss.mod, None)
+        return list(seen)
+
 
 def _norm(path: Path | str) -> str:
     return str(path).replace("\\", "/").lower()
+
+
+def jar_name_for(source_path: Path | str) -> str:
+    """JAR a scanner-extracted path came out of, else ``""``.
+
+    The scanner unpacks each archive to
+    ``.mct_cache/extracted/<jar name>/...``, so the segment after
+    ``extracted`` is the JAR — the only attribution available once a file
+    has been lifted out of its archive.
+    """
+    parts = str(source_path).replace("\\", "/").split("/")
+    for index, part in enumerate(parts):
+        if part.lower() == "extracted" and index + 1 < len(parts):
+            return parts[index + 1]
+    return ""
 
 
 def create_zip_from_directory(source_dir: Path, zip_path: Path) -> None:
@@ -319,11 +377,29 @@ class OutputGenerator:
         for file in files:
             routed = route_for(file.source_path)
             if routed is Route.SKIP_JAR_DATA:
-                result.skipped_jar_data += 1
-                logger.info(
-                    "Skipping JAR-internal data file (needs .jar patching): %s",
-                    file.source_path,
-                )
+                # A loss only when this run actually produced something for
+                # the file. A mod's book.json routinely holds nothing but
+                # lang keys (Botania's "item.botania.lexicon"), which the
+                # handler skips, so it yields no entries at all — counting
+                # it would report a loss the user cannot act on and cannot
+                # even see, since that title IS translated through the
+                # JAR's own lang file.
+                if file.fresh:
+                    result.jar_data_losses.append(
+                        JarDataLoss(
+                            source_path=str(file.source_path),
+                            mod=jar_name_for(file.source_path),
+                            entry_count=len(file.fresh),
+                        )
+                    )
+                    logger.info(
+                        "Cannot install %d translated entr%s for %s: a JAR's "
+                        "own data/ tree is not reachable by a resource pack "
+                        "or a data pack",
+                        len(file.fresh),
+                        "y" if len(file.fresh) == 1 else "ies",
+                        file.source_path,
+                    )
                 continue
             if routed is Route.SKIP_EXTRACTED:
                 logger.debug(

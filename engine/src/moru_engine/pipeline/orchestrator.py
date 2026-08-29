@@ -149,6 +149,10 @@ class EntryStatus(str, Enum):
     MIGRATED = "migrated"
     SKIPPED = "skipped"
     MODIFIED = "modified"
+    #: Seeded by a manual-seed run and not yet touched by a human. Deliberately
+    #: absent from _FRESH_STATUSES: an untranslated entry must never reach the
+    #: resource pack, so this is the one status that carries no output.
+    PENDING = "pending"
 
 
 class EntryResult(BaseModel):
@@ -177,6 +181,13 @@ class PipelineStats(BaseModel):
     duration_seconds: float = 0.0
     coverage_percent: float = 0.0
     quality_score: float = 0.0
+    #: Translated files a mod JAR's own data/ tree swallowed: Patchouli
+    #: reads book.json straight out of the JAR, so no resource pack or
+    #: data pack can carry our translation. NOT hardcoded text — that is
+    #: reported at scan time and was never translatable.
+    undeliverable_jar_files: int = 0
+    undeliverable_jar_entries: int = 0
+    undeliverable_jar_mods: list[str] = Field(default_factory=list)
 
     def finalize(self) -> None:
         done = self.translated_entries + self.tm_hits + self.migration_hits
@@ -283,9 +294,30 @@ class PipelineConfig(BaseModel):
     previous_resourcepack_path: Path | None = None
     previous_overrides_path: Path | None = None
 
+    #: Seed a hand-translation session. Like ``source_text_only`` the run makes
+    #: no provider call and needs no api_key, but every entry it would
+    #: otherwise translate is left UNTRANSLATED (``EntryStatus.PENDING``) so
+    #: the manual surface can tell "not yet touched" from "translated".
+    #:
+    #: Unlike a source-text run it deliberately keeps the LLM-FREE helper
+    #: stages on: TM, the vanilla and user glossaries, mod-translation harvest,
+    #: previous-version migration and the sibling graph. Only glossary
+    #: curation reaches a provider, so only that is switched off. Those stages
+    #: are exactly the help a hand translator wants, and turning them off
+    #: "for symmetry" with source_text_only would strip the feature for no
+    #: gain.
+    manual_seed: bool = False
+
+    #: Adopt an earlier job's human translations as already-settled, so an
+    #: automatic run over a partially hand-translated pack neither re-sends
+    #: nor overwrites the human's work. Resolved by the caller into
+    #: ``human_translations``; this field only records provenance for the
+    #: session payload.
+    seed_from_job_id: str | None = None
+
     @model_validator(mode="after")
     def _disable_provider_stages(self) -> PipelineConfig:
-        """A source-text run must not need a model or an API key.
+        """A run that must not need a model or an API key: enforce it here.
 
         Switching the provider-bound stages off here instead of at each
         call site means no caller can assemble a source-text config that
@@ -299,6 +331,14 @@ class PipelineConfig(BaseModel):
         variant tree would come out identical to the plain one. Correct
         output, wasted work — so disable it here rather than at one call
         site, and the rule holds for every future caller too.
+
+        A manual seed shares the "no provider" requirement but NOT the rest.
+        Only ``extract_glossary`` reaches a model; TM, both glossaries, the
+        mod-translation harvest, migration and the sibling graph are pure
+        local work and are precisely the aids a hand translator needs, so
+        they stay on. ``bilingual_names`` also stays: it is an output-shape
+        choice about the eventual export, orthogonal to who produced the
+        translation, and a hand-translated pack may well want it.
         """
         if self.source_text_only:
             self.use_tm = False
@@ -308,6 +348,8 @@ class PipelineConfig(BaseModel):
             self.use_mod_translations = False
             self.extract_glossary = False
             self.bilingual_names = False
+        elif self.manual_seed:
+            self.extract_glossary = False
         return self
 
 
@@ -330,6 +372,13 @@ class PipelineResult(BaseModel):
     #: Run-scoped A/B index. It also owns the preserved resource-pack asset
     #: directory needed when review edits regenerate the output trees.
     migration: MigrationCatalog | None = None
+    #: Resource-pack namespace per absolute source path, as a FALLBACK for a
+    #: session restored from disk. ``scan_result`` is not rebuilt on restore, so
+    #: without this ``write_outputs`` would find an empty namespace map and
+    #: handler-extracted files with no ``assets/`` segment in their path would
+    #: silently land under ``minecraft``. Populated from ``scan_result`` when
+    #: one exists, and persisted alongside the entries.
+    namespaces: dict[str, str] = Field(default_factory=dict)
 
     @property
     def failed(self) -> list[EntryResult]:
@@ -467,19 +516,26 @@ class TranslationPipeline:
         on_event: Callable[[str, dict[str, object]], None] | None = None,
         cancel_check: Callable[[], bool] | None = None,
         lm: object | None = None,
+        human_translations: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self.config = config
         self.on_event = on_event
         self.cancel_check = cancel_check
+        #: rel file path -> {entry key: text} committed by a human in an
+        #: earlier session (``seed_from_job_id``). Adopted as already-settled
+        #: by provenance, so these keys never reach the model and can never be
+        #: overwritten by it. Resolved by the caller, which owns the journal.
+        self.human_translations = human_translations or {}
         self.registry = create_default_registry()
         lm_extra: dict[str, object] = {}
         if config.reasoning_effort is not None:
             lm_extra["reasoning_effort"] = config.reasoning_effort
         # `lm` injection is a test/embedding seam; production builds from
-        # config. A source-text run calls no provider, so it builds neither
-        # an LM (no api_key required) nor a translator (no compiled
-        # artifact to load); token_usage() reports zeros for a None LM.
-        if config.source_text_only:
+        # config. Neither a source-text run nor a manual seed calls a provider,
+        # so both build neither an LM (no api_key required) nor a translator
+        # (no compiled artifact to load); token_usage() reports zeros for a
+        # None LM.
+        if config.source_text_only or config.manual_seed:
             self.lm = lm
             self.translator = None
             self.artifact_id = None
@@ -1072,6 +1128,20 @@ class TranslationPipeline:
                 for key, text in source_data.items()
                 if not is_untranslated_copy(text, existing.get(key, ""))
             }
+            # Hand translations adopted from an earlier session are decided by
+            # PROVENANCE, never by content: "did a human decide this" is not a
+            # question about the bytes, so it must not be asked of a byte
+            # predicate. Merging them into `existing` above would route them
+            # through is_untranslated_copy, and a translator who deliberately
+            # kept a proper noun in English would have that decision read as
+            # untranslated filler and silently sent to the model.
+            human = self.human_translations.get(rel)
+            if human:
+                for key, text in human.items():
+                    if key not in source_data:
+                        continue
+                    existing[key] = text
+                    existing_keys.add(key)
             prepared = _PreparedFile(
                 pair=pair,
                 rel=rel,
@@ -1164,6 +1234,13 @@ class TranslationPipeline:
                         )
                     )
 
+            # Last, deliberately: migration and the TM get first refusal, so a
+            # translator is handed a remembered translation to confirm rather
+            # than a blank box. Whatever is still unclaimed is genuinely theirs
+            # to write.
+            if self.config.manual_seed:
+                self._settle_as_manual_pending(prepared)
+
             if prepared.work_total > 0:
                 self._emit(
                     "progress",
@@ -1198,6 +1275,33 @@ class TranslationPipeline:
                     source_text=text,
                     translated_text=text,
                     status=EntryStatus.PASSED,
+                )
+            )
+        prepared.to_translate.clear()
+        prepared.protected_map.clear()
+
+    def _settle_as_manual_pending(self, prepared: _PreparedFile) -> None:
+        """Leave every still-pending entry untranslated, for a human.
+
+        The manual-seed counterpart to :meth:`_settle_as_source_text`, and the
+        one place the two differ: this writes no translation at all. ``final``
+        is deliberately NOT populated, because a seed run produces a work queue
+        rather than an output tree — PENDING is outside ``_FRESH_STATUSES`` and
+        carries no text, so nothing here could reach a resource pack even if
+        the output stage ran.
+
+        Entries the pack already translated keep that translation (SKIPPED),
+        and anything migration or the TM settled keeps its own status: those
+        are answers a translator confirms, not work they still owe.
+        """
+        for key in prepared.to_translate:
+            prepared.file_entries.append(
+                EntryResult(
+                    key=key,
+                    file=prepared.rel,
+                    source_text=prepared.source_data[key],
+                    translated_text=None,
+                    status=EntryStatus.PENDING,
                 )
             )
         prepared.to_translate.clear()
@@ -1884,7 +1988,11 @@ class TranslationPipeline:
             result.migration is not None
             and result.migration.stats.preserved_resourcepack_assets > 0
         )
-        if result.entries or has_migrated_assets:
+        # A manual seed produces a work queue, not an artifact: every entry it
+        # created is PENDING with no text, so the only thing an output pass
+        # could emit is the pack's own pre-existing translations. Export runs
+        # later, from the reviewed entries, via apply_entry_edits.
+        if (result.entries or has_migrated_assets) and not self.config.manual_seed:
             self._emit("progress", self._stage_frame(0))
             try:
                 await write_outputs(result)
@@ -2110,15 +2218,23 @@ async def run_pipeline(
     on_pipeline: Callable[[TranslationPipeline], None] | None = None,
     scan_result: ScanResult | None = None,
     migration: MigrationCatalog | None = None,
+    human_translations: dict[str, dict[str, str]] | None = None,
 ) -> PipelineResult:
     """Convenience wrapper: build, run, close.
 
     ``on_pipeline`` receives the pipeline instance before the run starts —
     the server uses it to expose the live translation graph while the job
     is running.
+
+    ``human_translations`` carries an earlier session's committed hand
+    translations (``config.seed_from_job_id``). The caller resolves them,
+    because the caller owns the edit journal that records who wrote what.
     """
     pipeline = TranslationPipeline(
-        config, on_event=on_event, cancel_check=cancel_check
+        config,
+        on_event=on_event,
+        cancel_check=cancel_check,
+        human_translations=human_translations,
     )
     if on_pipeline is not None:
         on_pipeline(pipeline)
@@ -2160,14 +2276,25 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
     they replace whole files. Idempotent — wipes and rewrites the trees.
     """
     config = result.config
-    namespaces: dict[str, str] = {}
+    # A restored session has no scan_result, so fall back to the map persisted
+    # with it. Without that, a handler-extracted file whose path carries no
+    # `assets/` segment loses its namespace and lands under `minecraft`.
+    namespaces: dict[str, str] = dict(result.namespaces)
     if result.scan_result is not None:
         for pair in result.scan_result.all_translation_pairs:
             namespaces[pair.source_path.resolve().as_posix()] = pair.namespace
+        result.namespaces = dict(namespaces)
 
     outputs: dict[str, FileOutput] = {}
     for entry in result.entries:
-        if entry.status is EntryStatus.FAILED or not entry.translated_text:
+        # PENDING is stated rather than left to the empty-text check: an
+        # untranslated entry must never reach output, and that should not
+        # depend on a second condition happening to also be true.
+        if (
+            entry.status is EntryStatus.FAILED
+            or entry.status is EntryStatus.PENDING
+            or not entry.translated_text
+        ):
             continue
         file_output = outputs.get(entry.file)
         if file_output is None:
@@ -2186,16 +2313,25 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
     # The description shows under the moru icon in the resource-pack UI.
     # The pack list already displays the pack's name, so the description
     # carries only the translated version + attribution, e.g.
-    # "v6.5.4hotfix / §a모루§7로 한국어로 번역됨 — §amoru.gg". A source-text
-    # pack has the translated one's exact layout, so this line is the only
-    # in-game way to tell the two apart.
+    # "v6.5.4hotfix / §a모루§7로 번역됨 — §amoru.gg". A source-text pack has
+    # the translated one's exact layout, so this line is the only in-game
+    # way to tell the two apart.
     # (identity versions are pre-stripped of any leading "v" marker.)
+    #
+    # Kept deliberately short. That screen wraps the description to 157px
+    # (151px once the list scrolls) and renders only the first TWO VISUAL
+    # lines, dropping the rest — and the URL sits at the far end, so length
+    # costs attribution. At 107px the translated note leaves room for even a
+    # 22-character version prefix without spilling past two lines; the older
+    # 143px wording ("한국어로" was redundant, the target locale is already in
+    # the pack name) did not. output/mcmeta_text.py enforces the budget as a
+    # backstop, but not needing the backstop keeps the version visible too.
     identity = detect_pack_identity(config.modpack_path)
     version_prefix = f"v{identity.version} / " if identity.version else ""
     note = (
         "§7원문 그대로 — §amoru.gg"
         if config.source_text_only
-        else "§a모루§7로 한국어로 번역됨 — §amoru.gg"
+        else "§a모루§7로 번역됨 — §amoru.gg"
     )
     pack_format = pack_format_for_minecraft_version(
         identity.mc_version,
@@ -2218,6 +2354,13 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
         )
     )
     generation = await generator.generate(list(outputs.values()))
+    # Surface the one loss the installable outputs cannot absorb, so it
+    # reaches the completion screen instead of dying in a log line.
+    result.stats.undeliverable_jar_files = generation.skipped_jar_data
+    result.stats.undeliverable_jar_entries = sum(
+        loss.entry_count for loss in generation.jar_data_losses
+    )
+    result.stats.undeliverable_jar_mods = generation.jar_data_loss_mods
     result.output_files = generation.all_files
     return generation
 

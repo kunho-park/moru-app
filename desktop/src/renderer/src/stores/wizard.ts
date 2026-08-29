@@ -19,6 +19,9 @@ import { providerIdOf } from "../lib/models";
 import { moru } from "../lib/bridge";
 import { WEB_URL } from "../lib/web";
 import { useSessions, type SessionScanTotals } from "./sessions";
+// Cycle-tolerant by construction: translationQueue imports this module too,
+// and both sides only dereference the other's store at call time.
+import { useTranslationQueue } from "./translationQueue";
 import {
   snapshotTranslationSettings,
   useSettings,
@@ -165,6 +168,13 @@ interface WizardStore {
   setCategories: (names: string[], included: boolean) => void;
   startScan: () => Promise<void>;
   startTranslate: (settingsOverride?: TranslationRunSettings) => Promise<void>;
+  /**
+   * Seed a hand-translation session: a translate job flagged `manual_seed`,
+   * which the engine settles as untranslated instead of calling a provider.
+   * Drives the same `runState` as an ordinary run, so W5/W5M/W6 and the
+   * history record need no special case.
+   */
+  startManualSeed: () => Promise<"started" | "busy">;
   handleTranslationFrame: (frame: JobEventFrame, sessionId: string) => void;
   cancelTranslate: () => Promise<void>;
   updateReviewStats: (stats: PipelineStats) => void;
@@ -1045,6 +1055,124 @@ export const useWizard = create<WizardStore>((set, get) => ({
       });
     } catch (error) {
       set({ exportState: "failed", exportError: String(error) });
+    }
+  },
+
+  /**
+   * Seed a hand-translation session (W3 "손으로 번역하기").
+   *
+   * An ordinary translate job in every respect the rest of the app can see —
+   * same `runState`, same history record, same W5/W6 — but flagged
+   * `manual_seed`, so the engine leaves every entry untranslated for a human
+   * instead of calling a provider. No model, api_key or api_base is sent, and
+   * none is required: this is the path for someone who has configured nothing.
+   *
+   * `use_tm` and the glossaries deliberately still apply. They are pure local
+   * lookups and are exactly the help a hand translator wants; only glossary
+   * curation needs a model, which is why `extract_glossary` is forced off
+   * here as well as engine-side.
+   *
+   * Returns "busy" rather than clobbering state: the queue drives this same
+   * single wizard session and reads a `sessionId` change as abandonment, so
+   * starting a manual session mid-drain would silently drop a queued pack.
+   */
+  startManualSeed: async () => {
+    const state = get();
+    if (state.modpackPath === null || state.runState === "running") return "busy";
+    // The queue drives this same single wizard session and reads a `sessionId`
+    // change as abandonment, so seeding a manual session mid-drain would
+    // silently drop a queued pack. (translationQueue imports this module, but
+    // the cycle is inert: both sides only dereference at call time.)
+    const queuePhase = useTranslationQueue.getState().phase;
+    if (queuePhase === "running" || queuePhase === "pausing") return "busy";
+
+    const settings = snapshotTranslationSettings();
+    const scanTotals = selectedScanTotals(state);
+    closeTranslateEvents?.();
+
+    const sessionId = state.sessionId ?? crypto.randomUUID();
+    const base = buildTranslateParams(
+      { ...state, modpackPath: state.modpackPath },
+      settings,
+    );
+    const params: TranslateParams = {
+      ...base,
+      session_id: sessionId,
+      manual_seed: true,
+      // Explicitly cleared rather than merely unused: a model recorded on a
+      // session no provider was asked about would misreport how the pack was
+      // translated.
+      model: undefined,
+      api_key: undefined,
+      api_base: undefined,
+      extract_glossary: false,
+    };
+
+    set({
+      runState: "running",
+      // No model was involved; the history row says so rather than naming one.
+      model: null,
+      runError: null,
+      startedAt: Date.now(),
+      translationStartedAt: null,
+      finishedAt: null,
+      doneEntries: 0,
+      scanTotals,
+      fileProgress: {},
+      glossaryProgress: null,
+      failedKeys: {},
+      failedEntryCount: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+      ticker: [],
+      activeBatches: {},
+      log: [],
+      stats: null,
+    });
+    get().appendLog(
+      "info",
+      `manual seed: ${state.modpackName} → ${state.targetLocale} (no provider)`,
+    );
+
+    useSessions.getState().upsert({
+      id: sessionId,
+      modpackPath: state.modpackPath,
+      modpackName: state.modpackName,
+      sourceLocale: state.sourceLocale,
+      targetLocale: state.targetLocale,
+      model: "",
+      status: "running",
+      createdAt: Date.now(),
+      finishedAt: null,
+      doneEntries: 0,
+      totalEntries: scanTotals.entries,
+      translateJobId: null,
+      scanTotals,
+      stats: null,
+      error: null,
+      exportZipPath: null,
+      exportOverridesZipPath: null,
+      sharedUrl: null,
+    });
+    set({ sessionId });
+
+    try {
+      const job = await api.startTranslate(params);
+      set({ translateJobId: job.id });
+      useSessionJobs.getState().register(sessionId, job.id);
+      closeTranslateEvents = openJobEvents(job.id, (frame: JobEventFrame) => {
+        get().handleTranslationFrame(frame, sessionId);
+      });
+      return "started";
+    } catch (error) {
+      set({ runState: "failed", runError: String(error) });
+      useSessions.getState().patch(sessionId, {
+        status: "failed",
+        finishedAt: Date.now(),
+        error: String(error),
+      });
+      return "busy";
     }
   },
 

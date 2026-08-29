@@ -810,8 +810,9 @@ def _seed_lang_modpack(modpack_path: Path) -> EntryResult:
 async def test_pack_description_is_version_slash_attribution(
     tmp_path: Path,
 ) -> None:
-    # "v{version} / §a모루§7로 한국어로 번역됨" — the pack list already shows
-    # the pack's name, so the description carries only version + credit.
+    # "v{version} / §a모루§7로 번역됨" — the pack list already shows the pack's
+    # name, so the description carries only version + credit. Kept short so
+    # the 157px/two-visual-line render budget never drops the moru.gg tail.
     modpack_path = tmp_path / "modpack"
     modpack_path.mkdir()
     entry = _seed_lang_modpack(modpack_path)
@@ -845,7 +846,7 @@ async def test_pack_description_is_version_slash_attribution(
     )
     assert (
         mcmeta["pack"]["description"]
-        == "v6.5.4hotfix / §a모루§7로 한국어로 번역됨 — §amoru.gg"
+        == "v6.5.4hotfix / §a모루§7로 번역됨 — §amoru.gg"
     )
 
 
@@ -871,7 +872,7 @@ async def test_pack_description_without_version_keeps_attribution_only(
         )
     )
     assert (
-        mcmeta["pack"]["description"] == "§a모루§7로 한국어로 번역됨 — §amoru.gg"
+        mcmeta["pack"]["description"] == "§a모루§7로 번역됨 — §amoru.gg"
     )
 
 

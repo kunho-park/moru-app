@@ -10,6 +10,7 @@
  */
 
 import type { ReactNode } from "react";
+import { useEffect, useReducer } from "react";
 
 import type { EntryStatus } from "../../../shared/engine";
 
@@ -124,19 +125,62 @@ export function StatusIcon({
 /* ---- placeholder token highlighting ---------------------------------- */
 
 /**
- * Token grammar. Deliberately close to, but not identical with, the engine's
- * `PATTERNS`: it lacks Patchouli `$(...)` macros and `&`-colour codes, so a
- * translator could delete one of those without the highlight warning them.
+ * Fallback token grammar, used until the engine's patterns arrive and whenever
+ * the sidecar is unreachable — a real state, which is why `EngineGate` exists.
  *
- * `GET /placeholder/patterns` now serves the engine's own list precisely so
- * this can become engine-authoritative instead of a hand-maintained copy.
- * That swap is a separate change: it makes the grammar load-time-variable,
- * which needs a re-render path and a documented offline fallback, and is not
- * worth half-landing.
+ * It is deliberately close to, but not identical with, the engine's `PATTERNS`:
+ * it lacks Patchouli `$(...)` macros and `&`-colour codes. A translator could
+ * delete one of those and the highlight would not warn them, while the engine
+ * would fail the entry. That asymmetry is the whole reason
+ * `installTokenPatterns` exists — the engine is the authority on what a
+ * placeholder is, because the engine is what rejects the translation.
  */
-const TOKEN_SRC = String.raw`\{\{[^{}]*\}\}|\{[^{}]*\}|<[^<>]+>|%(?:\d+\$)?[A-Za-z]|§.|\\n`;
-const TOKEN_SPLIT = new RegExp(`(${TOKEN_SRC})`, "g");
-const TOKEN_EXACT = new RegExp(`^(?:${TOKEN_SRC})$`);
+const FALLBACK_TOKEN_SRC =
+  String.raw`\{\{[^{}]*\}\}|\{[^{}]*\}|<[^<>]+>|%(?:\d+\$)?[A-Za-z]|§.|\\n`;
+
+let TOKEN_SPLIT = new RegExp(`(${FALLBACK_TOKEN_SRC})`, "g");
+let TOKEN_EXACT = new RegExp(`^(?:${FALLBACK_TOKEN_SRC})$`);
+
+const patternListeners = new Set<() => void>();
+
+/**
+ * Adopt the engine's placeholder patterns (`GET /placeholder/patterns`).
+ *
+ * Declaration order is preserved because it IS the overlap priority: an
+ * earlier pattern wins, which is how the engine keeps a `$(...)` macro whole
+ * when its body happens to contain something that looks like a format
+ * specifier.
+ */
+export function installTokenPatterns(
+  patterns: readonly { regex: string }[],
+): void {
+  const source = patterns.map((p) => p.regex).join("|");
+  if (source === "") return;
+  try {
+    TOKEN_SPLIT = new RegExp(`(${source})`, "g");
+    TOKEN_EXACT = new RegExp(`^(?:${source})$`);
+  } catch {
+    // A pattern this browser's regex engine rejects must not break rendering;
+    // the fallback grammar stays in place.
+    return;
+  }
+  for (const notify of patternListeners) notify();
+}
+
+/**
+ * Re-render when the engine's grammar replaces the fallback. Needed because
+ * the patterns arrive after first paint, and the highlight would otherwise
+ * stay stale until some unrelated state change happened to repaint.
+ */
+export function useTokenPatterns(): void {
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    patternListeners.add(bump);
+    return () => {
+      patternListeners.delete(bump);
+    };
+  }, [bump]);
+}
 
 /** accent -> blue -> purple -> amber, cycling; same token = same color. */
 const TOKEN_PALETTE = [

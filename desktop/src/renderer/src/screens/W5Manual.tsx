@@ -12,14 +12,20 @@
  */
 
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ManualContextPanel } from "@/components/ManualContextPanel";
 import { ManualQueue } from "@/components/ManualQueue";
-import { McText, TokenText, tokenColorMap, tokensOf } from "@/components/EntryText";
+import {
+  McText,
+  TokenText,
+  tokenColorMap,
+  tokensOf,
+  useTokenPatterns,
+} from "@/components/EntryText";
 import { useRouter } from "@/stores/router";
-import { refId, sameRun, useManual, visibleQueue } from "@/stores/manual";
+import { refId, useManual, visibleQueue } from "@/stores/manual";
 import { useWizard } from "@/stores/wizard";
 
 /** Milliseconds of idle typing before the draft is written to local storage. */
@@ -27,6 +33,8 @@ const DRAFT_IDLE_MS = 400;
 
 export function W5Manual(): ReactNode {
   const { t } = useTranslation();
+  // Repaint when the engine's placeholder grammar replaces the fallback.
+  useTokenPatterns();
   const go = useRouter((s) => s.go);
   const translateJobId = useWizard((s) => s.translateJobId);
   const sourceLocale = useWizard((s) => s.sourceLocale);
@@ -81,21 +89,6 @@ export function W5Manual(): ReactNode {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, id]);
-
-  const siblings = useMemo(() => {
-    if (ref === undefined) return [];
-    // The queue groups a numbered run contiguously, so the run is the span of
-    // neighbours sharing this file and content kind.
-    const same = refs.filter((r) => r.file === ref.file);
-    return same
-      .map((r) => entries[refId(r)])
-      .filter(
-        (e): e is NonNullable<typeof e> =>
-          e !== undefined && !(e.key === ref.key && e.file === ref.file),
-      )
-      .filter((e) => sameRun(e.key, ref.key))
-      .slice(0, 6);
-  }, [ref, refs, entries]);
 
   const insertAtCursor = (fragment: string): void => {
     const el = editRef.current;
@@ -327,9 +320,9 @@ export function W5Manual(): ReactNode {
         ) : (
           <div className="min-h-0 border-l border-line2">
             <ManualContextPanel
+              jobId={translateJobId}
               entry={entry}
               draft={text}
-              siblings={siblings}
               onInsert={insertAtCursor}
             />
           </div>

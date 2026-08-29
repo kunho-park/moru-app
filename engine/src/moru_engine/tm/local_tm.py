@@ -56,6 +56,27 @@ _SCOPE_SEPARATOR = "\x1f"
 #: addition to the run's own fingerprint.
 SHARED_GLOSSARY_VERSION = "shared"
 
+#: ``origin`` for a row written from a hand translation. Stored under
+#: SHARED_GLOSSARY_VERSION because a human's decision does not depend on the
+#: glossary fingerprint that happened to be active — the translator read the
+#: string and chose. The commit path also cannot compute a run fingerprint:
+#: it may be serving a session restored from disk, whose effective glossary is
+#: not rebuilt.
+MANUAL_ORIGIN = "manual"
+
+#: Serving precedence when several rows match one entry. A human decided
+#: deliberately; a local row is a machine result valid under the user's own
+#: glossary; a community snapshot is approved against no local glossary at all.
+_ORIGIN_RANK: dict[str, int] = {
+    MANUAL_ORIGIN: 3,
+    "local": 2,
+    "community": 1,
+    "vanilla": 1,
+}
+#: An origin written by a future version: rank it with `local` rather than
+#: silently letting it outrank a human edit.
+_ORIGIN_RANK_DEFAULT = 2
+
 # Stay well below SQLite's host-parameter limit when binding IN (...) clauses.
 _MAX_BATCH_PARAMS = 500
 
@@ -230,16 +251,17 @@ class LocalTM:
         hits = self.lookup_many({key: source_text}, target_lang, glossary_version)
         return hits.get(key)
 
-    def _rows_for(self, hashes: list[str]) -> list[tuple[str, str, str, str]]:
-        """``(key_hash, source_text, translated_text, key_scope)`` rows."""
-        rows: list[tuple[str, str, str, str]] = []
+    def _rows_for(self, hashes: list[str]) -> list[tuple[str, str, str, str, str]]:
+        """``(key_hash, source_text, translated_text, key_scope, origin)`` rows."""
+        rows: list[tuple[str, str, str, str, str]] = []
         with self._lock:
             for start in range(0, len(hashes), _MAX_BATCH_PARAMS):
                 chunk = hashes[start : start + _MAX_BATCH_PARAMS]
                 marks = ",".join("?" * len(chunk))
                 rows.extend(
                     self._conn.execute(
-                        "SELECT key_hash, source_text, translated_text, key_scope "
+                        "SELECT key_hash, source_text, translated_text, "
+                        "key_scope, origin "
                         f"FROM tm_entries WHERE key_hash IN ({marks})",
                         chunk,
                     ).fetchall()
@@ -296,17 +318,25 @@ class LocalTM:
                 shared_hash_to_keys.setdefault(shared, []).append(entry_key)
 
         hits: dict[str, str] = {}
-        # Shared first, local second, so a local row overwrites it.
+        ranks: dict[str, int] = {}
+        # Ranked by origin rather than by probe order, so precedence is stated
+        # once and does not depend on which loop runs last. A human's decision
+        # outranks a machine's cache, which outranks a community snapshot.
         for hash_to_keys in (shared_hash_to_keys, local_hash_to_keys):
-            for key_hash, source_text, translated_text, scope in self._rows_for(
+            for key_hash, source_text, translated_text, scope, origin in self._rows_for(
                 list(hash_to_keys)
             ):
                 if not is_cacheable_pair(source_text, translated_text):
                     continue
+                rank = _ORIGIN_RANK.get(origin, _ORIGIN_RANK_DEFAULT)
                 covered = _decode_scope(scope)
                 for entry_key in hash_to_keys[key_hash]:
-                    if key_scope_covers(covered, entry_key):
-                        hits[entry_key] = translated_text
+                    if not key_scope_covers(covered, entry_key):
+                        continue
+                    if rank < ranks.get(entry_key, -1):
+                        continue
+                    hits[entry_key] = translated_text
+                    ranks[entry_key] = rank
         return hits
 
     def store(

@@ -620,6 +620,19 @@ class JobManager:
         #: asset paths are deterministic, so a re-scan re-registers the same
         #: entry instead of adding one per scan.
         self._temporary_dirs: set[Path] = set()
+        #: Resolves a job id to that session's committed hand translations.
+        #: Injected by the app, because the edit journal lives in the HTTP
+        #: layer's ManualStore — the job manager must not grow its own reader
+        #: for it.
+        self._manual_resolver: (
+            Callable[[str], dict[str, dict[str, str]]] | None
+        ) = None
+
+    def set_manual_resolver(
+        self, resolver: Callable[[str], dict[str, dict[str, str]]]
+    ) -> None:
+        """Wire the hand-translation lookup used by ``seed_from_job_id``."""
+        self._manual_resolver = resolver
 
     @property
     def session_store(self) -> SessionStore:
@@ -1393,6 +1406,13 @@ class JobManager:
         def on_pipeline(pipeline: TranslationPipeline) -> None:
             record.pipeline = pipeline
 
+        # An earlier hand-translation session's committed entries, adopted as
+        # already-settled so this run neither re-sends nor overwrites them.
+        human = (
+            self._manual_resolver(config.seed_from_job_id)
+            if config.seed_from_job_id and self._manual_resolver is not None
+            else None
+        )
         try:
             result = await run_pipeline(
                 config,
@@ -1401,6 +1421,7 @@ class JobManager:
                 on_pipeline=on_pipeline,
                 scan_result=reusable_scan,
                 migration=reusable_migration,
+                human_translations=human,
             )
         finally:
             record.pipeline = None

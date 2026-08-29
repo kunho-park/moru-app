@@ -46,7 +46,14 @@
     "sectionCodes": "§ 코드: {{source}}개 중 {{draft}}개",
     "siblings": "이어지는 줄",
     "siblingsHint": "번호로 나뉜 한 문장의 조각들입니다. 한 줄에서 다음 줄로 문장이 이어지는 경우가 많으니 함께 보고 번역하세요.",
-    "runIssues": "지난 실행에서 발견된 문제"
+    "glossary": "용어사전",
+    "insertTerm": "커서 위치에 넣기",
+    "keyScope": "적용 키: {{scope}}",
+    "memory": "번역 메모리",
+    "tmExact": "완전 일치 · {{origin}}",
+    "sameSourceAgrees": "같은 원문 다른 항목 · 일치",
+    "sameSourceDiffers": "같은 원문 다른 항목 · 불일치",
+    "checks": "검사 결과"
   },
   "hint": {
     "commit": "⌃↵ 저장·다음",
@@ -55,5 +62,17 @@
     "flag": "⌃B 표시",
     "token": "⌃1-9 자리표시자",
     "revert": "esc 되돌리기"
+  },
+  "issue": {
+    "key_mismatch": "키가 일치하지 않습니다",
+    "empty_translation": "번역이 비어 있습니다",
+    "untranslated": "번역되지 않은 것 같습니다",
+    "placeholder_count": "자리표시자 개수가 다릅니다",
+    "placeholder_order": "자리표시자 순서가 다릅니다",
+    "color_code": "색상 코드 개수가 다릅니다",
+    "length_ratio": "원문에 비해 길이가 특이합니다",
+    "glossary_term_mismatch": "용어사전 용어가 쓰이지 않았습니다",
+    "glossary_noun_mismatch": "고유명사가 쓰이지 않았습니다",
+    "format_string": "서식 문자열 문제"
   }
 }

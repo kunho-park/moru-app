@@ -113,6 +113,12 @@ export interface ContextTermRule {
   aliases: string[];
   term_ko: string;
   preferred_style?: string | null;
+  /**
+   * Dotted lang-key globs the rule is limited to. Already evaluated
+   * server-side — the rule is only present because it applies to this entry —
+   * so this is for showing WHY it applies, never for re-filtering.
+   */
+  key_scope: string[];
 }
 
 export interface ContextProperNoun {
@@ -421,6 +427,15 @@ export interface PipelineStats {
   quality_score: number;
   /** translated-entry counts per content bucket (quests, guidebook, ...) */
   categories?: Record<string, number>;
+  /**
+   * Translated files a mod jar's own `data/` tree swallowed. Patchouli
+   * reads `book.json` straight out of the jar, so no resource pack or data
+   * pack can carry our translation. NOT hardcoded text: that is reported
+   * at scan time and was never translatable in the first place.
+   */
+  undeliverable_jar_files?: number;
+  undeliverable_jar_entries?: number;
+  undeliverable_jar_mods?: string[];
 }
 
 /** Params for POST /jobs {type: "translate"} - engine PipelineConfig surface. */

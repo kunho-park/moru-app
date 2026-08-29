@@ -76,6 +76,30 @@ class ManualStore:
         """Drop the cache for one job; the journal on disk is untouched."""
         self._cache.pop(job_id, None)
 
+    def human_translations(self, job_id: str) -> dict[str, dict[str, str]]:
+        """An earlier session's committed hand translations, by source file.
+
+        Shaped for ``run_pipeline(human_translations=...)``, which adopts them
+        as already-settled so a later automatic run neither re-sends nor
+        overwrites them.
+
+        Selection is by PROVENANCE, never by content: a record exists only
+        because a human had the entry open and committed it. Drafts are
+        excluded — they set ``draft``, not ``text`` — because an unfinished
+        translation is not a decision. Content is never inspected, which is
+        what makes a deliberate "leave this proper noun in English" adoptable
+        even though its target equals its source.
+        """
+        out: dict[str, dict[str, str]] = {}
+        for ref, state in self.state(job_id).items():
+            if state.text is None or state.origin != "human":
+                continue
+            file, _, key = ref.partition("\u0000")
+            if not key:
+                continue
+            out.setdefault(file, {})[key] = state.text
+        return out
+
     # ---- wire shape ----------------------------------------------------
 
     def enrich(

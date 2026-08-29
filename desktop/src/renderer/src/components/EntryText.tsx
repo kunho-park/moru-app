@@ -10,6 +10,7 @@
  */
 
 import type { ReactNode } from "react";
+import { useEffect, useReducer } from "react";
 
 import type { EntryStatus } from "../../../shared/engine";
 
@@ -112,9 +113,55 @@ export function StatusIcon({
 
 /* ---- placeholder token highlighting ---------------------------------- */
 
-const TOKEN_SRC = String.raw`\{\{[^{}]*\}\}|\{[^{}]*\}|<[^<>]+>|%(?:\d+\$)?[A-Za-z]|§.|\\n`;
-const TOKEN_SPLIT = new RegExp(`(${TOKEN_SRC})`, "g");
-const TOKEN_EXACT = new RegExp(`^(?:${TOKEN_SRC})$`);
+/**
+ * Fallback token grammar, used until the engine's own patterns are installed
+ * (and if the sidecar is unreachable, which `EngineGate` treats as a real
+ * state). It is deliberately close to, but not identical with, the engine's
+ * `PATTERNS` — it lacks Patchouli `$(...)` macros and `&`-colour codes, so a
+ * translator could delete one without the highlight warning them. That is why
+ * `installTokenPatterns` exists: the engine is the authority on what a
+ * placeholder is, because the engine is what fails the entry.
+ */
+const FALLBACK_TOKEN_SRC =
+  String.raw`\{\{[^{}]*\}\}|\{[^{}]*\}|<[^<>]+>|%(?:\d+\$)?[A-Za-z]|§.|\\n`;
+
+let TOKEN_SPLIT = new RegExp(`(${FALLBACK_TOKEN_SRC})`, "g");
+let TOKEN_EXACT = new RegExp(`^(?:${FALLBACK_TOKEN_SRC})$`);
+
+const listeners = new Set<() => void>();
+
+/**
+ * Adopt the engine's placeholder patterns. Order matters and is preserved:
+ * an earlier pattern wins an overlapping match, which is how the engine
+ * resolves e.g. a `$(...)` macro containing something that looks like a
+ * format specifier.
+ */
+export function installTokenPatterns(patterns: readonly { regex: string }[]): void {
+  const source = patterns.map((p) => p.regex).join("|");
+  if (source === "") return;
+  try {
+    const split = new RegExp(`(${source})`, "g");
+    const exact = new RegExp(`^(?:${source})$`);
+    TOKEN_SPLIT = split;
+    TOKEN_EXACT = exact;
+  } catch {
+    // A pattern the browser's regex engine rejects must not break rendering;
+    // the fallback grammar stays in place.
+    return;
+  }
+  for (const notify of listeners) notify();
+}
+
+/** Re-render when the engine's patterns replace the fallback grammar. */
+export function useTokenPatterns(): void {
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    listeners.add(bump);
+    return () => {
+      listeners.delete(bump);
+    };
+  }, [bump]);
+}
 
 /** accent -> blue -> purple -> amber, cycling; same token = same color. */
 const TOKEN_PALETTE = [

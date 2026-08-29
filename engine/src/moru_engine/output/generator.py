@@ -36,6 +36,7 @@ from ..handlers.base import create_default_registry
 from ..parsers import BaseParser, LangParser, ParserError
 from ..utils.locale_helper import replace_locale_in_path
 from .bilingual import annotate_entries
+from .mcmeta_text import fit_description
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +57,13 @@ OVERRIDES_DIRNAME = "overrides"
 #: Subdirectory holding the bilingual variant's own resourcepack/overrides
 #: pair, so both variants ship from one run without colliding.
 BILINGUAL_DIRNAME = "bilingual"
-
-#: Appended to the bilingual pack's description. The two packs are
-#: otherwise byte-identical in layout, so this line is the only in-game way
-#: to tell them apart in the resource-pack list.
-BILINGUAL_DESCRIPTION_SUFFIX = " §8(원문 병기)"
+#: Appended to the bilingual pack's description. The two packs are otherwise
+#: byte-identical in layout, so this is the only in-game way to tell them
+#: apart in the resource-pack list. Kept to 28px (a bracket form rather than
+#: a parenthesised phrase) so that even the longest realistic version prefix
+#: still leaves the whole description inside the two-visual-line budget —
+#: see output/mcmeta_text.py.
+BILINGUAL_DESCRIPTION_SUFFIX = " §8[병기]"
 
 #: First Minecraft release using each RESOURCE-pack ``pack_format``, newest
 #: first, so a lookup is "the first entry that is <= the target version".
@@ -465,7 +468,10 @@ class OutputGenerator:
             if pack_format >= MINOR_VERSION_ERA_FORMAT
             else {"pack_format": pack_format}
         )
-        pack["description"] = self.config.description
+        # The selection screen drops overflow from the END, which is exactly
+        # where our attribution URL sits, and offers no tooltip to recover
+        # it. Fitting trims from the front instead so moru.gg survives.
+        pack["description"] = fit_description(self.config.description)
         mcmeta = {"pack": pack}
         path = self.resourcepack_dir / "pack.mcmeta"
         path.parent.mkdir(parents=True, exist_ok=True)

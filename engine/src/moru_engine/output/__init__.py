@@ -1,6 +1,7 @@
 """Installable output generation (resource pack + overrides)."""
 
 from .generator import (
+    BILINGUAL_DESCRIPTION_SUFFIX,
     BILINGUAL_DIRNAME,
     DEFAULT_PACK_FORMAT,
     MINOR_VERSION_ERA_FORMAT,
@@ -18,6 +19,7 @@ from .generator import (
 )
 
 __all__ = [
+    "BILINGUAL_DESCRIPTION_SUFFIX",
     "BILINGUAL_DIRNAME",
     "DEFAULT_PACK_FORMAT",
     "MINOR_VERSION_ERA_FORMAT",

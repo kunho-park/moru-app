@@ -6,10 +6,13 @@
  * numbered-key grouping the engine uses, and the placeholder / §-code checks
  * come from the shared token definitions in `EntryText`.
  *
- * Glossary scope, translation-memory matches, and authoritative validation
- * are server-side concerns (`/entries/{key}/context`, `/validate`) and are
- * deliberately absent rather than approximated here — a second, drifting copy
- * of the engine's matching rules would be worse than not showing them.
+ * The engine now serves richer aids — glossary rules scoped to this entry's
+ * lang key, translation-memory matches, and the authoritative validator
+ * verdict — via `GET /translate/{job}/entries/{key}/context` and
+ * `POST /translate/{job}/validate`. Wiring those in is deliberately a separate
+ * change: glossary scope matching in particular must NOT be reimplemented
+ * here, because `key_scope` is resolved server-side per lang key and a second
+ * copy of that logic in the renderer would drift and quietly show wrong terms.
  */
 
 import type { ReactNode } from "react";

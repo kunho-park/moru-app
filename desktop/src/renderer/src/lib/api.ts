@@ -5,8 +5,6 @@
  */
 
 import type {
-  AssistKind,
-  AssistResult,
   CommunitySyncResult,
   Entry,
   EntryContext,
@@ -190,30 +188,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ key, file, translated_text: translatedText }),
     }),
-  /**
-   * Ask the model for help with one entry WITHOUT changing it. Advisory only:
-   * the response is never written back by the engine. Contrast
-   * `retranslateEntry`, which overwrites the entry in place.
-   */
-  assistEntry: (
-    jobId: string,
-    key: string,
-    kind: AssistKind,
-    opts: { file?: string; n?: number; draft?: string; apiKey?: string } = {},
-  ) =>
-    request<AssistResult>(
-      `/translate/${jobId}/entries/${encodeURIComponent(key)}/assist`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          kind,
-          file: opts.file,
-          n: opts.n,
-          draft: opts.draft,
-          api_key: opts.apiKey,
-        }),
-      },
-    ),
   /** The engine's own placeholder patterns, in overlap-priority order. */
   placeholderPatterns: () =>
     request<{ patterns: PlaceholderPattern[] }>("/placeholder/patterns"),

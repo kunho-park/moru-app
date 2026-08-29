@@ -15,7 +15,32 @@ export interface Job {
   created_at: string;
 }
 
-export type EntryStatus = "passed" | "warning" | "failed" | "modified" | "tm_hit" | "skipped";
+/**
+ * `pending` is a seeded, not-yet-touched entry from a manual-seed run. It is
+ * deliberately outside the set that feeds the resource pack, so an
+ * untranslated entry can never ship.
+ */
+export type EntryStatus =
+  | "passed"
+  | "warning"
+  | "failed"
+  | "modified"
+  | "tm_hit"
+  | "skipped"
+  | "pending";
+
+/** Entry buckets the engine can filter by. Two are views, not statuses. */
+export type EntryFilter =
+  | "all"
+  | "pending"
+  | "failed"
+  | "warning"
+  | "modified"
+  | "flagged"
+  | "stale_source";
+
+/** Who produced `translated_text`. Absent on entries written before it existed. */
+export type EntryOrigin = "machine" | "human" | "tm" | "community";
 
 export interface Entry {
   key: string;
@@ -24,12 +49,149 @@ export interface Entry {
   translated_text: string;
   status: EntryStatus;
   errors: string[];
+  origin?: EntryOrigin | null;
+  flagged?: boolean;
+  /**
+   * The entry holds a human translation whose recorded source hash no longer
+   * matches the scanned source: the pack changed the string underneath it.
+   * The translation is kept, never discarded, and export is blocked until the
+   * user confirms it.
+   */
+  stale_source?: boolean;
 }
 
 export interface EntryPage {
   total: number;
   page: number;
   entries: Entry[];
+}
+
+/** GET /translate/{jobId}/entries/counts — every bucket in one pass. */
+export type EntryCounts = Record<EntryFilter, number>;
+
+/**
+ * POST /translate/{jobId}/validate — structured issues, unlike the flattened
+ * English strings on `Entry.errors`. Switch on `issue_type` to localize;
+ * `message` is English-only.
+ */
+export type ValidationIssueType =
+  | "key_mismatch"
+  | "empty_translation"
+  | "untranslated"
+  | "placeholder_count"
+  | "placeholder_order"
+  | "color_code"
+  | "length_ratio"
+  | "glossary_term_mismatch"
+  | "glossary_noun_mismatch"
+  | "format_string";
+
+export interface ValidationIssue {
+  issue_type: ValidationIssueType;
+  severity: "error" | "warning" | "info";
+  key?: string;
+  message: string;
+  suggestion?: string | null;
+  source_value?: string | null;
+  translated_value?: string | null;
+}
+
+/**
+ * GET /translate/{jobId}/entries/{key}/context — per-entry translation aids.
+ * Every field is derived without a model or a network call, so this is
+ * available with no provider configured.
+ */
+export interface EntrySibling {
+  key: string;
+  source_text: string;
+  translated_text: string | null;
+  status: EntryStatus;
+}
+
+export interface ContextTermRule {
+  aliases: string[];
+  term_ko: string;
+  preferred_style?: string | null;
+}
+
+export interface ContextProperNoun {
+  source_like: string;
+  preferred_ko: string;
+}
+
+/** Prose-only guidance: never machine-checked. Display, do not imply enforcement. */
+export interface ContextFormattingRule {
+  rule_name: string;
+  description: string;
+}
+
+export interface ContextTmMatch {
+  translated_text: string;
+  origin: string;
+  updated_at?: string | null;
+}
+
+export interface ContextTmSibling {
+  file: string;
+  key: string;
+  translated_text: string;
+  agrees: boolean;
+}
+
+export interface ContextPlaceholder {
+  token: string;
+  kind: string;
+  literal: string;
+}
+
+export interface EntryContext {
+  mod_id: string | null;
+  namespace: string | null;
+  content_type: string | null;
+  file: string;
+  /** The numbered-key run in ordinal order, excluding this entry. */
+  siblings: EntrySibling[];
+  glossary: {
+    terms: ContextTermRule[];
+    proper_nouns: ContextProperNoun[];
+    formatting: ContextFormattingRule[];
+  };
+  tm: {
+    exact: ContextTmMatch | null;
+    same_source_elsewhere: ContextTmSibling[];
+  };
+  placeholders: ContextPlaceholder[];
+}
+
+/**
+ * POST /translate/{jobId}/entries/{key}/assist — advisory only. Nothing here
+ * has been written to the entry; the user decides what to accept.
+ */
+export type AssistKind = "suggest" | "alternatives" | "explain";
+
+export interface AssistSuggestion {
+  text: string;
+  note?: string | null;
+}
+
+export interface AssistResult {
+  kind: AssistKind;
+  model: string | null;
+  elapsed_ms: number;
+  suggestions: AssistSuggestion[];
+  explanation: string | null;
+}
+
+/**
+ * GET /placeholder/patterns — the engine's own pattern list, in
+ * overlap-priority order (earlier wins). Fetched so the renderer highlights
+ * and counts tokens with the same definitions the validator enforces, rather
+ * than keeping a second copy that drifts.
+ */
+export interface PlaceholderPattern {
+  name: string;
+  regex: string;
+  kind?: string;
 }
 
 /** /translate/{jobId}/graph — translation-graph snapshot for the canvas. */
@@ -108,11 +270,52 @@ export interface PackIdentity {
   confident: boolean;
 }
 
+/** One mod JAR the mod blacklist kept out of the scan. */
+export interface ExcludedMod {
+  /** the blacklisted id this JAR matched — the mod's declared mod id */
+  mod_id: string;
+  jar_name: string;
+}
+
+/** Source strings one enabled resource pack replaced, as a tally. */
+export interface SourceOverride {
+  /** pack file/directory name from the instance's resourcepacks/ */
+  pack: string;
+  keys: number;
+}
+
+/** One display string a mod builds in Java instead of a lang file. */
+export interface HardcodedString {
+  /** the English as the player sees it */
+  text: string;
+  /** declaring class inside the jar */
+  class_name: string;
+  /**
+   * `component` — a serialized text component, the shape Mojang uses for
+   * displayable text. `associated` — a multi-word label in a class that
+   * already produced a component hit.
+   */
+  kind: "component" | "associated";
+}
+
+/** A mod whose display text no language file can reach. */
+export interface HardcodedMod {
+  mod_id: string;
+  jar_name: string;
+  strings: HardcodedString[];
+}
+
 export interface ScanResult {
   modpack_path: string;
   categories: ScanCategory[];
   /** null only when the engine could not run detection (defensive) */
   identity: PackIdentity | null;
+  /** Mods excluded by the blacklist; absent on legacy scan records. */
+  excluded_mods?: ExcludedMod[];
+  /** Per-pack counts of source strings taken from enabled resource packs. */
+  source_overrides?: SourceOverride[];
+  /** Mods that hardcode display text in compiled code; absent on legacy records. */
+  hardcoded_mods?: HardcodedMod[];
 }
 
 export type GlossaryOrigin = "vanilla" | "extracted" | "manual" | "community";
@@ -121,6 +324,15 @@ export interface GlossaryTerm {
   source: string;
   target: string;
   origin: GlossaryOrigin;
+  /**
+   * Lang keys the term applies to, as dotted globs: every segment is a
+   * literal or `*`, and a trailing `*` absorbs the remaining segments
+   * (`effect.minecraft.wither`, `effect.*`, `subtitles.*.wither`). Empty
+   * means every key. A scoped rule beats an unscoped one on the keys it
+   * covers, which is what keeps "Wither" the boss 위더 under `entity.*`
+   * and the status effect 시듦 under `effect.*`.
+   */
+  key_scope: string[];
 }
 
 export interface Glossary {
@@ -156,6 +368,8 @@ export interface Provider {
   login_hint?: string | null;
   /** Signed-in account, when the CLI's credential exposes one. */
   account?: string | null;
+  /** Why an `auth: "cli"` provider is not usable, when it is not. */
+  error?: string | null;
 }
 
 /** POST /providers/models - live model listing with static-catalog fallback. */
@@ -215,16 +429,62 @@ export interface TranslateParams {
   /** Maximum mined glossary candidates; null means unlimited. */
   glossary_max_terms?: number | null;
   include_categories?: string[];
+  /**
+   * Mod ids never translated (library/optimization/tooling mods). A
+   * different axis from `include_categories`: per-mod, not per-category, and
+   * applied while scanning so the excluded mods' entries are never
+   * extracted. Omitted or empty scans every mod.
+   */
+  mod_blacklist?: string[];
+  /**
+   * Seed a hand-translation session. The run makes no provider call and needs
+   * no `api_key`; every entry it would otherwise translate is left
+   * untranslated with status `pending`. Unlike a source-text export this does
+   * NOT disable the LLM-free helper stages — TM, glossaries, mod-translation
+   * harvest and the sibling graph all still run, because only glossary
+   * curation needs a model.
+   */
+  manual_seed?: boolean;
+  /**
+   * Adopt an earlier job's human translations (`origin === "human"`) as
+   * already-settled, so an automatic run over a partially hand-translated
+   * pack never re-translates and never overwrites the human work.
+   */
+  seed_from_job_id?: string;
 }
 
 export interface ScanParams {
   modpack_path: string;
   source_locale?: string;
   target_locale?: string;
+  /** Mod ids to leave out of the scan; omitted or empty scans every mod. */
+  mod_blacklist?: string[];
 }
 
+/** Params for POST /jobs {type: "export"} - archives a translate job's trees. */
 export interface ExportParams {
   translate_job_id: string;
+  output_zip?: string;
+}
+
+/**
+ * Params for POST /jobs {type: "export", source_text: true} - the W3
+ * "export as source text" run. The engine extracts the pack and drives the
+ * same pipeline and output generator as a translated run, settling every
+ * entry to its own source string, so the archives carry the identical file
+ * structure with the untranslated text. No translate job, model, or API
+ * key is involved.
+ */
+export interface SourceTextExportParams {
+  source_text: true;
+  modpack_path: string;
+  source_locale?: string;
+  target_locale?: string;
+  /** Scan categories to include (omitted = every category). */
+  include_categories?: string[];
+  /** Mod ids to leave out of the run (omitted or empty = every mod). */
+  mod_blacklist?: string[];
+  output_dir?: string;
   output_zip?: string;
 }
 

@@ -36,6 +36,24 @@ class DumpError(ParserError):
         super().__init__(f"Failed to dump to {path}: {message}")
 
 
+def is_metadata_key(key: str) -> bool:
+    """True for the leading-underscore comment/metadata key convention.
+
+    Minecraft language files have no comment syntax in JSON, so pack
+    authors carry notes as ordinary entries ("_comment": "Misc"). They are
+    addressed to the author, never rendered in game, and are not
+    translatable text — extracting them sends metadata to the translator
+    and inflates entry totals and failure lists.
+
+    Every dot segment is checked so a nested note ("tooltips._comment") is
+    caught as well as a flat one. Only a LEADING underscore counts: real
+    keys use it inside a segment ("tab_all", "oak_log"), never to start
+    one — zero of the 28638 keys in the bundled vanilla language assets
+    have an underscore-initial segment.
+    """
+    return any(segment.startswith("_") for segment in key.split("."))
+
+
 class BaseParser(abc.ABC):
     """Abstract base class for file parsers.
 

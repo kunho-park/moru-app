@@ -14,6 +14,32 @@
     "badge": "Best value",
     "line": "About {{cost}} with {{model}} via OpenRouter — apply it in translation settings"
   },
+  "blacklist": {
+    "header": "Mod blacklist",
+    "summary": "{{excluded}} mods excluded from translation",
+    "summaryNone": "No mods excluded · {{listed}} listed",
+    "hint": "Libraries, optimization mods and author tooling are excluded by default — only the pack author ever reads their text. Matching is by mod id, and excluding a mod never removes translations it already ships.",
+    "excludedHeader": "Excluded in this scan",
+    "listedHeader": "Listed only (not in this pack)",
+    "include": "Include again",
+    "addPlaceholder": "Add a mod id (e.g. jade)",
+    "add": "Add",
+    "reset": "Restore defaults",
+    "rescanning": "Rescanning with the updated blacklist…"
+  },
+  "hardcoded": {
+    "header": "Text no language file can reach",
+    "summary": "{{mods}} mods hardcode {{strings}} display strings in their code",
+    "hint": "These mods build the text in Java instead of reading it from a language file, so the game never looks up a translation for it. No tool that edits language files can change it — not moru, not a hand translation, not a resource pack. It stays English, and that is not a translation failure. Fixing it needs a Mixin shipped as a companion mod; a resource pack cannot carry code.",
+    "stringCount": "{{count}} strings",
+    "associated": "label in the same class",
+    "exportCsv": "Export CSV"
+  },
+  "overrides": {
+    "header": "Resource pack source overrides",
+    "summary": "Enabled resource packs replaced {{keys}} source strings — the text players actually see is what gets translated",
+    "packLine": "{{pack}} · {{keys}} keys"
+  },
   "tree": {
     "header": "Categories",
     "selectAll": "Select all",

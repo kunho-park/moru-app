@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import aiofiles
@@ -16,6 +18,23 @@ import aiofiles
 from ..models import Glossary, TermRule
 
 logger = logging.getLogger(__name__)
+
+#: Key namespaces whose names get referenced from arbitrary other keys - a
+#: boss name turns up in advancements, subtitles, boss bars and mod keys.
+#: When one sense of an ambiguous term lives here it stays unscoped as the
+#: term's default reading and the narrower senses get scoped; the order is
+#: the tie-break when several senses qualify.
+_OPEN_KEY_NAMESPACES = ("entity", "block", "item")
+
+
+@dataclass(frozen=True)
+class _VanillaEntry:
+    """One accepted source/target pair plus the key that defined it."""
+
+    key: str
+    source: str
+    target: str
+    category: str
 
 
 class VanillaGlossaryBuilder:
@@ -142,7 +161,6 @@ class VanillaGlossaryBuilder:
         Returns:
             List of term rules
         """
-        terms: list[TermRule] = []
         categories = {
             "block": "block",
             "item": "item",
@@ -158,6 +176,7 @@ class VanillaGlossaryBuilder:
             "commands": "other",
         }
 
+        entries: list[_VanillaEntry] = []
         # Track added terms to avoid duplicates
         added_terms: set[str] = set()
 
@@ -184,21 +203,83 @@ class VanillaGlossaryBuilder:
             if target_lower in added_terms:
                 continue
 
-            # Create term rule
-            term = TermRule(
-                term_ko=target_text,
-                preferred_style="Official Minecraft translation",
-                aliases=[source_text],
-                category=category,
-                notes=f"From vanilla: {key}",
-            )
-            terms.append(term)
+            entries.append(_VanillaEntry(key, source_text, target_text, category))
             added_terms.add(target_lower)
+
+        scopes = self._scope_ambiguous(entries)
+
+        terms = [
+            TermRule(
+                term_ko=entry.target,
+                preferred_style="Official Minecraft translation",
+                aliases=[entry.source],
+                key_scope=scopes.get(index, []),
+                category=entry.category,
+                notes=f"From vanilla: {entry.key}",
+            )
+            for index, entry in enumerate(entries)
+        ]
 
         # Sort by category then by term
         terms.sort(key=lambda t: (t.category, t.term_ko))
 
         return terms
+
+    @staticmethod
+    def _scope_ambiguous(entries: list[_VanillaEntry]) -> dict[int, list[str]]:
+        """Key scopes for the entries whose source text is a homograph.
+
+        One source text with two official targets is what makes an unscoped
+        glossary self-contradictory: "Wither" is the boss 위더 under
+        ``entity.minecraft.wither`` but the status effect 시듦 under
+        ``effect.minecraft.wither``, so one bare rule corrupts whichever
+        sense it loses to. Per ambiguous group:
+
+        * a sense whose key namespace is unique in the group is scoped to
+          that namespace (``effect.*``), which also covers modded keys in it;
+        * senses sharing a namespace (``gui.all`` vs
+          ``gui.socialInteractions.tab_all``) are scoped to their exact key,
+          the only thing that separates them;
+        * one sense in an open namespace (see ``_OPEN_KEY_NAMESPACES``) is
+          left unscoped as the term's default reading, so keys nobody claims
+          - ``enhanced_boss_bar.witherstormmod.witherstorm`` - still get it.
+
+        Args:
+            entries: Accepted pairs, each already unique by target text.
+
+        Returns:
+            Entry index -> key scope, for ambiguous entries only.
+        """
+        by_source: dict[str, list[int]] = {}
+        for index, entry in enumerate(entries):
+            by_source.setdefault(entry.source.lower(), []).append(index)
+
+        scopes: dict[int, list[str]] = {}
+        for members in by_source.values():
+            if len(members) < 2:
+                continue
+            namespaces = {i: entries[i].key.split(".", 1)[0] for i in members}
+            counts = Counter(namespaces.values())
+            default = next(
+                (
+                    i
+                    for namespace in _OPEN_KEY_NAMESPACES
+                    for i in members
+                    if namespaces[i] == namespace and counts[namespace] == 1
+                ),
+                None,
+            )
+            for i in members:
+                if i == default:
+                    continue
+                namespace = namespaces[i]
+                scopes[i] = [
+                    f"{namespace}.*" if counts[namespace] == 1 else entries[i].key
+                ]
+
+        if scopes:
+            logger.info("Scoped %d ambiguous vanilla terms by key", len(scopes))
+        return scopes
 
     async def _save_glossary(self, glossary: Glossary, output_path: Path) -> None:
         """Save glossary to JSON file.
@@ -215,6 +296,7 @@ class VanillaGlossaryBuilder:
                     "term_ko": term.term_ko,
                     "preferred_style": term.preferred_style,
                     "aliases": term.aliases,
+                    "key_scope": term.key_scope,
                     "category": term.category,
                     "notes": term.notes,
                 }

@@ -110,7 +110,23 @@ paths:
         - { $ref: "#/components/parameters/JobId" }
         - name: filter
           in: query
-          schema: { type: string, enum: [all, failed, warning, modified] }
+          description: >-
+            Entry status buckets, plus two manual-translation views that are
+            not statuses: `flagged` (bookmarked by a hand translator) and
+            `stale_source` (hand-translated, then the source string changed
+            under it on a later scan).
+          schema:
+            type: string
+            enum:
+              [
+                all,
+                pending,
+                failed,
+                warning,
+                modified,
+                flagged,
+                stale_source,
+              ]
         - name: page
           in: query
           schema: { type: integer, minimum: 1, default: 1 }
@@ -173,7 +189,10 @@ paths:
             disabled for the run, or no result to rebuild from
   /translate/{jobId}/entries/{entryKey}:
     patch:
-      summary: Manual edit of one entry (review screen)
+      summary: >
+        Manual edit of one entry. The only write path a human translation
+        takes, and the only one that involves no model: no provider, no
+        api_key, and no network are required or consulted.
       parameters:
         - { $ref: "#/components/parameters/JobId" }
         - name: entryKey
@@ -195,6 +214,32 @@ paths:
                     Source file of the entry. Required to address a key that
                     appears in more than one file; omitted, the engine edits
                     the first entry with that key.
+                commit:
+                  type: boolean
+                  default: true
+                  description: >-
+                    true settles the entry (status becomes modified) and
+                    appends a durable `commit` record to the session's edit
+                    journal. false records a `draft` only: the journal keeps
+                    the in-progress text so a crash cannot lose it, but the
+                    entry itself is left untouched and nothing can ship.
+                origin:
+                  type: string
+                  enum: [human, machine]
+                  default: human
+                  description: Stamped onto the entry; see Entry.origin.
+                src_sha:
+                  type: string
+                  description: >-
+                    sha256(source_text) truncated to 16 hex chars, as the
+                    client saw it. Recorded on the entry so a later scan that
+                    changes the source can mark the translation stale_source
+                    instead of shipping it as if still valid. Omitted by
+                    clients that predate the field, which yields an unknown
+                    (not clean) staleness state.
+                flagged:
+                  type: boolean
+                  description: Set or clear the revisit bookmark.
       responses:
         "200":
           content:
@@ -233,6 +278,166 @@ paths:
               schema: { $ref: "#/components/schemas/Entry" }
         "409": { description: translate job still running }
         "422": { description: translator build or retranslation failure }
+  /translate/{jobId}/entries/counts:
+    get:
+      summary: >
+        One entry count per filter bucket, computed in a single pass. The
+        review and manual screens need every bucket at once; fetching them
+        as N separate filtered requests costs N full scans of the result.
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - name: search
+          in: query
+          description: Applied before counting, same semantics as /entries.
+          schema: { type: string, maxLength: 200 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: { type: integer }
+                description: Bucket name -> count, covering every filter value.
+  /translate/{jobId}/entries/{entryKey}/context:
+    get:
+      summary: >
+        Everything a human needs to translate one entry well. Involves no
+        model and no network: siblings come from the numbered-key grouping,
+        glossary from rule matching against this one source string, and TM
+        from a local SQLite lookup. Available with no provider configured.
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - name: entryKey
+          in: path
+          required: true
+          schema: { type: string }
+        - name: file
+          in: query
+          description: Disambiguates a key shared by two files.
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EntryContext" }
+        "404": { description: unknown entry }
+  /translate/{jobId}/validate:
+    post:
+      summary: >
+        Validate one candidate translation against one entry's source.
+        Synchronous, pure, no model and no network - this is the live
+        feedback the manual editor calls as the user types. Returns the
+        structured issue list rather than the flattened English message
+        strings carried on Entry.errors, so a client can localize by
+        issue_type and render severity separately.
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, translated_text]
+              properties:
+                key: { type: string }
+                file: { type: string }
+                translated_text: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issues]
+                properties:
+                  issues:
+                    type: array
+                    items: { $ref: "#/components/schemas/ValidationIssue" }
+        "404": { description: unknown entry }
+  /translate/{jobId}/entries/{entryKey}/assist:
+    post:
+      summary: >
+        Ask the model for help with one entry WITHOUT changing it. Returns
+        candidate phrasings or an explanation; it never writes
+        translated_text, never changes status, and never persists. The
+        caller decides what, if anything, to accept. Contrast
+        /retranslate, which overwrites the entry.
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - name: entryKey
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind:
+                  type: string
+                  enum: [suggest, alternatives, explain]
+                file: { type: string }
+                n:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                  default: 3
+                  description: Candidates wanted; ignored by `explain`.
+                draft:
+                  type: string
+                  description: >-
+                    The user's current text, when they want alternatives to
+                    their own wording rather than to the model's.
+                api_key:
+                  type: string
+                  description: >-
+                    Required on a restored session: api_key is deliberately
+                    not persisted in the session file, so a reopened session
+                    has no credential until the client resupplies one.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistResult" }
+        "404": { description: unknown entry }
+        "409": { description: translate job still running }
+        "422": { description: assist call failed }
+        "503":
+          description: >-
+            No usable provider is configured. Manual translation is
+            unaffected; only this endpoint is unavailable.
+  /placeholder/patterns:
+    get:
+      summary: >
+        The engine's placeholder pattern list, in overlap-priority order.
+        Served so a client can highlight and count tokens using the same
+        definitions the validator enforces, instead of maintaining a second
+        copy that drifts.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [patterns]
+                properties:
+                  patterns:
+                    type: array
+                    description: Earlier entries win an overlapping match.
+                    items:
+                      type: object
+                      required: [name, regex]
+                      properties:
+                        name: { type: string }
+                        regex: { type: string }
+                        kind:
+                          type: string
+                          description: >-
+                            Semantic token class the protector assigns
+                            (ARG, VAR, TAG, BR, COLOR, RESET).
   /sessions:
     get:
       summary: List all persisted translation session records on disk
@@ -528,10 +733,31 @@ components:
             (include the server-synced origin=vanilla glossary store rows;
             no bundled vanilla data), extract_glossary?, glossary_max_terms?
             (positive integer; null removes the candidate limit),
-            include_categories?}. include_categories
+            include_categories?, manual_seed?, seed_from_job_id?}.
+            include_categories
             limits translation to the named scan categories (default all).
+            manual_seed: true seeds a hand-translation session - the run
+            makes no provider call and needs no api_key, and every entry it
+            would otherwise translate is left untranslated with status
+            pending, so the manual screen can distinguish "not yet touched"
+            from "translated". Unlike a source-text export it does NOT
+            disable the LLM-free helper stages: TM, the vanilla and user
+            glossaries, mod-translation harvest and the sibling graph all
+            still run, because only glossary curation needs a model.
+            seed_from_job_id adopts an earlier job's human translations
+            (origin=human) as already-settled, so an automatic run over a
+            partially hand-translated pack never re-translates and never
+            overwrites the human work.
             export: {translate_job_id, output_zip?}; accepts a completed or
             user-cancelled translate job whose partial result is available.
+            Or, for the W3 "export as source text" action,
+            {source_text: true, modpack_path, source_locale?,
+            target_locale?, include_categories?, output_dir?, output_zip?} -
+            no translate job, model, or api_key is involved: the engine
+            extracts the pack and drives the same pipeline and output
+            generator with every entry settled to its own source string, so
+            the archives carry a translated export's exact layout with the
+            untranslated text as their values.
             upload: {translate_job_id, modpack_name, web_url? (default
             https://moru.gg), api_token? (Bearer token for the web platform;
             omitted = anonymous desktop upload, attributed to no account),
@@ -625,10 +851,35 @@ components:
         translated_text: { type: string }
         status:
           type: string
-          enum: [passed, warning, failed, modified, tm_hit, skipped]
+          description: >-
+            `pending` is a seeded, not-yet-touched entry produced by a
+            manual-seed run; it is deliberately outside the set that feeds
+            the resource pack, so an untranslated entry can never ship.
+          enum:
+            [passed, warning, failed, modified, tm_hit, skipped, pending]
         errors:
           type: array
           items: { type: string }
+        origin:
+          type: string
+          nullable: true
+          description: >-
+            Who produced `translated_text`. `human` is set only by a manual
+            edit (PATCH); `machine` by a model run or AI retranslate. Absent
+            on entries written before this field existed.
+          enum: [machine, human, tm, community]
+        flagged:
+          type: boolean
+          default: false
+          description: Bookmarked by a hand translator to revisit.
+        stale_source:
+          type: boolean
+          default: false
+          description: >-
+            The entry carries a human translation whose recorded source hash
+            no longer matches the scanned source text: the modpack changed
+            the string underneath it. The translation is kept, never
+            discarded, but export is blocked until the user confirms it.
     EntryPage:
       type: object
       properties:
@@ -637,6 +888,151 @@ components:
         entries:
           type: array
           items: { $ref: "#/components/schemas/Entry" }
+    ValidationIssue:
+      type: object
+      required: [issue_type, severity, message]
+      properties:
+        issue_type:
+          type: string
+          description: >-
+            Stable machine-readable code. Prefer switching on this over
+            parsing `message`, which is English-only and unlocalized.
+          enum:
+            [
+              key_mismatch,
+              empty_translation,
+              untranslated,
+              placeholder_count,
+              placeholder_order,
+              color_code,
+              length_ratio,
+              glossary_term_mismatch,
+              glossary_noun_mismatch,
+              format_string,
+            ]
+        severity: { type: string, enum: [error, warning, info] }
+        key: { type: string }
+        message: { type: string, description: English, not localized. }
+        suggestion: { type: string, nullable: true }
+        source_value: { type: string, nullable: true }
+        translated_value: { type: string, nullable: true }
+    EntryContext:
+      type: object
+      description: >-
+        Per-entry translation aids. Every field is derived without a model
+        or a network call.
+      required: [file, siblings, glossary, tm, placeholders]
+      properties:
+        mod_id: { type: string, nullable: true }
+        namespace: { type: string, nullable: true }
+        content_type:
+          type: string
+          nullable: true
+          description: Handler name that owns the file (ftbquests, patchouli, ...).
+        file: { type: string }
+        siblings:
+          type: array
+          description: >-
+            The entry's numbered-key run, in ordinal order, excluding the
+            entry itself. Mods routinely split one sentence across
+            tooltip1..tooltipN, so these must be visible while translating.
+          items:
+            type: object
+            required: [key, source_text, status]
+            properties:
+              key: { type: string }
+              source_text: { type: string }
+              translated_text: { type: string, nullable: true }
+              status: { type: string }
+        glossary:
+          type: object
+          description: >-
+            Only the rules that apply to this entry, resolved by matching
+            against BOTH the source string and the entry's real lang key:
+            rules whose key_scope misses this key are already dropped, so a
+            client renders what it is given without re-filtering.
+          properties:
+            terms:
+              type: array
+              items:
+                type: object
+                properties:
+                  aliases: { type: array, items: { type: string } }
+                  term_ko: { type: string }
+                  preferred_style: { type: string, nullable: true }
+                  key_scope:
+                    type: array
+                    items: { type: string }
+                    description: >-
+                      Surfaced so the UI can show WHY a rule applies here
+                      (e.g. "적용 키: effect.*") rather than presenting a
+                      narrowly scoped rule as a global one.
+            proper_nouns:
+              type: array
+              items:
+                type: object
+                properties:
+                  source_like: { type: string }
+                  preferred_ko: { type: string }
+            formatting:
+              type: array
+              description: >-
+                Prose-only guidance. These rules carry no machine-checkable
+                assertion and are never validated - display them, do not
+                imply enforcement.
+              items:
+                type: object
+                properties:
+                  rule_name: { type: string }
+                  description: { type: string }
+        tm:
+          type: object
+          properties:
+            exact:
+              nullable: true
+              type: object
+              properties:
+                translated_text: { type: string }
+                origin: { type: string }
+                updated_at: { type: string, nullable: true }
+            same_source_elsewhere:
+              type: array
+              description: >-
+                Other entries in this job with a byte-identical source that
+                already have a translation. Disagreement here is the
+                consistency bug a hand translator most wants surfaced.
+              items:
+                type: object
+                properties:
+                  file: { type: string }
+                  key: { type: string }
+                  translated_text: { type: string }
+                  agrees: { type: boolean }
+        placeholders:
+          type: array
+          items:
+            type: object
+            properties:
+              token: { type: string }
+              kind: { type: string }
+              literal: { type: string }
+    AssistResult:
+      type: object
+      description: Advisory only. Nothing here has been written to the entry.
+      required: [kind, suggestions]
+      properties:
+        kind: { type: string, enum: [suggest, alternatives, explain] }
+        model: { type: string, nullable: true }
+        elapsed_ms: { type: integer }
+        suggestions:
+          type: array
+          items:
+            type: object
+            required: [text]
+            properties:
+              text: { type: string }
+              note: { type: string, nullable: true }
+        explanation: { type: string, nullable: true }
     TranslationGraphSnapshot:
       type: object
       description: >-
@@ -693,6 +1089,18 @@ components:
               source: { type: string }
               target: { type: string }
               origin: { type: string, enum: [vanilla, extracted, manual, community] }
+              key_scope:
+                type: array
+                items: { type: string }
+                description: >-
+                  Dotted lang-key globs limiting where the rule applies.
+                  Each segment is a literal or `*`; a trailing `*` absorbs
+                  every remaining segment. `effect.minecraft.wither` is one
+                  exact key, `effect.*` the whole namespace including modded
+                  keys, `subtitles.*.wither` one wildcard segment in the
+                  middle. Empty or absent = unscoped, applying to every key.
+                  Precedence is per key: when a scoped rule claims a key, an
+                  unscoped rule for the same term is dropped for that key.
     Provider:
       type: object
       properties:

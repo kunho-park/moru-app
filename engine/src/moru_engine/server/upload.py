@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 
 from .. import __version__
+from ..scanner.pack_identity import declare_version_range
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -138,14 +139,40 @@ async def put_archive(url: str, zip_path: Path) -> None:
                 await _ensure_ok(resp, "archive upload")
 
 
+def _compatible_versions(payload: dict[str, Any]) -> dict[str, str] | None:
+    """``compatible_versions`` block for a TranslationPackCreate body.
+
+    None when the pack's own modpack version is unknown: there is nothing to
+    anchor a range to, and the platform then keeps resolving the pack by
+    exact version exactly as it did before the field existed.
+    """
+    declared = declare_version_range(
+        payload.get("modpack_version"), payload.get("compatible_up_to")
+    )
+    return None if declared is None else {"min": declared.min, "max": declared.max}
+
+
 async def register_pack(
     web_url: str, api_token: str | None, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """POST /api/translations (TranslationPackCreate); return {pack_id, url}."""
+    """POST /api/translations (TranslationPackCreate); return {pack_id, url}.
+
+    The compatible modpack version range is finalized here, the one place
+    every published pack passes through. ``compatible_up_to`` is free text
+    the user typed into the export form, so it is a job parameter rather
+    than a wire field: it is checked against the built version (see
+    :func:`~moru_engine.scanner.pack_identity.declare_version_range`) and a
+    value that does not hold up publishes the exact-version point range
+    instead of a claim nobody can verify.
+    """
+    body = {key: value for key, value in payload.items() if key != "compatible_up_to"}
+    compatible = _compatible_versions(payload)
+    if compatible is not None:
+        body["compatible_versions"] = compatible
     async with aiohttp.ClientSession(timeout=_API_TIMEOUT) as session:
         async with session.post(
             f"{web_url}/api/translations",
-            json=payload,
+            json=body,
             headers=_auth_headers(api_token),
         ) as resp:
             await _ensure_ok(resp, "pack registration")

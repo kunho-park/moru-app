@@ -169,6 +169,122 @@ def _clean_version(value: Any) -> str | None:
     return text or None
 
 
+# -- version compatibility -----------------------------------------------------
+
+#: A modpack version we can *order*: a purely dotted numeric release.
+#: Real-world values are not semver ("v6.5.4hotfix", "1.20.1-3.2b") and no
+#: ordering can be invented for a non-numeric tail — is "3.2b" before or
+#: after "3.2"? Such a version is incomparable and only ever matches itself,
+#: string for string.
+_NUMERIC_RELEASE_RE = re.compile(r"^\d{1,6}(?:\.\d{1,6})*$")
+
+
+def pack_version_key(value: Any) -> tuple[int, ...] | None:
+    """Orderable form of a modpack version, or None when incomparable.
+
+    Cleaned by :func:`_clean_version` first, so a bound typed into the
+    export form ("v4.2") normalizes exactly like a detected version.
+    """
+    text = _clean_version(value)
+    if text is None or _NUMERIC_RELEASE_RE.match(text) is None:
+        return None
+    return tuple(int(part) for part in text.split("."))
+
+
+def same_pack_version(left: Any, right: Any) -> bool:
+    """Do two modpack version strings name the same version?
+
+    Cleaned strings settle it; comparable releases also match through their
+    numeric key, so "4.01.2" and "4.1.2" are the same release. Two unknown
+    versions are never "the same" — nothing was established about either.
+    """
+    low, high = _clean_version(left), _clean_version(right)
+    if low is None or high is None:
+        return False
+    if low == high:
+        return True
+    key = pack_version_key(low)
+    return key is not None and key == pack_version_key(high)
+
+
+def normalize_mc_version(value: Any) -> str | None:
+    """Comparison form of a Minecraft version; None when unknown.
+
+    Minecraft versions are only ever compared for equality here — never
+    ordered — so trimming and case folding is the whole normalization
+    ("1.20.1", "23w45a").
+    """
+    text = _str_or_none(value)
+    return text.strip().lower() if text is not None else None
+
+
+@dataclass(frozen=True)
+class VersionRange:
+    """Inclusive modpack version range a translation pack is published for
+    (web-api.yaml ``TranslationPackCreate.compatible_versions``).
+
+    ``min`` is the version the pack was actually built against; ``max`` is
+    the author's "still fine up to here" claim, which defaults to ``min`` —
+    exactly the exact-version behaviour that predates the field.
+    """
+
+    min: str
+    max: str
+
+    def contains(self, version: Any) -> bool:
+        """Is ``version`` inside this range?
+
+        Ordering needs all three of ``min``/``max``/``version`` to be
+        comparable releases. The moment one is not, the range cannot be
+        evaluated at all and only an exact match against an endpoint counts:
+        a translation pack is never offered on a guess. An inverted range
+        (``max`` below ``min``) likewise contains nothing.
+        """
+        low, high = pack_version_key(self.min), pack_version_key(self.max)
+        target = pack_version_key(version)
+        if low is None or high is None or target is None:
+            return same_pack_version(version, self.min) or same_pack_version(
+                version, self.max
+            )
+        return low <= target <= high
+
+
+def parse_version_range(value: Any) -> VersionRange | None:
+    """``{"min", "max"}`` off the wire; None when a pack declares no range.
+
+    Packs published before the field existed carry none, which is what keeps
+    them resolving by exact version.
+    """
+    data = _dict(value)
+    low, high = _clean_version(data.get("min")), _clean_version(data.get("max"))
+    if low is None or high is None:
+        return None
+    return VersionRange(min=low, max=high)
+
+
+def declare_version_range(
+    version: Any, compatible_up_to: Any = None
+) -> VersionRange | None:
+    """The range to publish for a pack built against ``version``.
+
+    Defaults to the point range ``[version, version]``, so a pack never
+    claims a compatibility its author did not state. ``compatible_up_to`` is
+    free text from the export form: it widens the range only when it is a
+    comparable release that is not below the built version, and is otherwise
+    dropped rather than published as a claim nobody can check. None when the
+    built version itself is unknown — there is nothing to anchor a range to.
+    """
+    base = _clean_version(version)
+    if base is None:
+        return None
+    upper = _clean_version(compatible_up_to)
+    if upper is not None and upper != base:
+        low, high = pack_version_key(base), pack_version_key(upper)
+        if low is not None and high is not None and low <= high:
+            return VersionRange(min=base, max=upper)
+    return VersionRange(min=base, max=base)
+
+
 # -- per-source detectors ------------------------------------------------------
 
 

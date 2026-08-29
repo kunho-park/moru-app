@@ -9,9 +9,11 @@ from typing import Any
 
 import dspy
 import pytest
+from pydantic import ValidationError
 
 import moru_engine.dspy_modules.lm as lm_module
 import moru_engine.pipeline.orchestrator as orchestrator
+from moru_engine.dspy_modules import render_style_directives
 from moru_engine.models import Glossary, LanguageFilePair, TermRule
 from moru_engine.pipeline.orchestrator import (
     EntryResult,
@@ -24,6 +26,7 @@ from moru_engine.pipeline.orchestrator import (
     write_outputs,
 )
 from moru_engine.scanner import ScanResult, TranslationFile
+from moru_engine.server.app import JobRequest
 from moru_engine.server.jobs import JobManager, JobRecord, JobStatus, JobType
 
 
@@ -71,6 +74,7 @@ class RecordingTranslator:
         target_lang: str,
         context: str,
         glossary: str,
+        style_directives: str,
         entries: dict[str, str],
     ) -> dspy.Prediction:
         self.batches.append(dict(entries))
@@ -135,6 +139,7 @@ class GlossaryRecordingTranslator:
         target_lang: str,
         context: str,
         glossary: str,
+        style_directives: str,
         entries: dict[str, str],
     ) -> dspy.Prediction:
         self.batches.append((glossary, dict(entries)))
@@ -537,6 +542,7 @@ class FullRecordingTranslator:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, str]]] = []
+        self.style_directives: list[str] = []
 
     async def acall(
         self,
@@ -545,8 +551,10 @@ class FullRecordingTranslator:
         target_lang: str,
         context: str,
         glossary: str,
+        style_directives: str,
         entries: dict[str, str],
     ) -> dspy.Prediction:
+        self.style_directives.append(style_directives)
         self.calls.append((context, glossary, dict(entries)))
         return dspy.Prediction(
             translations={key: f"KO {text}" for key, text in entries.items()},
@@ -685,6 +693,7 @@ class CancelOnKeyTranslator:
         target_lang: str,
         context: str,
         glossary: str,
+        style_directives: str,
         entries: dict[str, str],
     ) -> dspy.Prediction:
         if self.cancel_key in entries:
@@ -886,3 +895,165 @@ async def test_retry_failed_gets_sibling_context(tmp_path: Path) -> None:
     statuses = {e.key: e.status for e in result.entries}
     assert statuses["quests[0].description[0]"] is EntryStatus.MODIFIED
     assert statuses["quests[0].description[1]"] is EntryStatus.MODIFIED
+
+
+def _single_file_scan(tmp_path: Path, entries: dict[str, str]) -> tuple[Path, ScanResult]:
+    modpack_path = tmp_path / "modpack"
+    source_path = modpack_path / "kubejs/assets/testmod/lang/en_us.json"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(json.dumps(entries), encoding="utf-8")
+    return modpack_path, ScanResult(
+        modpack_path=modpack_path,
+        source_only_files=[LanguageFilePair(source_path=source_path)],
+        translation_files=[
+            TranslationFile(input_path=str(source_path), file_type="kubejs")
+        ],
+    )
+
+
+async def _record_style_directives(
+    tmp_path: Path, **style: str
+) -> FullRecordingTranslator:
+    modpack_path, scan_result = _single_file_scan(
+        tmp_path, {"gui.testmod.greeting": "Good morning, traveller."}
+    )
+    config = PipelineConfig(
+        modpack_path=modpack_path,
+        output_dir=tmp_path / "out",
+        use_tm=False,
+        use_user_glossary=False,
+        use_vanilla_glossary=False,
+        **style,
+    )
+    translator = FullRecordingTranslator()
+    pipeline = TranslationPipeline(config, lm=dspy.utils.DummyLM([]))
+    pipeline.translator = translator
+    try:
+        await pipeline.run(scan_result)
+    finally:
+        pipeline.close()
+    assert translator.style_directives, "no batch reached the translator"
+    return translator
+
+
+@pytest.mark.asyncio
+async def test_speech_level_and_term_style_reach_every_batch(tmp_path: Path) -> None:
+    translator = await _record_style_directives(
+        tmp_path, speech_level="hage", term_style="transliterate"
+    )
+    expected = render_style_directives("ko_kr", "hage", "transliterate")
+    assert all(sent == expected for sent in translator.style_directives)
+    assert "하게체" in expected
+    assert "음차" in expected
+
+
+@pytest.mark.asyncio
+async def test_default_style_options_send_consistency_rule_only(
+    tmp_path: Path,
+) -> None:
+    translator = await _record_style_directives(tmp_path)
+    expected = render_style_directives("ko_kr")
+    assert all(sent == expected for sent in translator.style_directives)
+    assert "ONE register per speaker" in expected
+    assert "하게체" not in expected
+    assert "음차" not in expected
+
+
+@pytest.mark.asyncio
+async def test_split_tooltip_run_reaches_one_batch_in_order(tmp_path: Path) -> None:
+    # The real simplyswords case: one sentence across two tooltip keys must
+    # arrive together, in order, and come back as the same key set.
+    tip2 = "item.simplyswords.activedefencesworditem.tooltip2"
+    tip3 = "item.simplyswords.activedefencesworditem.tooltip3"
+    modpack_path, scan_result = _single_file_scan(
+        tmp_path,
+        {
+            "item.simplyswords.activedefencesworditem": "Active Defence Sword",
+            tip3: "enemies (Requires Arrows).",
+            tip2: "Regularly fires arrows at nearby",
+        },
+    )
+    config = PipelineConfig(
+        modpack_path=modpack_path,
+        output_dir=tmp_path / "out",
+        use_tm=False,
+        use_user_glossary=False,
+        use_vanilla_glossary=False,
+        use_translation_graph=False,
+        batch_size=2,
+    )
+    translator = FullRecordingTranslator()
+    pipeline = TranslationPipeline(config, lm=dspy.utils.DummyLM([]))
+    pipeline.translator = translator
+    try:
+        result = await pipeline.run(scan_result)
+    finally:
+        pipeline.close()
+
+    run_batches = [
+        entries for _, _, entries in translator.calls if tip2 in entries
+    ]
+    assert len(run_batches) == 1, "the run was split across batches"
+    assert list(run_batches[0]) == [tip2, tip3]
+    # Same key set back out, nothing merged or dropped.
+    translated = {e.key: e.translated_text for e in result.entries}
+    assert translated[tip2] == "KO Regularly fires arrows at nearby"
+    assert translated[tip3] == "KO enemies (Requires Arrows)."
+
+
+def test_api_params_thread_style_options_into_the_config() -> None:
+    # JobRequest.params is an untyped dict that jobs.py splats straight into
+    # PipelineConfig, so a new prompt option needs no server-side field list.
+    body = JobRequest(
+        type="translate",
+        params={
+            "modpack_path": "/packs/prominence",
+            "speech_level": "hage",
+            "term_style": "transliterate",
+        },
+    )
+    config = PipelineConfig(**body.params)
+    assert config.speech_level == "hage"
+    assert config.term_style == "transliterate"
+    assert render_style_directives(
+        config.target_locale, config.speech_level, config.term_style
+    ) == render_style_directives("ko_kr", "hage", "transliterate")
+
+
+def test_unknown_style_option_values_are_rejected() -> None:
+    # A typo from the UI must fail validation (HTTP 422) rather than reach
+    # the renderer and silently drop the user's choice.
+    with pytest.raises(ValidationError):
+        PipelineConfig(modpack_path=Path("/x"), speech_level="haoche")
+    with pytest.raises(ValidationError):
+        PipelineConfig(modpack_path=Path("/x"), term_style="romanize")
+
+
+def test_style_options_never_resurrect_a_provider_stage(tmp_path: Path) -> None:
+    # Style knobs are prompt text, not provider stages: they must survive a
+    # source-text run without pulling in an LM, translator, or TM.
+    config = PipelineConfig(
+        modpack_path=tmp_path,
+        source_text_only=True,
+        speech_level="hage",
+        term_style="transliterate",
+    )
+    assert config.speech_level == "hage"
+    assert config.term_style == "transliterate"
+    assert not any(
+        (
+            config.use_tm,
+            config.use_translation_graph,
+            config.use_vanilla_glossary,
+            config.use_user_glossary,
+            config.use_mod_translations,
+            config.extract_glossary,
+        )
+    )
+    pipeline = TranslationPipeline(config)
+    try:
+        assert pipeline.lm is None
+        assert pipeline.translator is None
+        assert pipeline.tm is None
+    finally:
+        pipeline.close()

@@ -23,6 +23,7 @@ from ..pipeline import (
     PipelineStats,
 )
 from .jobs import JobRecord, JobStatus, JobType
+from .manual_journal import ManualJournal, entry_ref
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +52,31 @@ def _default_session_dir() -> Path:
 
 
 def _atomic_write_json(path: Path, data: object) -> None:
+    """Durable replace: write a sibling temp file, fsync it, then rename.
+
+    The rename is atomic, but without the fsync the *contents* may still be in
+    the page cache when power is lost, leaving a correctly-named file holding
+    nothing. Both the file and its parent directory are synced — the directory
+    entry created by the rename needs flushing too.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            # Directory fsync is unavailable on some platforms (notably
+            # Windows); the data fsync above is the part that matters.
+            return
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except Exception:
         if tmp.is_file():
             try:
@@ -129,6 +150,7 @@ class SessionStore:
             "extract_glossary": config.extract_glossary,
             "glossary_max_terms": config.glossary_max_terms,
             "include_categories": config.include_categories,
+            "mod_blacklist": config.mod_blacklist,
         }
 
         stats_source = res.stats
@@ -189,7 +211,14 @@ class SessionStore:
         return None
 
     def load_job_session(self, session_id: str) -> JobRecord | None:
-        """Load a persisted .moru session file from disk into a JobRecord."""
+        """Load a persisted .moru session file from disk into a JobRecord.
+
+        The snapshot is only half the story: manual edits are appended to the
+        session's journal rather than rewritten into the snapshot on every
+        save, so the journal has to be replayed over the loaded entries. It is
+        authoritative for committed text — it is strictly newer than the
+        snapshot it sits beside.
+        """
         path = self._find_session_file(session_id)
         if path is None:
             return None
@@ -199,10 +228,39 @@ class SessionStore:
             return None
 
         try:
-            return self.deserialize_job_session(data)
+            record = self.deserialize_job_session(data)
         except (ValueError, KeyError):
             logger.exception("Ignoring unusable session file %s", path)
             return None
+        self._apply_journal(record, ManualJournal.for_session(path))
+        return record
+
+    @staticmethod
+    def _apply_journal(record: JobRecord, journal: ManualJournal) -> None:
+        """Fold committed manual edits onto a freshly loaded result.
+
+        Only committed text is applied. Drafts stay in the journal: an
+        unfinished translation must not appear settled, and must never reach
+        an export.
+        """
+        result = record.result
+        if not isinstance(result, PipelineResult):
+            return
+        state = journal.replay()
+        if not state:
+            return
+        applied = 0
+        for entry in result.entries:
+            manual = state.get(entry_ref(entry.file, entry.key))
+            if manual is None or manual.text is None:
+                continue
+            entry.translated_text = manual.text
+            entry.status = EntryStatus.MODIFIED
+            applied += 1
+        if applied:
+            logger.info(
+                "Replayed %d manual edit(s) onto session %s", applied, record.id
+            )
 
     def deserialize_job_session(self, data: dict[str, Any]) -> JobRecord:
         """Convert a session payload dict into a JobRecord."""
@@ -226,6 +284,7 @@ class SessionStore:
             extract_glossary=config_data.get("extract_glossary", False),
             glossary_max_terms=config_data.get("glossary_max_terms"),
             include_categories=config_data.get("include_categories"),
+            mod_blacklist=config_data.get("mod_blacklist"),
         )
 
         entries = [
@@ -327,9 +386,21 @@ class SessionStore:
             "export_overrides_zip_path": done_payload.get("overrides_zip_path"),
         }
 
+    def journal_for(self, session_id: str) -> ManualJournal:
+        """The session's manual edit journal, whether or not it exists yet.
+
+        Keyed off the canonical session path so the journal always lands
+        beside the snapshot it replays onto.
+        """
+        return ManualJournal.for_session(self._session_file_path(session_id))
+
     def delete_session(self, session_id: str) -> bool:
+        # The journal is part of the session, not a cache: leaving it behind
+        # would let a later session reusing the id inherit stale edits.
+        self.journal_for(session_id).delete()
         path = self._find_session_file(session_id)
         if path is not None and path.is_file():
+            ManualJournal.for_session(path).delete()
             path.unlink()
             return True
         return False

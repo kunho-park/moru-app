@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import aiofiles
 
-from .base import BaseParser, DumpError, ParseError
+from .base import BaseParser, DumpError, ParseError, is_metadata_key
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -51,6 +51,20 @@ class LangParser(BaseParser):
         except OSError as e:
             raise ParseError(self.path, f"Could not read file: {e}") from e
 
+        mapping = self.parse_text(text)
+
+        logger.debug("Extracted %d entries from %s", len(mapping), self.path)
+        return mapping
+
+    @classmethod
+    def parse_text(cls, text: str) -> dict[str, str]:
+        """Key-value pairs from raw ``.lang`` text.
+
+        Path-free counterpart of :meth:`parse`, for callers that hold the
+        bytes instead of a file — a language file read straight out of a
+        resource pack ZIP member has no path to hand a parser, and must
+        still honour ``#PARSE_ESCAPES`` and the comment-key convention.
+        """
         mapping: dict[str, str] = {}
         parse_escapes = any(
             line.strip().upper() == PARSE_ESCAPES_DIRECTIVE
@@ -71,6 +85,11 @@ class LangParser(BaseParser):
             key = key.strip()
             value = value.strip()
 
+            # "#" lines above are the format's own comments; a leading
+            # underscore is the same note carried as a real entry.
+            if is_metadata_key(key):
+                continue
+
             parsed_value = value
             if parse_escapes:
                 try:
@@ -83,7 +102,6 @@ class LangParser(BaseParser):
 
             mapping[key] = parsed_value
 
-        logger.debug("Extracted %d entries from %s", len(mapping), self.path)
         return mapping
 
     async def dump(self, data: Mapping[str, str]) -> None:

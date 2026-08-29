@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from moru_engine import __version__
+from moru_engine.cli_providers.credentials import STORES
 from moru_engine.graph import TranslationGraph
 from moru_engine.pipeline import (
     EntryResult,
@@ -549,6 +550,72 @@ def test_export_job_builds_pack_and_overrides_zips(
     # Overrides zip mirrors the modpack root.
     with zipfile.ZipFile(overrides_zip) as zf:
         assert zf.namelist() == ["kubejs/assets/test/lang/ko_kr.json"]
+
+
+def test_source_text_export_runs_without_a_translate_job(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """W3's export path: a scan is all the user has — no translate job, no
+    API key, no provider call — and it must still produce both archives with
+    a translated export's exact layout (kunho-park/moru-app#3)."""
+    target = tmp_path / "exports" / "source.zip"
+    response = client.post(
+        "/jobs",
+        json={
+            "type": "export",
+            "params": {
+                "source_text": True,
+                "modpack_path": str(MODPACK),
+                "source_locale": "en_us",
+                "target_locale": "ko_kr",
+                "output_dir": str(tmp_path / "out"),
+                "output_zip": str(target),
+            },
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 201, response.text
+    job = response.json()
+    assert job["type"] == "export"
+    final = _wait_for_job(client, job["id"])
+    assert final["status"] == "done", final["error"]
+
+    frame = _terminal_frame(client, job["id"])
+    overrides_zip = target.with_name("source_overrides.zip")
+    assert frame["zip_path"] == str(target)
+    assert frame["overrides_zip_path"] == str(overrides_zip)
+
+    # Archive-internal layout is the W6 one: members are relative to the
+    # tree root, so the source_text working root never leaks into a zip.
+    with zipfile.ZipFile(target) as zf:
+        assert set(zf.namelist()) == {
+            "pack.mcmeta",
+            "pack.png",
+            "assets/testmod/lang/ko_kr.json",
+        }
+        # Target-locale filename with untranslated values: a key-for-key
+        # skeleton of a pack shared on moru.gg.
+        lang = json.loads(zf.read("assets/testmod/lang/ko_kr.json"))
+    assert lang["item.testmod.copper_wand"] == "Copper Wand"
+    with zipfile.ZipFile(overrides_zip) as zf:
+        assert "kubejs/assets/test/lang/ko_kr.json" in zf.namelist()
+
+    # Only translate jobs persist, so a source-text export leaves no row in
+    # the history the user browses.
+    sessions = client.get("/sessions", headers=AUTH).json()
+    assert all(session["id"] != job["id"] for session in sessions)
+
+
+def test_source_text_export_validates_its_own_params(client: TestClient) -> None:
+    """It needs no translate job, but it does need a real pack path."""
+    for params in (
+        {"source_text": True},
+        {"source_text": True, "modpack_path": "/nope/does-not-exist"},
+    ):
+        response = client.post(
+            "/jobs", json={"type": "export", "params": params}, headers=AUTH
+        )
+        assert response.status_code == 422, response.text
 
 
 def test_cancelled_translate_result_can_be_reviewed_and_exported(
@@ -1146,7 +1213,15 @@ def test_glossary_empty_then_roundtrip(client: TestClient) -> None:
     doc = {
         "source_lang": "en_us",
         "target_lang": "ko_kr",
-        "terms": [{"source": "Creeper", "target": "크리퍼"}],
+        "terms": [
+            {"source": "Creeper", "target": "크리퍼"},
+            # Key-scoped row: the boss sense of an ambiguous term.
+            {
+                "source": "Wither",
+                "target": "시듦",
+                "key_scope": ["effect.*"],
+            },
+        ],
     }
     response = client.put("/glossary", json=doc, headers=AUTH)
     assert response.status_code == 200
@@ -1154,8 +1229,20 @@ def test_glossary_empty_then_roundtrip(client: TestClient) -> None:
     response = client.get("/glossary", params=params, headers=AUTH)
     assert response.status_code == 200
     body = response.json()
+    # key_scope survives the round trip; absent means "every key".
     assert body["terms"] == [
-        {"source": "Creeper", "target": "크리퍼", "origin": "manual"}
+        {
+            "source": "Creeper",
+            "target": "크리퍼",
+            "origin": "manual",
+            "key_scope": [],
+        },
+        {
+            "source": "Wither",
+            "target": "시듦",
+            "origin": "manual",
+            "key_scope": ["effect.*"],
+        },
     ]
 
 
@@ -1203,20 +1290,23 @@ def test_providers_include_openrouter(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize(
-    ("provider_id", "prefix", "login_hint"),
+    ("provider_id", "prefix"),
     [
-        ("claude-code", "claude-code/", "claude login"),
-        ("codex", "codex/", "codex login"),
-        ("gemini-cli", "gemini-cli/", "gemini"),
+        ("claude-code", "claude-code/"),
+        ("codex", "codex/"),
+        ("gemini-cli", "gemini-cli/"),
     ],
 )
 def test_providers_expose_cli_subscriptions(
-    client: TestClient, provider_id: str, prefix: str, login_hint: str
+    client: TestClient, provider_id: str, prefix: str
 ) -> None:
     body = client.get("/providers", headers=AUTH).json()
     entry = next(p for p in body if p["id"] == provider_id)
     assert entry["auth"] == "cli"
-    assert entry["login_hint"] == login_hint
+    # The store is the only thing that knows which command owns the grant on
+    # this machine — Gemini CLI's is `agy` once Antigravity is installed —
+    # so the route must echo it rather than carry its own copy.
+    assert entry["login_hint"] == STORES[provider_id].login_hint
     assert entry["models"]
     assert all(m.startswith(prefix) for m in entry["models"])
     # has_key tracks the CLI login, not an env var, and the two agree.
@@ -1225,9 +1315,15 @@ def test_providers_expose_cli_subscriptions(
 
 @pytest.mark.parametrize("provider_id", ["claude-code", "gemini-cli"])
 def test_cli_providers_without_discovery_use_the_static_catalog(
-    client: TestClient, provider_id: str
+    client: TestClient, provider_id: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """These subscription surfaces publish no model-list endpoint."""
+    # Empty config dirs: a logged-out store, so the listing never reaches
+    # the network and the lineup still comes back.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(tmp_path))
+    for store in STORES.values():
+        store.invalidate()
     response = client.post(
         "/providers/models", json={"provider": provider_id}, headers=AUTH
     )

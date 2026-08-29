@@ -8,6 +8,8 @@ rules into handlers, pipeline, or prompts elsewhere.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import dspy
 
 from ..models import TermRule
@@ -40,6 +42,23 @@ class TranslateEntries(dspy.Signature):
     - Return the same keys as the input; translate values only.
     - Never leave a value untranslated unless it is a proper noun that the
       glossary says to keep.
+    - Consecutive numbered sibling keys (``...tooltip1``/``...tooltip2``,
+      ``...desc.1``/``...desc.2``) are consecutive DISPLAY LINES of one
+      text block, and they always arrive together, in key order, in the
+      same batch. Read the whole run before translating any of its lines.
+      When a line ends mid-sentence and the next line finishes it,
+      translate the run as ONE sentence, then split that sentence back
+      across exactly the same keys at a natural phrase boundary, giving
+      each key roughly the share of the text its source line carried.
+      Never leave a line as a dangling fragment, never repeat the same
+      verb or clause on two lines, never move a clause onto a different
+      key than the position it occupies in the sentence, and never merge
+      the run into one key or omit a key — every key in the run must come
+      back. Lines that are already complete sentences stay independent.
+    - style_directives is BINDING and overrides the style guidance below
+      whenever the two conflict. It carries the run's speech level
+      (말투/register) and term-rendering preference. When it is empty,
+      follow the guidance below unchanged.
     - Korean (ko_kr): natural gamer-facing tone; never append the English
       original in parentheses or brackets; no romanization of items that
       have established Korean names.
@@ -56,12 +75,99 @@ class TranslateEntries(dspy.Signature):
     glossary: str = dspy.InputField(
         desc="binding term rules in 'source = target' form; MUST be followed"
     )
+    style_directives: str = dspy.InputField(
+        desc="binding per-run style requirements (speech level, "
+        "term-rendering preference); overrides general style guidance"
+    )
     entries: dict[str, str] = dspy.InputField(
         desc="key -> source text with protected {{KIND}} tokens"
     )
     translations: dict[str, str] = dspy.OutputField(
         desc="exactly the same keys -> translated text"
     )
+
+
+#: Selectable target speech level (말투). "auto" keeps whatever
+#: per-surface register the compiled instructions already prescribe; the
+#: others force one register across the whole pack.
+SpeechLevel = Literal["auto", "polite", "banmal", "hage"]
+
+#: Selectable preference for terms that have no established
+#: target-language name. "auto" keeps today's split — official names
+#: translated, invented portmanteaus transliterated.
+TermStyle = Literal["auto", "translate", "transliterate"]
+
+#: Unconditional: one speaker's lines drifting between 존댓말 and 반말 is
+#: the defect this rule exists to stop, and it survives frontier models.
+_REGISTER_CONSISTENCY = (
+    "Speech level consistency: pick ONE register per speaker and per "
+    "surface, then hold it for every line of that speaker/surface. Lines "
+    "belonging to one character, quest giver, or dialogue sequence — "
+    "including a single sentence split across numbered sibling keys — MUST "
+    "NOT mix registers; never switch politeness level mid-sentence, "
+    "mid-line, or between one speaker's consecutive lines. System/UI text "
+    "and NPC speech may each take their own register, but each must stay "
+    "internally consistent across the entire pack."
+)
+
+#: Concrete endings per forced register. Korean-specific by nature.
+_KOREAN_SPEECH_LEVELS: dict[str, str] = {
+    "polite": (
+        "Korean speech level: 존댓말 everywhere — statements end -습니다/"
+        "-합니다, instructions end -하세요/-세요. Never drop into 반말, not "
+        "even for NPC chatter or flavor text."
+    ),
+    "banmal": (
+        "Korean speech level: 반말 (해체) everywhere — statements end -아/"
+        "-어/-야/-지/-네, questions end -아?/-어?/-니?, commands end -아/-어/"
+        "-라. Never use -습니다 or -요 forms, not even for UI text."
+    ),
+    "hage": (
+        "Korean speech level: 하게체 throughout — the archaic familiar "
+        "register that suits medieval and high-fantasy packs. Statements "
+        "end -네/-(으)ㄹ세/-데, questions end -(느)ㄴ가?/-나?, commands end "
+        "-게/-시게, suggestions end -세, and the listener is addressed as "
+        "자네. Never mix in -습니다/-요 forms or plain 반말 endings."
+    ),
+}
+
+_TERM_STYLES: dict[str, str] = {
+    "translate": (
+        "Term rendering: when a term has no established target-language "
+        "name and both a meaning translation and a transliteration (음차) "
+        "would read acceptably, prefer translating its meaning into the "
+        "target language. Glossary rules and established official names "
+        "still win, and genuine proper nouns are still not translated."
+    ),
+    "transliterate": (
+        "Term rendering: when a term has no established target-language "
+        "name and both a meaning translation and a transliteration (음차) "
+        "would read acceptably, prefer transliterating the source term "
+        "into the target script. Glossary rules and established official "
+        "names still win, and this never licenses leaving source-script "
+        "text in the output."
+    ),
+}
+
+
+def render_style_directives(
+    target_lang: str,
+    speech_level: SpeechLevel = "auto",
+    term_style: TermStyle = "auto",
+) -> str:
+    """Render the ``style_directives`` value for one run.
+
+    The register-consistency rule always renders. The speech-level block
+    is Korean-specific and renders only for a Korean target; "auto" on
+    either dimension renders nothing extra, so a default run keeps the
+    compiled instructions' own style guidance verbatim.
+    """
+    blocks = [_REGISTER_CONSISTENCY]
+    if speech_level != "auto" and target_lang.startswith("ko"):
+        blocks.append(_KOREAN_SPEECH_LEVELS[speech_level])
+    if term_style != "auto":
+        blocks.append(_TERM_STYLES[term_style])
+    return "\n".join(blocks)
 
 
 class RefineTranslation(dspy.Signature):

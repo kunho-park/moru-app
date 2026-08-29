@@ -130,6 +130,15 @@ interface WizardStore {
   exportOverridesZipPath: string | null;
   exportError: string | null;
 
+  /* W3: export as source text. Its own slice, kept out of the W6 export
+     state above - a source-text export must not unlock the review/export
+     steps, nor overwrite the session's translated-export paths. */
+  sourceExportJobId: string | null;
+  sourceExportState: "idle" | "running" | "done" | "failed";
+  sourceExportZipPath: string | null;
+  sourceExportOverridesZipPath: string | null;
+  sourceExportError: string | null;
+
   /* actions */
   startSession: (path: string, probe: ModpackProbe) => void;
   resumeSession: (sessionId: string) => boolean;
@@ -142,6 +151,8 @@ interface WizardStore {
   startTranslate: () => Promise<void>;
   cancelTranslate: () => Promise<void>;
   startExport: () => Promise<void>;
+  /** W3 source-text export: same engine export job, untranslated values. */
+  startSourceExport: () => Promise<void>;
   appendLog: (level: LogLine["level"], text: string) => void;
   reset: () => void;
 }
@@ -165,9 +176,28 @@ export function selectedScanTotals(state: {
   return { files, entries, chars };
 }
 
+/**
+ * Scan categories still in translation scope, in the engine's param shape:
+ * undefined means "every category", which is what an untouched selection
+ * sends. Shared by the translate run and the source-text export so both
+ * cover exactly the categories picked on W2.
+ */
+export function includedCategories(state: {
+  scanResult: ScanResult | null;
+  excludedCategories: string[];
+}): string[] | undefined {
+  if (state.excludedCategories.length === 0 || state.scanResult === null) {
+    return undefined;
+  }
+  return state.scanResult.categories
+    .map((category) => category.name)
+    .filter((name) => !state.excludedCategories.includes(name));
+}
+
 let closeScanEvents: (() => void) | null = null;
 let closeTranslateEvents: (() => void) | null = null;
 let closeExportEvents: (() => void) | null = null;
+let closeSourceExportEvents: (() => void) | null = null;
 
 const MAX_LOG_LINES = 500;
 const MAX_TICKER = 24;
@@ -202,6 +232,11 @@ const initialJobState = {
   exportZipPath: null,
   exportOverridesZipPath: null,
   exportError: null,
+  sourceExportJobId: null,
+  sourceExportState: "idle" as const,
+  sourceExportZipPath: null,
+  sourceExportOverridesZipPath: null,
+  sourceExportError: null,
 };
 
 export const useWizard = create<WizardStore>((set, get) => ({
@@ -217,6 +252,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
+    closeSourceExportEvents?.();
     set({
       sessionId: crypto.randomUUID(),
       modpackPath: path,
@@ -269,7 +305,8 @@ export const useWizard = create<WizardStore>((set, get) => ({
     if (
       state.scanState === "running" ||
       state.runState === "running" ||
-      state.exportState === "running"
+      state.exportState === "running" ||
+      state.sourceExportState === "running"
     ) {
       return "busy";
     }
@@ -343,6 +380,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
+    closeSourceExportEvents?.();
     set({
       sessionId: record.id,
       modpackPath: record.modpackPath,
@@ -403,6 +441,9 @@ export const useWizard = create<WizardStore>((set, get) => ({
         modpack_path: modpackPath,
         source_locale: sourceLocale,
         target_locale: targetLocale,
+        // The blacklist decides which mods the scan even opens, so it has
+        // to travel with the scan, not just with the translate run.
+        mod_blacklist: useSettings.getState().modBlacklist,
       });
       set({ scanJobId: job.id });
       closeScanEvents = openJobEvents(job.id, (frame) => {
@@ -471,12 +512,8 @@ export const useWizard = create<WizardStore>((set, get) => ({
       use_vanilla_glossary: settings.useVanillaGlossary,
       extract_glossary: settings.extractGlossary,
       glossary_max_terms: settings.glossaryMaxTerms,
-      include_categories:
-        state.excludedCategories.length > 0 && state.scanResult !== null
-          ? state.scanResult.categories
-              .map((c) => c.name)
-              .filter((name) => !state.excludedCategories.includes(name))
-          : undefined,
+      include_categories: includedCategories(state),
+      mod_blacklist: settings.modBlacklist,
       output_dir: settings.outputDir ?? undefined,
     };
 
@@ -718,6 +755,47 @@ export const useWizard = create<WizardStore>((set, get) => ({
     }
   },
 
+  /**
+   * Export the pack as source text (W3). Same engine export job W6 runs,
+   * flagged so the engine settles every entry to its own source string:
+   * no translate job, no model, and no API key is involved, so this works
+   * straight off a scan.
+   */
+  startSourceExport: async () => {
+    const state = get();
+    if (state.modpackPath === null || state.sourceExportState === "running") return;
+    closeSourceExportEvents?.();
+    set({ sourceExportState: "running", sourceExportError: null });
+    try {
+      const job = await api.startExport({
+        source_text: true,
+        modpack_path: state.modpackPath,
+        source_locale: state.sourceLocale,
+        target_locale: state.targetLocale,
+        include_categories: includedCategories(state),
+        mod_blacklist: useSettings.getState().modBlacklist,
+        output_dir: useSettings.getState().outputDir ?? undefined,
+      });
+      set({ sourceExportJobId: job.id });
+      closeSourceExportEvents = openJobEvents(job.id, (frame) => {
+        if (frame.type === "done") {
+          set({
+            sourceExportState: "done",
+            sourceExportZipPath: frame.zip_path ?? null,
+            sourceExportOverridesZipPath: frame.overrides_zip_path ?? null,
+          });
+        } else if (frame.type === "failed" || frame.type === "cancelled") {
+          set({
+            sourceExportState: "failed",
+            sourceExportError: frame.error ?? "source export failed",
+          });
+        }
+      });
+    } catch (error) {
+      set({ sourceExportState: "failed", sourceExportError: String(error) });
+    }
+  },
+
   appendLog: (level, text) =>
     set((prev) => ({
       log: [...prev.log.slice(-MAX_LOG_LINES + 1), { ts: Date.now(), level, text }],
@@ -727,6 +805,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
+    closeSourceExportEvents?.();
     moru.setBusy(false);
     set({
       sessionId: null,

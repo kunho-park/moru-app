@@ -98,6 +98,17 @@
     "shareTitle": "완료 후 자동으로 커뮤니티에 공유",
     "shareSub": "Discord 로그인 필요 · 준비 중"
   },
+  "sourceExport": {
+    "badge": "번역 없이",
+    "title": "원문으로 내보내기",
+    "sub": "API 연결 없이 지금 바로 · 6단계 내보내기와 파일 구조가 완전히 같고, 값만 원문 그대로예요 — moru.gg에 공유된 팩과 나란히 놓고 검수하기 좋아요",
+    "action": "원문 내보내기",
+    "creating": "만드는 중…",
+    "savedTo": "저장 위치",
+    "overrides": "덮어쓰기 파일",
+    "failed": "원문 내보내기에 실패했어요",
+    "needPack": "먼저 모드팩을 선택해 주세요"
+  },
   "footer": {
     "tokens": "{{n}} 토큰",
     "estimated": "예상",

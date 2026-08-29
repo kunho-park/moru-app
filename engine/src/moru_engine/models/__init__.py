@@ -6,6 +6,7 @@ from .glossary import (
     Glossary,
     ProperNounRule,
     TermRule,
+    key_scope_covers,
 )
 from .translation import LanguageFilePair
 from .validation import (
@@ -23,6 +24,7 @@ __all__ = [
     "Glossary",
     "ProperNounRule",
     "TermRule",
+    "key_scope_covers",
     # Translation
     "LanguageFilePair",
     # Validation

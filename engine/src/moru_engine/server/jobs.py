@@ -28,6 +28,7 @@ from pydantic import ValidationError
 from .. import __version__
 from ..handlers.base import create_default_registry
 from ..output import (
+    BILINGUAL_DIRNAME,
     OVERRIDES_DIRNAME,
     RESOURCEPACK_DIRNAME,
     create_zip_from_directory,
@@ -44,11 +45,14 @@ from ..scanner.pack_identity import PackIdentity, detect_pack_identity
 from . import upload
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
     from ..graph import TranslationGraph
     from ..models import LanguageFilePair
     from ..pipeline import TranslationPipeline
     from .sessions import SessionStore
+
+    #: Deferred producer of the PipelineResult an export job archives.
+    ExportResultSource = Callable[[], Awaitable[PipelineResult]]
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +146,24 @@ def scan_result_payload(enriched: EnrichedScanResult) -> dict[str, Any]:
         # Launcher-metadata identity for upload prefill / CurseForge linking;
         # always present (folder-name fallback), null only for legacy records.
         "identity": asdict(enriched.identity) if enriched.identity else None,
+        # Mods the blacklist kept out of this scan, so the scan screen can
+        # show what was dropped and offer to put one back, and the source
+        # strings enabled resource packs replaced, per pack.
+        "excluded_mods": [asdict(mod) for mod in scan.excluded_mods],
+        "source_overrides": [asdict(o) for o in scan.source_overrides],
+        # Mods whose display text lives in compiled code, where no lang
+        # file reaches it. Reported so an untranslated string the user
+        # sees in game is attributable instead of looking like our bug.
+        "hardcoded_mods": [asdict(mod) for mod in scan.hardcoded_mods],
     }
+
+
+def _mod_blacklist(params: Mapping[str, Any]) -> list[str]:
+    """``params.mod_blacklist`` as a clean list of ids (absent = empty)."""
+    raw = params.get("mod_blacklist")
+    if not isinstance(raw, list):
+        return []
+    return [entry.strip() for entry in raw if isinstance(entry, str) and entry.strip()]
 
 
 #: Event types that end a job's stream; the manager emits exactly one of
@@ -236,13 +257,19 @@ def _export_stem(result: PipelineResult, identity: PackIdentity) -> str:
     """Filename stem for the export zips.
 
     The resource-pack UI titles a zip pack by its filename, so
-    "All the Mods 10 2.32 한국어 (moru)" beats a job UUID.
+    "All the Mods 10 2.32 한국어 (moru)" beats a job UUID. A source-text
+    export says so in its name: it carries the translated pack's exact
+    layout with the untranslated strings, so the two archives must never
+    collide in the exports directory.
     """
-    locale = result.config.target_locale
+    config = result.config
+    locale = config.target_locale
     parts = [
-        identity.name or result.config.modpack_path.name,
+        identity.name or config.modpack_path.name,
         identity.version,
-        "한국어" if locale == "ko_kr" else locale,
+        "원문"
+        if config.source_text_only
+        else ("한국어" if locale == "ko_kr" else locale),
         "(moru)",
     ]
     stem = _FILENAME_UNSAFE_RE.sub(" ", " ".join(p for p in parts if p))
@@ -337,10 +364,9 @@ class JobManager:
             if config.glossary_store_dir is None:
                 config.glossary_store_dir = self._glossary_store_dir
             self._attach_scan_payload(record)
-            runner = self._run_translate(record, config)
+            runner = self._run_pipeline(record, config)
         elif job_type is JobType.EXPORT:
-            source = self._resolve_translate_source(record.params, "export")
-            runner = self._run_export(record, source)
+            runner = self._run_export(record, self._export_result_source(record))
         else:  # JobType.UPLOAD
             if not record.params.get("modpack_name"):
                 raise JobParamsError("params.modpack_name is required")
@@ -424,6 +450,10 @@ class JobManager:
                 str(modpack_path),
                 str(params.get("source_locale", "en_us")),
                 str(params.get("target_locale", "ko_kr")),
+                # The blacklist changes which mods the scan even looks at,
+                # so editing it has to miss the cache — otherwise the scan
+                # screen keeps replaying the counts from the old list.
+                ",".join(sorted(_mod_blacklist(params))),
                 self._scan_tree_signature(modpack_path),
             )
         )
@@ -485,6 +515,35 @@ class JobManager:
                 f"{purpose} requires a completed translate job"
             )
         return source
+
+    def _export_result_source(self, record: JobRecord) -> ExportResultSource:
+        """Where an export job's entries come from, validated up front.
+
+        Two entry points, one archive path (``_run_export``):
+
+        - W6: a completed (or user-cancelled) translate job, whose
+          review-screen edits are folded back into its output trees.
+        - W3 (``params.source_text``): a source-text run over the scanned
+          modpack. It drives the very same pipeline and output generator,
+          only with every entry settled to its own source text, so it
+          needs neither a translate job nor an API key.
+
+        Validation happens here rather than in the runner so a bad request
+        fails ``POST /jobs`` with 404/409/422 instead of starting a job
+        that dies immediately.
+        """
+        params = record.params
+        if params.get("source_text"):
+            self._require_modpack_path(params)
+            try:
+                config = PipelineConfig(**{**params, "source_text_only": True})
+            except ValidationError as exc:
+                raise JobParamsError(
+                    f"invalid source-text export params: {exc}"
+                ) from exc
+            return lambda: self._run_pipeline(record, config)
+        source = self._resolve_translate_source(params, "export")
+        return lambda: self._apply_review_edits(source, "export")
 
     # -- cancellation ----------------------------------------------------------
 
@@ -636,6 +695,7 @@ class JobManager:
             source_locale=str(params.get("source_locale", "en_us")),
             target_locale=str(params.get("target_locale", "ko_kr")),
             progress_callback=progress,
+            mod_blacklist=_mod_blacklist(params),
         )
 
         # Launcher metadata (CurseForge/Modrinth/Prism files) tells us which
@@ -701,9 +761,11 @@ class JobManager:
         self._scan_cache[cache_key] = enriched
         return enriched
 
-    async def _run_translate(
+    async def _run_pipeline(
         self, record: JobRecord, config: PipelineConfig
     ) -> PipelineResult:
+        """Run one pipeline for this record: a translate job, or the
+        source-text run behind a W3 export job."""
         def on_event(event: str, payload: dict[str, object]) -> None:
             if event == "done":
                 # The pipeline's own "done" {stats} would collide with the
@@ -749,7 +811,7 @@ class JobManager:
         return result
 
     async def _run_export(
-        self, record: JobRecord, source: JobRecord
+        self, record: JobRecord, resolve_result: ExportResultSource
     ) -> dict[str, Any]:
         """Build the installable archives from the generated output trees.
 
@@ -758,8 +820,13 @@ class JobManager:
         ``<name>_overrides.zip`` — files to merge over the modpack root
         (kubejs/, config/, ftbquests/ …). Either is null when the run
         produced no files for that tree.
+
+        The archived entries come from ``resolve_result`` — a translate
+        job's reviewed result (W6) or a source-text run (W3). Everything
+        below is identical for both, which is what makes a source-text
+        export byte-for-byte structural with a translated one.
         """
-        result = await self._apply_review_edits(source, "export")
+        result = await resolve_result()
         root = output_root(result.config)
         pack_dir = root / RESOURCEPACK_DIRNAME
         overrides_dir = root / OVERRIDES_DIRNAME
@@ -813,11 +880,16 @@ class JobManager:
         """Publish a completed translate job's pack to the moru web platform.
 
         Sequence (contracts/web-api.yaml): build one reviewed zip per
-        output tree (resource pack / overrides), request presigned upload
-        slots, PUT each archive, then register the pack. ``api_token`` is
-        forwarded as a Bearer header when present; without it the upload
-        is anonymous (desktop-only - the X-Moru-Client marker is what the
-        web platform accepts in place of an account).
+        output tree, request presigned upload slots, PUT each archive, then
+        register the pack. There are up to four trees — resource pack and
+        overrides, each in the plain and the bilingual display-name variant
+        — and the whole sequence below is keyed on the archive kind, so the
+        two extra slots flow through untouched. Empty trees are skipped, so
+        a run that produced no bilingual variant uploads exactly what it
+        always did. ``api_token`` is forwarded as a Bearer header when
+        present; without it the upload is anonymous (desktop-only - the
+        X-Moru-Client marker is what the web platform accepts in place of
+        an account).
         """
         params = record.params
         web_url = str(params.get("web_url") or "https://moru.gg").rstrip("/")
@@ -825,9 +897,12 @@ class JobManager:
 
         result = await self._apply_review_edits(source, "pack")
         root = output_root(result.config)
+        bilingual_root = root / BILINGUAL_DIRNAME
         trees = {
             "resource_pack": root / RESOURCEPACK_DIRNAME,
             "overrides": root / OVERRIDES_DIRNAME,
+            "resource_pack_bilingual": bilingual_root / RESOURCEPACK_DIRNAME,
+            "overrides_bilingual": bilingual_root / OVERRIDES_DIRNAME,
         }
 
         staging = Path(tempfile.mkdtemp(prefix="moru-upload-"))

@@ -15,7 +15,16 @@ import pytest
 
 from moru_engine.pipeline import PipelineConfig, PipelineResult, PipelineStats
 from moru_engine.scanner import ScanResult
-from moru_engine.scanner.pack_identity import PackIdentity, detect_pack_identity
+from moru_engine.scanner.pack_identity import (
+    PackIdentity,
+    VersionRange,
+    declare_version_range,
+    detect_pack_identity,
+    normalize_mc_version,
+    pack_version_key,
+    parse_version_range,
+    same_pack_version,
+)
 from moru_engine.server.jobs import (
     EnrichedScanResult,
     JobManager,
@@ -448,3 +457,98 @@ def test_upload_rejects_invalid_curseforge_id() -> None:
             manager.create_job(
                 "upload", {"modpack_name": "X", "curseforge_id": bad}
             )
+
+
+# -- version compatibility -----------------------------------------------------
+
+
+def test_dotted_releases_are_orderable() -> None:
+    assert pack_version_key("4.1.2") == (4, 1, 2)
+    # Cleaned exactly like a detected version: pack-name prefix and the
+    # display-only "v" marker are not part of the release.
+    assert pack_version_key("ATM10-2.32") == (2, 32)
+    assert pack_version_key("v4.2") == (4, 2)
+    assert pack_version_key("4.01.2") == (4, 1, 2)
+
+
+def test_versions_that_are_not_releases_have_no_order() -> None:
+    """Real modpack versions are not semver, and no ordering can be invented
+    for a non-numeric tail - is "3.2b" before or after "3.2"?"""
+    for value in ("v6.5.4hotfix", "1.20.1-3.2b", "Release Candidate", "", None):
+        assert pack_version_key(value) is None
+
+
+def test_range_covers_a_minor_bump_but_not_the_next_line() -> None:
+    declared = VersionRange(min="4.1.0", max="4.2.0")
+    assert declared.contains("4.1.2")
+    assert declared.contains("4.1.0")
+    assert declared.contains("4.2.0")
+    assert not declared.contains("4.3")
+    assert not declared.contains("4.0.9")
+
+
+def test_range_cannot_be_evaluated_for_an_unorderable_version() -> None:
+    """Only an exact endpoint match counts, so a pack is never offered on a
+    guess about what "hotfix" means."""
+    declared = VersionRange(min="4.1.0", max="4.2.0")
+    assert not declared.contains("v4.1.5hotfix")
+
+    unorderable = VersionRange(min="6.5.4hotfix", max="6.6.0hotfix")
+    assert unorderable.contains("v6.5.4hotfix")
+    assert unorderable.contains("6.6.0hotfix")
+    assert not unorderable.contains("6.5.5hotfix")
+
+
+def test_inverted_range_contains_nothing() -> None:
+    assert not VersionRange(min="4.2.0", max="4.1.0").contains("4.1.5")
+    assert not VersionRange(min="4.2.0", max="4.1.0").contains("4.2.0")
+
+
+def test_declared_range_defaults_to_the_built_version() -> None:
+    """The default claims nothing beyond today's exact-version behaviour."""
+    assert declare_version_range("4.1.2") == VersionRange(min="4.1.2", max="4.1.2")
+    assert declare_version_range("v6.5.4hotfix") == VersionRange(
+        min="6.5.4hotfix", max="6.5.4hotfix"
+    )
+    # Nothing to anchor a range to.
+    assert declare_version_range(None, "4.2.0") is None
+
+
+def test_declared_range_widens_only_with_a_bound_that_holds_up() -> None:
+    assert declare_version_range("4.1.2", "4.2.0") == VersionRange(
+        min="4.1.2", max="4.2.0"
+    )
+    # Unorderable, below the built version, or unorderable on the built side:
+    # dropped rather than published as a claim nobody can check.
+    for bad in ("nonsense", "4.0.0", "4.2.0b", ""):
+        assert declare_version_range("4.1.2", bad) == VersionRange(
+            min="4.1.2", max="4.1.2"
+        )
+    assert declare_version_range("6.5.4hotfix", "6.6.0") == VersionRange(
+        min="6.5.4hotfix", max="6.5.4hotfix"
+    )
+
+
+def test_version_range_round_trips_through_the_wire_shape() -> None:
+    assert parse_version_range({"min": "v4.1.2", "max": "4.2"}) == VersionRange(
+        min="4.1.2", max="4.2"
+    )
+    # A pack published before the field existed declares nothing.
+    for absent in (None, {}, {"min": "4.1.2"}, {"min": "", "max": "4.2"}, "4.1.2"):
+        assert parse_version_range(absent) is None
+
+
+def test_same_pack_version_needs_both_sides_known() -> None:
+    assert same_pack_version("4.1.2", "v4.1.2")
+    assert same_pack_version("4.01.2", "4.1.2")
+    assert same_pack_version("6.5.4hotfix", "v6.5.4hotfix")
+    assert not same_pack_version("4.1.2", "4.1")
+    assert not same_pack_version(None, None)
+    assert not same_pack_version("4.1.2", None)
+
+
+def test_minecraft_versions_compare_by_equality_only() -> None:
+    assert normalize_mc_version(" 1.20.1 ") == "1.20.1"
+    assert normalize_mc_version("23W45A") == "23w45a"
+    assert normalize_mc_version(None) is None
+    assert normalize_mc_version("  ") is None

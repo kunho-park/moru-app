@@ -33,7 +33,16 @@ class FakeTranslator:
         self.calls = 0
         self.break_predicate = break_predicate
 
-    async def acall(self, *, source_lang, target_lang, context, glossary, entries):
+    async def acall(
+        self,
+        *,
+        source_lang,
+        target_lang,
+        context,
+        glossary,
+        style_directives="",
+        entries,
+    ):
         self.calls += 1
         translations: dict[str, str] = {}
         for key, text in entries.items():
@@ -70,7 +79,16 @@ class PartiallyBlockingTranslator(FakeTranslator):
         super().__init__()
         self.blocked = asyncio.Event()
 
-    async def acall(self, *, source_lang, target_lang, context, glossary, entries):
+    async def acall(
+        self,
+        *,
+        source_lang,
+        target_lang,
+        context,
+        glossary,
+        style_directives="",
+        entries,
+    ):
         self.calls += 1
         if self.calls > 2:
             self.blocked.set()
@@ -267,13 +285,23 @@ class GlossaryCapturingTranslator(FakeTranslator):
         super().__init__()
         self.glossaries: list[str] = []
 
-    async def acall(self, *, source_lang, target_lang, context, glossary, entries):
+    async def acall(
+        self,
+        *,
+        source_lang,
+        target_lang,
+        context,
+        glossary,
+        style_directives="",
+        entries,
+    ):
         self.glossaries.append(glossary)
         return await super().acall(
             source_lang=source_lang,
             target_lang=target_lang,
             context=context,
             glossary=glossary,
+            style_directives=style_directives,
             entries=entries,
         )
 
@@ -316,6 +344,42 @@ async def test_use_vanilla_glossary_false_drops_only_vanilla_rows(
     assert "화로" not in joined  # vanilla rows gated off by the toggle
     assert "위더" in joined  # manual rows still merge
 
+
+@pytest.mark.asyncio
+async def test_key_scoped_store_row_reaches_only_matching_keys(
+    modpack: Path, tmp_path: Path
+) -> None:
+    # The reported defect, through the whole chain (store row -> TermRule ->
+    # GlossaryFilter -> to_context_string -> the prompt the translator gets).
+    # The fixture's only "Wither" is entity.minecraft.wither, untranslated so
+    # it really gets batched, and the pack has no effect.* key at all: the
+    # effect-scoped row must never render, the boss reading must.
+    config = _config(modpack, tmp_path)
+    _seed_glossary_store(
+        tmp_path / "glossaries",
+        [
+            {
+                "source": "Wither",
+                "target": "시듦",
+                "origin": "manual",
+                "key_scope": ["effect.*"],
+            },
+            {"source": "Wither", "target": "위더", "origin": "manual"},
+        ],
+    )
+    fake = GlossaryCapturingTranslator()
+    result = await _run(config, fake)
+    assert result.stats.failed_entries == 0
+    joined = "\n".join(fake.glossaries)
+    # The entity key gets the default reading, rendered in full...
+    assert (
+        "- **Wither** → **위더** (스타일: 용어 고정) — user glossary (manual)"
+        in joined
+    )
+    # ...and the status-effect reading reaches no prompt at all, neither as
+    # a target nor as a scope annotation.
+    assert "시듦" not in joined
+    assert "적용 키" not in joined
 
 @pytest.mark.asyncio
 async def test_include_categories_limits_translation(
@@ -397,7 +461,9 @@ def test_file_workers_defaults_to_max_concurrent(tmp_path: Path) -> None:
     pipeline = TranslationPipeline(config, lm=dspy.utils.DummyLM([]))
     try:
         assert pipeline._file_semaphore._value == 7
-        assert pipeline._llm_semaphore._value == 7
+        # Hosted providers admit max_concurrent from the start; only a
+        # locally hosted runtime begins below it.
+        assert pipeline._llm_limiter.limit == 7
     finally:
         pipeline.close()
 
@@ -471,7 +537,16 @@ async def test_retranslate_entry_fixes_failed_entry(
 class InventingTranslator:
     """Fake that invents a placeholder token - always a roundtrip failure."""
 
-    async def acall(self, *, source_lang, target_lang, context, glossary, entries):
+    async def acall(
+        self,
+        *,
+        source_lang,
+        target_lang,
+        context,
+        glossary,
+        style_directives="",
+        entries,
+    ):
         return dspy.Prediction(
             translations={k: f"KO {v} {{{{ARG99}}}}" for k, v in entries.items()},
             failed={},

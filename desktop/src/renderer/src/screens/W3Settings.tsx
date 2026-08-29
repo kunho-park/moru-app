@@ -369,6 +369,21 @@ export function W3Settings() {
       ? formatUsd(costUsd(usage, recommendedPrice))
       : null;
 
+  /* Export as source text: the same engine export job W6 runs, with the
+     untranslated strings as values. Reachable with no provider configured,
+     so it is deliberately independent of `canStart`. */
+  const sourceExportBusy = wizard.sourceExportState === "running";
+  const sourceExportDone =
+    wizard.sourceExportState === "done" && wizard.sourceExportZipPath !== null;
+  function handleSourceExport(): void {
+    if (sourceExportBusy) return;
+    if (sourceExportDone && wizard.sourceExportZipPath !== null) {
+      void moru.showItemInFolder(wizard.sourceExportZipPath);
+    } else {
+      void wizard.startSourceExport();
+    }
+  }
+
   const numberField = (
     key: keyof typeof ADVANCED_DEFAULTS,
     label: string,
@@ -1050,6 +1065,81 @@ export function W3Settings() {
           title={t("w3.options.shareTitle")}
           sub={t("w3.options.shareSub")}
         />
+      </div>
+
+      {/* Export as source text — no API connection, no translation. The
+          engine runs the W6 export job with every entry settled to its own
+          source string, so the archives line up file-for-file and
+          key-for-key against a translated pack shared on moru.gg. */}
+      <div className="mb-8">
+        <div className="flex items-center gap-[14px] border border-line2 bg-raised px-[18px] py-4">
+          <span className="bg-line2 px-2 py-[3px] font-mono text-[10px] font-bold uppercase tracking-[0.06em] text-text2">
+            {t("w3.sourceExport.badge")}
+          </span>
+          <div className="flex-1">
+            <div className="mb-[2px] text-[13px] font-bold text-text">
+              {t("w3.sourceExport.title")}
+            </div>
+            <div className="font-mono text-[11px] text-text2">
+              {t("w3.sourceExport.sub")}
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={sourceExportBusy || wizard.modpackPath === null}
+            title={wizard.modpackPath === null ? t("w3.sourceExport.needPack") : undefined}
+            onClick={handleSourceExport}
+            className="flex shrink-0 cursor-pointer items-center gap-[6px] bg-line2 px-[14px] py-[7px] text-[12px] font-semibold text-text enabled:hover:bg-edge disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {sourceExportBusy ? (
+              <>
+                <span className="inline-block h-3 w-3 animate-pxspin border-2 border-text border-t-transparent" />
+                {t("w3.sourceExport.creating")}
+              </>
+            ) : sourceExportDone ? (
+              <>
+                <svg width="12" height="12" viewBox="0 0 12 12" shapeRendering="crispEdges" fill="currentColor">
+                  <rect x="1" y="2" width="4" height="2" />
+                  <rect x="1" y="4" width="10" height="6" />
+                  <rect x="5" y="3" width="6" height="1" />
+                </svg>
+                {t("common.action.openFolder")}
+              </>
+            ) : wizard.sourceExportState === "failed" ? (
+              t("common.action.retry")
+            ) : (
+              <>
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M6 1 V8 M3 5 L6 8 L9 5" />
+                  <path d="M1 10 H11" />
+                </svg>
+                {t("w3.sourceExport.action")}
+              </>
+            )}
+          </button>
+        </div>
+        {sourceExportDone && (
+          <div className="mt-[6px] border border-accent-lo bg-tint px-3 py-2 font-mono text-[11px] leading-[1.5]">
+            <div>
+              <span className="text-text3">{t("w3.sourceExport.savedTo")} </span>
+              <span className="break-all text-accent">{wizard.sourceExportZipPath}</span>
+            </div>
+            {wizard.sourceExportOverridesZipPath !== null && (
+              <div>
+                <span className="text-text3">{t("w3.sourceExport.overrides")} </span>
+                <span className="break-all text-accent">
+                  {wizard.sourceExportOverridesZipPath}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+        {wizard.sourceExportState === "failed" && (
+          <div className="mt-[6px] border border-red/30 bg-red/5 px-3 py-2 text-[11px] leading-[1.5]">
+            <span className="font-semibold text-red">{t("w3.sourceExport.failed")}</span>
+            <span className="text-text2"> — {wizard.sourceExportError}</span>
+          </div>
+        )}
       </div>
 
       {/* Wizard footer */}

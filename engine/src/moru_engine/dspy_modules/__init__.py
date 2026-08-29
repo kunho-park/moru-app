@@ -8,7 +8,10 @@ from .signatures import (
     CurateGlossaryTerms,
     JudgeTranslationQuality,
     RefineTranslation,
+    SpeechLevel,
+    TermStyle,
     TranslateEntries,
+    render_style_directives,
 )
 from .translator import BatchTranslator, GlossaryExtractor
 
@@ -18,10 +21,13 @@ __all__ = [
     "GlossaryExtractor",
     "JudgeTranslationQuality",
     "RefineTranslation",
+    "SpeechLevel",
+    "TermStyle",
     "TranslateEntries",
     "artifact_path",
     "build_lm",
     "configure_engine",
     "load_translator",
+    "render_style_directives",
     "resolve_tier",
 ]

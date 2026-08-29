@@ -36,6 +36,7 @@
     "cliNeedsLogin": "CLI login needed",
     "cliConnectedDetail": "Connected as {{account}}. Runs on your existing subscription — no API key needed.",
     "cliLoginDetail": "Run `{{cmd}}` in a terminal, then re-check below.",
+    "cliBlockedDetail": "Signed in, but not usable yet: {{reason}}",
     "cliRecheck": "Re-check"
   },
   "account": {

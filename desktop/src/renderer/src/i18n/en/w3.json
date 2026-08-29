@@ -98,6 +98,17 @@
     "shareTitle": "Auto-share with the community when done",
     "shareSub": "Discord sign-in required · coming soon"
   },
+  "sourceExport": {
+    "badge": "No translation",
+    "title": "Export as source text",
+    "sub": "Right now, with no API connection · identical file structure to the step-6 export, with the untranslated source as the values — line it up next to a pack shared on moru.gg to review it",
+    "action": "Export source text",
+    "creating": "Building…",
+    "savedTo": "Saved to",
+    "overrides": "Overrides",
+    "failed": "Source-text export failed",
+    "needPack": "Pick a modpack first"
+  },
   "footer": {
     "tokens": "{{n}} tokens",
     "estimated": "est.",

@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
+import tomllib
 import zipfile
+from collections import Counter
 from dataclasses import dataclass, field
 from glob import escape as glob_escape
 from glob import iglob
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..handlers.base import create_default_registry
 from ..models import LanguageFilePair, ScanProgressCallback
 from ..parsers import BaseParser
+from . import resource_overrides
+from .class_strings import HardcodedMod, HardcodedString, find_hardcoded_strings
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +53,155 @@ PACK_ROOTS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: The blacklist matches on the mod id a JAR *declares* in its loader
+#: metadata: that is the identifier the game itself uses — it namespaces
+#: the mod's assets and therefore every translation key it owns
+#: ("item.jade.…") — and it is fixed for the life of the mod. JAR file
+#: names and display names are not: the same build ships as
+#: "Jade-1.20.1-forge-11.6.1.jar" or "jade_1.20.1.jar" depending on the
+#: loader and the launcher, and :meth:`ModpackScanner._clean_mod_name`
+#: reduces those two to different strings ("Jade" vs "jade").
+#:
+#: Non-alphanumerics are dropped before comparing ids, so a user typing a
+#: mod's display name ("Entity Culling", "Modern-Fix") still matches its
+#: declared id ("entityculling", "modernfix"). Ids that legitimately
+#: contain "_" ("archers_expansion") normalize on both sides and stay
+#: equal, so the relaxation cannot make two real ids collide.
+_ID_NOISE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_mod_id(text: str) -> str:
+    """Comparison form of a mod id or blacklist entry."""
+    return _ID_NOISE_RE.sub("", text.strip().lower())
+
+
+def _json_entry(zf: zipfile.ZipFile, name: str) -> object:
+    """Parse a JSON JAR entry; any problem means "not this format"."""
+    try:
+        return json.loads(zf.read(name).decode("utf-8-sig", errors="replace"))
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+        return None
+
+
+def _toml_entry(zf: zipfile.ZipFile, name: str) -> dict[str, object]:
+    """Parse a TOML JAR entry; any problem means "not this format"."""
+    try:
+        return tomllib.loads(zf.read(name).decode("utf-8-sig", errors="replace"))
+    except (KeyError, OSError, ValueError, tomllib.TOMLDecodeError, zipfile.BadZipFile):
+        return {}
+
+
+def declared_mod_ids(zf: zipfile.ZipFile) -> set[str]:
+    """Mod ids a JAR declares in its loader metadata.
+
+    Empty for a JAR carrying none (a bare asset-only JAR, or metadata this
+    tolerant reader cannot make sense of); the caller falls back to the
+    asset namespaces the scanner already keys files by.
+    """
+    names = set(zf.namelist())
+    ids: set[str] = set()
+
+    fabric = _json_entry(zf, "fabric.mod.json") if "fabric.mod.json" in names else None
+    if isinstance(fabric, dict) and isinstance(fabric.get("id"), str):
+        ids.add(fabric["id"])
+
+    quilt = _json_entry(zf, "quilt.mod.json") if "quilt.mod.json" in names else None
+    if isinstance(quilt, dict):
+        loader = quilt.get("quilt_loader")
+        if isinstance(loader, dict) and isinstance(loader.get("id"), str):
+            ids.add(loader["id"])
+
+    for entry in ("META-INF/mods.toml", "META-INF/neoforge.mods.toml"):
+        if entry not in names:
+            continue
+        data = _toml_entry(zf, entry)
+        # Forge/NeoForge declare a [[mods]] array; the flat form appears in
+        # hand-written and generated single-mod JARs.
+        if isinstance(data.get("modId"), str):
+            ids.add(str(data["modId"]))
+        mods = data.get("mods")
+        if isinstance(mods, list):
+            for mod in mods:
+                if isinstance(mod, dict) and isinstance(mod.get("modId"), str):
+                    ids.add(mod["modId"])
+
+    legacy = _json_entry(zf, "mcmod.info") if "mcmod.info" in names else None
+    if isinstance(legacy, list):
+        for mod in legacy:
+            if isinstance(mod, dict) and isinstance(mod.get("modid"), str):
+                ids.add(mod["modid"])
+
+    return {mod_id for mod_id in ids if mod_id.strip()}
+
+
+def asset_namespaces(zf: zipfile.ZipFile) -> set[str]:
+    """Top-level ``assets/<namespace>`` names present in a JAR."""
+    found: set[str] = set()
+    for entry in zf.namelist():
+        parts = entry.replace("\\", "/").split("/")
+        if len(parts) > 2 and parts[0] == "assets" and parts[1]:
+            found.add(parts[1])
+    return found
+
+
+#: Cache-key form of a JAR: size and mtime identify the exact bytes
+#: without hashing megabytes, the same trade every build system makes.
+def _jar_stamp(jar_path: str) -> str:
+    try:
+        stat = os.stat(jar_path)
+    except OSError:
+        return ""
+    return f"{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _load_hardcoded_cache(cache: Path, stamp: str) -> HardcodedMod | None:
+    """A previous verdict for this exact JAR, or None to rescan."""
+    try:
+        record = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("stamp") != stamp:
+        return None
+    raw = record.get("strings")
+    if not isinstance(raw, list):
+        return None
+    try:
+        strings = [
+            HardcodedString(
+                text=item["text"], class_name=item["class_name"], kind=item["kind"]
+            )
+            for item in raw
+        ]
+    except (TypeError, KeyError):
+        return None
+    return HardcodedMod(
+        mod_id=str(record.get("mod_id", "")),
+        jar_name=str(record.get("jar_name", "")),
+        strings=strings,
+    )
+
+
+def _store_hardcoded_cache(
+    cache: Path, stamp: str, mod_id: str, jar_name: str, finding: HardcodedMod | None
+) -> None:
+    """Memoize the verdict, including "nothing found" — the clean result
+    is the common one and is exactly what a rescan should not redo."""
+    record = {
+        "stamp": stamp,
+        "mod_id": finding.mod_id if finding else mod_id,
+        "jar_name": jar_name,
+        "strings": [
+            {"text": s.text, "class_name": s.class_name, "kind": s.kind}
+            for s in (finding.strings if finding else ())
+        ],
+    }
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(record), encoding="utf-8")
+    except OSError as exc:
+        logger.debug("Could not cache hardcoded-text verdict for %s: %s", jar_name, exc)
+
+
 @dataclass
 class TranslationFile:
     """Information about a translation file."""
@@ -55,6 +213,23 @@ class TranslationFile:
     lang_type: str = "source"  # source, target, other
     jar_name: str | None = None
     category: str = ""
+
+
+@dataclass
+class ExcludedMod:
+    """One mod JAR left out of the scan by the mod blacklist."""
+
+    #: The blacklisted identifier this JAR matched.
+    mod_id: str
+    jar_name: str
+
+
+@dataclass
+class SourceOverride:
+    """Per-pack tally of source strings an enabled resource pack replaced."""
+
+    pack: str
+    keys: int
 
 
 @dataclass
@@ -72,6 +247,21 @@ class ScanResult:
 
     # Every discovered translation file, including unpaired ones
     translation_files: list[TranslationFile] = field(default_factory=list)
+
+    # Mod JARs the blacklist kept out: never extracted, so their entries
+    # are absent from every count above. Reported so the scan screen can
+    # show what was dropped and let the user put a mod back.
+    excluded_mods: list[ExcludedMod] = field(default_factory=list)
+
+    # Source strings replaced by the resource packs options.txt enables,
+    # tallied per pack.
+    source_overrides: list[SourceOverride] = field(default_factory=list)
+
+    # Mods that build player-facing text in Java instead of a lang file.
+    # No language file — ours, the pack's, or a hand translation — can
+    # reach these strings, so they are reported rather than silently
+    # left in English for the user to mistake for a moru failure.
+    hardcoded_mods: list[HardcodedMod] = field(default_factory=list)
 
     # Statistics
     total_source_files: int = 0
@@ -97,6 +287,7 @@ class ModpackScanner:
         source_locale: str = "en_us",
         target_locale: str = "ko_kr",
         progress_callback: ScanProgressCallback | None = None,
+        mod_blacklist: Iterable[str] | None = None,
     ) -> None:
         """Initialize the scanner.
 
@@ -104,18 +295,24 @@ class ModpackScanner:
             source_locale: Source language locale code.
             target_locale: Target language locale code.
             progress_callback: Optional callback for progress updates.
+            mod_blacklist: Mod ids whose JARs are left out of the scan.
+                None or empty scans everything, exactly as before.
         """
         self.source_locale = source_locale.lower()
         self.target_locale = target_locale.lower()
         self.progress_callback = progress_callback
+        self.mod_blacklist = frozenset(
+            normalize_mod_id(entry) for entry in mod_blacklist or () if entry.strip()
+        )
         self.supported_extensions = BaseParser.get_supported_extensions()
         self.handler_registry = create_default_registry()
         self.max_scan_files = 1000000  # Safety limit to prevent OOM
 
         logger.info(
-            "Initialized scanner: %s -> %s",
+            "Initialized scanner: %s -> %s (%d blacklisted mods)",
             self.source_locale,
             self.target_locale,
+            len(self.mod_blacklist),
         )
 
     async def scan(self, modpack_path: Path) -> ScanResult:
@@ -141,59 +338,67 @@ class ModpackScanner:
 
         # Scan every known translation location in a fixed pass order
         self._report_progress(
-            "ZIP 파일 추출 중...", 0, 7, "리소스팩 ZIP을 추출하고 있습니다..."
+            "ZIP 파일 추출 중...", 0, 8, "리소스팩 ZIP을 추출하고 있습니다..."
         )
         await self._extract_resource_pack_zips(modpack_path)
 
         self._report_progress(
-            "Config 파일 스캔 중...", 1, 7, "config 폴더를 스캔하고 있습니다..."
+            "Config 파일 스캔 중...", 1, 8, "config 폴더를 스캔하고 있습니다..."
         )
         await self._load_config_files(modpack_path, result)
 
         self._report_progress(
             "The Vault 퀘스트 스캔 중...",
             1,
-            7,
+            8,
             "The Vault 퀘스트 파일을 스캔하고 있습니다...",
         )
         await self._load_the_vault_quest_files(modpack_path, result)
 
         self._report_progress(
-            "FTB Quests 스캔 중...", 2, 7, "FTB Quests 파일을 스캔하고 있습니다..."
+            "FTB Quests 스캔 중...", 2, 8, "FTB Quests 파일을 스캔하고 있습니다..."
         )
         await self._load_ftbquests_files(modpack_path, result)
 
         self._report_progress(
-            "KubeJS 스캔 중...", 3, 7, "kubejs 폴더를 스캔하고 있습니다..."
+            "KubeJS 스캔 중...", 3, 8, "kubejs 폴더를 스캔하고 있습니다..."
         )
         await self._load_kubejs_files(modpack_path, result)
 
         self._report_progress(
-            "Patchouli 스캔 중...", 4, 7, "patchouli 폴더를 스캔하고 있습니다..."
+            "Patchouli 스캔 중...", 4, 8, "patchouli 폴더를 스캔하고 있습니다..."
         )
         await self._load_patchouli_files(modpack_path, result)
 
         self._report_progress(
             "리소스팩 스캔 중...",
             5,
-            7,
+            8,
             "리소스팩·데이터팩을 스캔하고 있습니다...",
         )
         await self._load_resourcepack_files(modpack_path, result)
         await self._load_resources_overlay_files(modpack_path, result)
 
         self._report_progress(
-            "JAR 파일 스캔 중...", 6, 7, "JAR 파일들을 처리하고 있습니다..."
+            "JAR 파일 스캔 중...", 6, 8, "JAR 파일들을 처리하고 있습니다..."
         )
         await self._load_mod_files(modpack_path, result)
+
+        self._report_progress(
+            "리소스팩 오버라이드 확인 중...",
+            7,
+            8,
+            "활성화된 리소스팩의 원문 오버라이드를 적용하고 있습니다...",
+        )
+        await self._apply_source_overrides(modpack_path, result)
 
         # Build file pairs from translation files
         self._build_file_pairs(result)
 
         self._report_progress(
             "스캔 완료!",
-            7,
-            7,
+            8,
+            8,
             f"총 {len(result.translation_files)}개 파일 발견",
         )
 
@@ -615,12 +820,29 @@ class ModpackScanner:
 
             count = len([f for f in result.translation_files if f.file_type == "mod"])
             logger.info(
-                "Scanned %d JAR files in mods folder, found %d translation files",
+                "Scanned %d JAR files in mods folder, found %d translation files "
+                "(%d excluded by blacklist)",
                 jar_files_found,
                 count,
+                len(result.excluded_mods),
             )
         except (OSError, ValueError, TypeError) as e:
             logger.error("Mod scan failed: %s", e)
+
+    def _blacklisted_id(self, zf: zipfile.ZipFile) -> str | None:
+        """The blacklist entry this JAR matches, or None.
+
+        Matched against the ids the JAR declares; a JAR that declares none
+        falls back to the ``assets/<namespace>`` names, which is the
+        identifier the rest of the scanner already keys its files by.
+        """
+        if not self.mod_blacklist:
+            return None
+        candidates = declared_mod_ids(zf) or asset_namespaces(zf)
+        for candidate in sorted(candidates):
+            if normalize_mod_id(candidate) in self.mod_blacklist:
+                return candidate
+        return None
 
     def _extract_from_jar_sync(
         self, modpack_path: Path, jar_path: str, result: ScanResult
@@ -630,6 +852,21 @@ class ModpackScanner:
         mod_display_name = Path(jar_name).stem.split("-")[0].replace("_", " ").title()
 
         with zipfile.ZipFile(jar_path, "r") as zf:
+            # Blacklisted mods are dropped before extraction, so their
+            # entries never exist on disk and cannot be counted, billed or
+            # translated. Nothing the pack already ships is touched: a mod
+            # JAR is never rewritten, and only *fresh* translations of its
+            # keys would have been generated in the first place.
+            blacklisted = self._blacklisted_id(zf)
+            if blacklisted is not None:
+                logger.info(
+                    "Skipping blacklisted mod %s (%s)", blacklisted, jar_name
+                )
+                result.excluded_mods.append(
+                    ExcludedMod(mod_id=blacklisted, jar_name=jar_name)
+                )
+                return
+
             # Use a hidden cache directory instead of mods/extracted
             # This prevents extracted files from being treated as part of the modpack structure
             extract_dir = modpack_path / ".mct_cache" / "extracted" / jar_name
@@ -654,6 +891,57 @@ class ModpackScanner:
                             )
                     except (zipfile.BadZipFile, OSError, KeyError) as e:
                         logger.debug("Failed to extract file from JAR (%s): %s", entry, e)
+
+            # Same open handle: the class pass costs one extra read of the
+            # entries already in this jar and never touches the disk, so
+            # `.class` files are decoded in memory and discarded rather
+            # than joining the thousands of files extracted above.
+            self._collect_hardcoded(modpack_path, jar_path, jar_name, zf, result)
+
+    def _collect_hardcoded(
+        self,
+        modpack_path: Path,
+        jar_path: str,
+        jar_name: str,
+        zf: zipfile.ZipFile,
+        result: ScanResult,
+    ) -> None:
+        """Record display text this JAR builds in Java, cache the verdict.
+
+        Reading every constant pool in a large pack costs seconds, and the
+        blacklist band restarts the scan on every edit, so the verdict is
+        memoized against the JAR's size and mtime. A rebuilt or swapped
+        JAR misses the cache and is re-read; an untouched one never is.
+        """
+        cache = modpack_path / ".mct_cache" / "hardcoded" / f"{jar_name}.json"
+        stamp = _jar_stamp(jar_path)
+        restored = _load_hardcoded_cache(cache, stamp) if stamp else None
+        if restored is not None:
+            if restored.strings:
+                result.hardcoded_mods.append(restored)
+            return
+
+        mod_id = next(iter(sorted(declared_mod_ids(zf))), "") or next(
+            iter(sorted(asset_namespaces(zf))), Path(jar_name).stem
+        )
+        try:
+            finding = find_hardcoded_strings(
+                zf,
+                jar_name=jar_name,
+                mod_id=mod_id,
+                source_locale=self.source_locale,
+            )
+        except (zipfile.BadZipFile, OSError, ValueError) as exc:
+            # A jar we cannot read here is still perfectly translatable
+            # through its lang files; the finding is an extra, never a
+            # precondition, so a failure must not fail the scan.
+            logger.warning("Hardcoded-text scan failed for %s: %s", jar_name, exc)
+            return
+
+        if finding is not None:
+            result.hardcoded_mods.append(finding)
+        if stamp:
+            _store_hardcoded_cache(cache, stamp, mod_id, jar_name, finding)
 
     async def _extract_from_jar(
         self, modpack_path: Path, jar_path: str, result: ScanResult
@@ -694,6 +982,65 @@ class ModpackScanner:
                 return False
 
         return any(d.lower() in entry_lower for d in DIR_FILTER_WHITELIST)
+
+    async def _apply_source_overrides(
+        self, modpack_path: Path, result: ScanResult
+    ) -> None:
+        """Substitute enabled resource packs' strings for the mods' own.
+
+        A modpack that renames items with a bundled resource pack ships
+        one string in the mod and shows another in game; translating the
+        mod's string translates text no player reads. The packs
+        ``options.txt`` enables are the effective source, so their entries
+        replace the values in the mod JAR copies this scan extracted
+        (:meth:`_extract_from_jar_sync` re-extracts them on every scan, so
+        the substitution starts from pristine mod content and never
+        compounds). Keys, files and therefore output routing are
+        untouched — only values change.
+
+        User-authored trees (loose packs, ``resources/``, ``kubejs/``) are
+        deliberately not rewritten; an overriding pack's own language file
+        is already scanned and already carries the winning string.
+        """
+        overrides, packs = await asyncio.to_thread(
+            resource_overrides.collect_overrides, modpack_path, self.source_locale
+        )
+        if not overrides:
+            return
+
+        applied: Counter[str] = Counter()
+        for tf in result.translation_files:
+            if tf.file_type != "mod":
+                continue
+            namespace = self._lang_namespace(Path(tf.input_path))
+            entries = overrides.get(namespace) if namespace else None
+            if not entries:
+                continue
+            applied += await resource_overrides.apply_overrides(
+                Path(tf.input_path), entries
+            )
+
+        result.source_overrides = [
+            SourceOverride(pack=pack.name, keys=applied[pack.name])
+            for pack in packs
+            if applied[pack.name]
+        ]
+        logger.info(
+            "Resource-pack source overrides applied: %d keys from %s",
+            sum(applied.values()),
+            ", ".join(o.pack for o in result.source_overrides) or "no pack",
+        )
+
+    def _lang_namespace(self, path: Path) -> str | None:
+        """Namespace of an ``assets/<ns>/lang/<source_locale>.*`` file."""
+        parts = path.parts
+        if len(parts) < 4 or parts[-2] != "lang":
+            return None
+        if path.stem.lower() != self.source_locale:
+            return None
+        if parts[-4] != "assets":
+            return None
+        return parts[-3]
 
     def _build_file_pairs(self, result: ScanResult) -> None:
         """Build file pairs from translation files."""
@@ -849,6 +1196,7 @@ async def scan_modpack(
     source_locale: str = "en_us",
     target_locale: str = "ko_kr",
     progress_callback: ScanProgressCallback | None = None,
+    mod_blacklist: Iterable[str] | None = None,
 ) -> ScanResult:
     """Convenience function to scan a modpack.
 
@@ -857,9 +1205,12 @@ async def scan_modpack(
         source_locale: Source language locale.
         target_locale: Target language locale.
         progress_callback: Optional progress callback.
+        mod_blacklist: Mod ids whose JARs are left out of the scan.
 
     Returns:
         Scan result.
     """
-    scanner = ModpackScanner(source_locale, target_locale, progress_callback)
+    scanner = ModpackScanner(
+        source_locale, target_locale, progress_callback, mod_blacklist
+    )
     return await scanner.scan(Path(modpack_path))

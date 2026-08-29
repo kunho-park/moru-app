@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import aiofiles
 
-from .base import BaseParser, DumpError, ParseError
+from .base import BaseParser, DumpError, ParseError, is_metadata_key
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -88,6 +88,20 @@ class JSONParser(BaseParser):
         )
         return result
 
+    @classmethod
+    def parse_text(cls, content: str) -> dict[str, str]:
+        """Flattened translatable strings from raw JSON text.
+
+        Path-free counterpart of :meth:`parse`, for callers that hold the
+        bytes instead of a file — a language file read straight out of a
+        resource pack ZIP member has no path to hand a parser, and must
+        still get the same comment recovery and comment-key pruning.
+
+        Raises:
+            ValueError: If the content is not recoverable JSON.
+        """
+        return cls._flatten_json(cls._load_json_content(content))
+
     async def dump(self, data: Mapping[str, str]) -> None:
         """Write translated data back to the JSON file.
 
@@ -128,7 +142,8 @@ class JSONParser(BaseParser):
 
         logger.debug("Successfully wrote %d entries to %s", len(data), self.path)
 
-    def _load_json_content(self, content: str) -> dict[str, JSONValue]:
+    @classmethod
+    def _load_json_content(cls, content: str) -> dict[str, JSONValue]:
         """Parse JSON content with error recovery.
 
         Args:
@@ -166,7 +181,7 @@ class JSONParser(BaseParser):
         # Try removing comments
         try:
             logger.debug("Attempting to remove comments from JSON")
-            cleaned_content = self.COMMENT_PATTERN.sub("", content)
+            cleaned_content = cls.COMMENT_PATTERN.sub("", content)
             result = json.loads(cleaned_content)
             if isinstance(result, dict):
                 return result
@@ -174,8 +189,9 @@ class JSONParser(BaseParser):
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON syntax: {e}") from e
 
+    @classmethod
     def _flatten_json(
-        self,
+        cls,
         data: JSONValue,
         prefix: str = "",
     ) -> dict[str, str]:
@@ -192,18 +208,22 @@ class JSONParser(BaseParser):
 
         if isinstance(data, dict):
             for key, value in data.items():
+                # Skipped at the segment, so a whole "_meta": {...} note
+                # subtree is pruned instead of walked.
+                if is_metadata_key(key):
+                    continue
                 new_key = f"{prefix}.{key}" if prefix else key
                 if isinstance(value, str):
                     result[new_key] = value
                 elif isinstance(value, dict | list):
-                    result.update(self._flatten_json(value, new_key))
+                    result.update(cls._flatten_json(value, new_key))
         elif isinstance(data, list):
             for i, item in enumerate(data):
                 new_key = f"{prefix}[{i}]" if prefix else f"[{i}]"
                 if isinstance(item, str):
                     result[new_key] = item
                 elif isinstance(item, dict | list):
-                    result.update(self._flatten_json(item, new_key))
+                    result.update(cls._flatten_json(item, new_key))
 
         return result
 

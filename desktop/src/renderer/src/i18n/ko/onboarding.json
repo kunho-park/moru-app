@@ -36,6 +36,7 @@
     "cliNeedsLogin": "CLI 로그인 필요",
     "cliConnectedDetail": "{{account}} 계정으로 연결되어 있어요. 구독 요금제를 그대로 쓰므로 API 키가 필요 없습니다.",
     "cliLoginDetail": "터미널에서 `{{cmd}}`를 실행해 로그인한 뒤 아래 버튼으로 다시 확인해 주세요.",
+    "cliBlockedDetail": "로그인은 되어 있지만 아직 사용할 수 없어요: {{reason}}",
     "cliRecheck": "다시 확인"
   },
   "account": {

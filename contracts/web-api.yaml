@@ -10,8 +10,25 @@ info:
     cookie or desktop API token) or an anonymous desktop-engine call
     carrying the X-Moru-Client marker header; browser-anonymous calls
     (no session, no marker) are rejected with 401.
-  version: "0.4.0"
-  x-contract-version: 3
+    Contract v4 adds the bilingual artifact kinds
+    (resource_pack_bilingual, overrides_bilingual): the same translation
+    run rendered with the original English kept in parentheses after each
+    short display name. They are optional and purely additive - a v3
+    desktop client that uploads only resource_pack / overrides stays fully
+    supported, the server keeps the old two kinds unchanged and stores the
+    new ones in separate nullable columns. Pack downloads select a variant
+    with `?variant=plain|bilingual`; an absent variant means plain, so
+    every download URL minted before v4 keeps serving the same bytes.
+    Contract v5 adds `key_scope` to glossary snapshot entries (see
+    GlossarySnapshotEntry): the dotted-glob lang keys a rule is allowed to
+    fire on. It is additive in both directions - an absent or empty
+    `key_scope` means the rule applies to every key, exactly as every rule
+    did before v5, so snapshots published earlier stay valid and older
+    engine builds that ignore the field keep behaving as they do today.
+    The snapshot body shapes, previously implicit, are now spelled out as
+    GlossarySnapshotEntry and TmSnapshotEntry.
+  version: "0.6.0"
+  x-contract-version: 5
 servers:
   - url: "https://moru.gg"
 paths:
@@ -41,12 +58,22 @@ paths:
                     properties:
                       kind:
                         type: string
-                        enum: [resource_pack, overrides]
+                        enum:
+                          - resource_pack
+                          - overrides
+                          - resource_pack_bilingual
+                          - overrides_bilingual
                         description: >
                           overrides = plain text override files layered onto
                           the modpack instance folder (kubejs/, ftbquests/,
                           config/ ...). Uploading mod .jar files is a ToS
                           violation (mod redistribution) and is not accepted.
+                          The `_bilingual` kinds are the same two trees with
+                          the original English kept in parentheses after each
+                          short display name ("철 곡괭이 (Iron Pickaxe)"), so
+                          recipe viewers and in-game search match either
+                          spelling. They are optional: a single request may
+                          ask for one archive or all four.
                       size: { type: integer }
                       sha256: { type: string }
       responses:
@@ -72,7 +99,9 @@ paths:
         desktop API Bearer token, or the anonymous desktop-engine call
         with the X-Moru-Client marker. Signed-in packs are registered
         under the calling user; anonymous desktop packs are attributed
-        to no account.
+        to no account. Supplying pack_id appends a version to that pack
+        instead of creating another TranslationPack and requires its
+        owner (or an admin).
       security: [{ apiToken: [] }]
       requestBody:
         required: true
@@ -88,6 +117,8 @@ paths:
                 properties:
                   pack_id: { type: string }
                   url: { type: string, description: public pack page }
+        "403":
+          description: pack_id is not owned by the caller
   /api/export/corrections:
     get:
       summary: Approved corrections for evalset building (operator token required)
@@ -124,6 +155,9 @@ paths:
       summary: >
         Shared-TM snapshot manifest (few KB, edge-cached, ETag). The snapshot
         body is downloaded directly from R2 - it never passes through Vercel.
+      description: >
+        The manifest only locates the snapshot; `url` serves a gzip JSON
+        array of TmSnapshotEntry.
       parameters:
         - { name: lang, in: query, required: true, schema: { type: string } }
       responses:
@@ -135,6 +169,11 @@ paths:
   /api/glossary/manifest:
     get:
       summary: Approved community glossary snapshot manifest (same pattern as TM)
+      description: >
+        The manifest only locates the snapshot; `url` serves a gzip JSON
+        array of GlossarySnapshotEntry, whose `key_scope` restricts a rule
+        to specific lang keys while `scope` only records where the rule
+        came from.
       parameters:
         - { name: lang, in: query, required: true, schema: { type: string } }
       responses:
@@ -160,6 +199,43 @@ components:
       scheme: bearer
       description: Desktop API token issued via /auth/desktop-login
   schemas:
+    GlossarySnapshotEntry:
+      type: object
+      description: >
+        One rule in the glossary snapshot BODY - the gzip JSON array behind
+        SnapshotManifest.url. The body is fetched straight from R2, so it is
+        not an endpoint in this document.
+      required: [source, target, scope, notes, key_scope]
+      properties:
+        source: { type: string, description: source-language term the rule matches }
+        target: { type: string, description: replacement in the target language }
+        scope:
+          type: string
+          description: >
+            ORIGIN of the rule: `global` | `vanilla` | `modpack:{id}` |
+            `mod:{slug}`. This is provenance only. It is NOT a lang-key
+            scope and never restricts which keys the rule fires on - that
+            is `key_scope`, an independent field. Never conflate the two.
+          examples: [global, vanilla, "modpack:abc123", "mod:jei"]
+        notes: { type: string, nullable: true, description: author note shown in the review UI }
+        key_scope:
+          type: array
+          items: { type: string }
+          description: >
+            Lang keys this rule may fire on, as dotted globs: every segment
+            is a literal or `*`, and a trailing `*` absorbs all remaining
+            segments, so `effect.*` matches `effect.minecraft.wither`. An
+            EMPTY array - or an absent field, as in every snapshot
+            published before v5 - means the rule applies to every key,
+            which is the pre-key_scope behaviour; old snapshots and engine
+            builds that ignore the field are therefore unaffected. A
+            non-empty list NARROWS the rule: vanilla "Wither" is the boss
+            위더 under `entity.*` but the status effect 시듦 under
+            `effect.*`, so a single unscoped rule corrupts one of the two
+            senses.
+          examples:
+            - ["effect.*"]
+            - ["entity.minecraft.wither"]
     SnapshotManifest:
       type: object
       required: [version, hash, size, url]
@@ -169,10 +245,25 @@ components:
         size: { type: integer }
         url: { type: string, description: "R2 public URL of snapshot-{version}.json.gz" }
         entry_count: { type: integer }
+    TmSnapshotEntry:
+      type: object
+      description: >
+        One entry in the shared-TM snapshot BODY - the gzip JSON array
+        behind SnapshotManifest.url, fetched straight from R2 and likewise
+        not an endpoint in this document.
+      required: [entry_key, source, target, pack_id]
+      properties:
+        entry_key: { type: string, description: lang key the translation came from }
+        source: { type: string }
+        target: { type: string }
+        pack_id: { type: string, description: pack whose accepted correction produced it }
     TranslationPackCreate:
       type: object
       required: [modpack_name, target_lang, files, stats, engine_version]
       properties:
+        pack_id:
+          type: string
+          description: existing owned TranslationPack to update with a new PackVersion
         modpack_name: { type: string }
         modpack_version: { type: string }
         curseforge_id: { type: integer, nullable: true }
@@ -186,7 +277,22 @@ components:
             type: object
             required: [kind, object_key]
             properties:
-              kind: { type: string, enum: [resource_pack, overrides] }
+              kind:
+                type: string
+                enum:
+                  - resource_pack
+                  - overrides
+                  - resource_pack_bilingual
+                  - overrides_bilingual
+                description: >
+                  One entry per uploaded archive; at most one per kind. The
+                  `_bilingual` kinds are optional - registering only
+                  resource_pack / overrides produces a plain-only pack, and
+                  its download URLs behave exactly as before v4. Kinds the
+                  request omits keep the pointer the pack already had, so an
+                  append that re-renders only the plain archives does not drop
+                  a previously uploaded bilingual pair. Downloads pick the
+                  variant with `?variant=plain|bilingual` (absent = plain).
               object_key: { type: string }
         engine_version: { type: string }
         is_manual_translation: { type: boolean, description: 'Explicit manual/auto flag; server falls back to engine_version == "web-manual".' }

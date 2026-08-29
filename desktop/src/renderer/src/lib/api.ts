@@ -5,22 +5,30 @@
  */
 
 import type {
+  AssistKind,
+  AssistResult,
   CommunitySyncResult,
   Entry,
+  EntryContext,
+  EntryCounts,
+  EntryFilter,
   EntryPage,
   ExportParams,
   Glossary,
   Job,
   JobEventFrame,
+  PlaceholderPattern,
   Provider,
   ProviderModels,
   ProviderTestResult,
   ScanParams,
   ScanResult,
+  SourceTextExportParams,
   TmStats,
   TranslateParams,
   TranslationGraphResponse,
   UploadParams,
+  ValidationIssue,
 } from "../../../shared/engine";
 import { useEngineStore } from "../stores/engine";
 
@@ -90,7 +98,8 @@ export const api = {
     request<Job>("/jobs", { method: "POST", body: JSON.stringify({ type: "scan", params }) }),
   startTranslate: (params: TranslateParams) =>
     request<Job>("/jobs", { method: "POST", body: JSON.stringify({ type: "translate", params }) }),
-  startExport: (params: ExportParams) =>
+  /** Both export entry points: W6 (translated) and W3 (source text). */
+  startExport: (params: ExportParams | SourceTextExportParams) =>
     request<Job>("/jobs", { method: "POST", body: JSON.stringify({ type: "export", params }) }),
   startUpload: (params: UploadParams) =>
     request<Job>("/jobs", { method: "POST", body: JSON.stringify({ type: "upload", params }) }),
@@ -102,7 +111,7 @@ export const api = {
 
   entries: (
     jobId: string,
-    filter: "all" | "failed" | "warning" | "modified",
+    filter: EntryFilter,
     page: number,
     pageSize = 100,
     search = "",
@@ -127,16 +136,87 @@ export const api = {
     }
     return refs;
   },
-  patchEntry: (jobId: string, key: string, translatedText: string, file?: string) =>
-    request<Entry>(`/translate/${jobId}/entries/${encodeURIComponent(key)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ translated_text: translatedText, file }),
-    }),
   retranslateEntry: (jobId: string, key: string, file?: string) =>
     request<Entry>(`/translate/${jobId}/entries/${encodeURIComponent(key)}/retranslate`, {
       method: "POST",
       body: JSON.stringify({ file }),
     }),
+  /** Every bucket's count in one server-side pass over the result. */
+  entryCounts: (jobId: string, search = "") =>
+    request<EntryCounts>(
+      `/translate/${jobId}/entries/counts` +
+        (search === "" ? "" : `?search=${encodeURIComponent(search)}`),
+    ),
+  /**
+   * Commit or draft one hand translation. No model, no provider, no network
+   * beyond the loopback engine — this is the manual write path.
+   *
+   * `commit: false` records the in-progress text durably without settling the
+   * entry, so a crash cannot lose it and nothing half-written can ship.
+   * `srcSha` lets a later scan detect that the source changed underneath the
+   * translation instead of shipping it as if still valid.
+   */
+  commitEntry: (
+    jobId: string,
+    key: string,
+    translatedText: string,
+    opts: {
+      file?: string;
+      commit?: boolean;
+      srcSha?: string;
+      flagged?: boolean;
+    } = {},
+  ) =>
+    request<Entry>(`/translate/${jobId}/entries/${encodeURIComponent(key)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        translated_text: translatedText,
+        file: opts.file,
+        commit: opts.commit ?? true,
+        origin: "human",
+        src_sha: opts.srcSha,
+        flagged: opts.flagged,
+      }),
+    }),
+  /** Per-entry translation aids. Never needs a provider. */
+  entryContext: (jobId: string, key: string, file?: string) =>
+    request<EntryContext>(
+      `/translate/${jobId}/entries/${encodeURIComponent(key)}/context` +
+        (file === undefined ? "" : `?file=${encodeURIComponent(file)}`),
+    ),
+  /** Live validation of a draft. Pure and synchronous server-side. */
+  validateDraft: (jobId: string, key: string, translatedText: string, file?: string) =>
+    request<{ issues: ValidationIssue[] }>(`/translate/${jobId}/validate`, {
+      method: "POST",
+      body: JSON.stringify({ key, file, translated_text: translatedText }),
+    }),
+  /**
+   * Ask the model for help with one entry WITHOUT changing it. Advisory only:
+   * the response is never written back by the engine. Contrast
+   * `retranslateEntry`, which overwrites the entry in place.
+   */
+  assistEntry: (
+    jobId: string,
+    key: string,
+    kind: AssistKind,
+    opts: { file?: string; n?: number; draft?: string; apiKey?: string } = {},
+  ) =>
+    request<AssistResult>(
+      `/translate/${jobId}/entries/${encodeURIComponent(key)}/assist`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          kind,
+          file: opts.file,
+          n: opts.n,
+          draft: opts.draft,
+          api_key: opts.apiKey,
+        }),
+      },
+    ),
+  /** The engine's own placeholder patterns, in overlap-priority order. */
+  placeholderPatterns: () =>
+    request<{ patterns: PlaceholderPattern[] }>("/placeholder/patterns"),
   /**
    * Translation-graph snapshot (live while running, rebuilt after).
    * `knownVersion` short-circuits an unchanged poll server-side; the

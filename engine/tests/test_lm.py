@@ -1,12 +1,33 @@
-"""build_lm parameter selection for provider quirks.
+"""Provider-quirk parameter selection, and the transport/output failure
+split that keeps a slow server from being treated as a bad answer.
 
 LiteLLM's gpt-5 transformation rejects temperature != 1 for model ids
 missing from its bundled map (the 5.6 family), so build_lm must send
 temperature=None (never forwarded) for every gpt-5-family id while
 leaving other providers' sampling temperature intact.
+
+Nothing here reaches a real model or a real Ollama server: build_lm is
+asserted on its assembled kwargs, and the pipeline tests inject a fake
+translator at the same seam test_orchestrator.py uses.
 """
 
-from moru_engine.dspy_modules.lm import build_lm
+from pathlib import Path
+
+import dspy
+import litellm
+import pytest
+
+from moru_engine.dspy_modules.lm import (
+    DEFAULT_OLLAMA_KEEP_ALIVE,
+    DEFAULT_OLLAMA_NUM_CTX,
+    DEFAULT_OLLAMA_NUM_RETRIES,
+    DEFAULT_OLLAMA_TIMEOUT,
+    build_lm,
+    context_window_filled,
+    is_transport_error,
+)
+from moru_engine.pipeline import orchestrator
+from moru_engine.pipeline.orchestrator import PipelineConfig, TranslationPipeline
 
 
 def test_gpt56_direct_omits_temperature():
@@ -56,3 +77,242 @@ def test_reasoning_effort_untouched_off_openrouter():
     # Ollama thinking models still default to disable (litellm think=false)
     lm = build_lm("ollama_chat/qwen3:8b", cache=False)
     assert lm.kwargs["reasoning_effort"] == "disable"
+
+
+def test_ollama_gets_local_runtime_defaults():
+    """Ollama ships none of these in a shape that suits a 36-41k-character
+    prompt driven concurrently, and each is silent when wrong: an
+    over-long prompt is truncated rather than rejected, an idle runner is
+    unloaded after 5 minutes, and litellm's own timeout is 6000s."""
+    lm = build_lm("ollama_chat/qwen3:8b", cache=False)
+    assert lm.kwargs["num_ctx"] == DEFAULT_OLLAMA_NUM_CTX
+    assert lm.kwargs["keep_alive"] == DEFAULT_OLLAMA_KEEP_ALIVE
+    assert lm.kwargs["timeout"] == DEFAULT_OLLAMA_TIMEOUT
+    assert lm.num_retries == DEFAULT_OLLAMA_NUM_RETRIES
+
+
+def test_explicit_values_beat_the_ollama_defaults():
+    lm = build_lm(
+        "ollama_chat/qwen3:8b",
+        cache=False,
+        num_ctx=8192,
+        keep_alive="5m",
+        timeout=30.0,
+        num_retries=0,
+    )
+    assert lm.kwargs["num_ctx"] == 8192
+    assert lm.kwargs["keep_alive"] == "5m"
+    assert lm.kwargs["timeout"] == 30.0
+    assert lm.num_retries == 0
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-4.1", "anthropic/claude-sonnet-4-6"])
+def test_hosted_providers_keep_their_defaults(model: str):
+    """The local-runtime policy must not leak into hosted providers."""
+    lm = build_lm(model, cache=False)
+    for key in ("num_ctx", "keep_alive", "timeout"):
+        assert key not in lm.kwargs
+    assert lm.num_retries == 3
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        litellm.exceptions.Timeout("slow", "qwen3:8b", "ollama_chat"),
+        litellm.exceptions.APIConnectionError(
+            message="reset", model="qwen3:8b", llm_provider="ollama_chat"
+        ),
+        litellm.exceptions.RateLimitError(
+            message="429", model="gpt-4.1", llm_provider="openai"
+        ),
+        litellm.exceptions.ServiceUnavailableError(
+            message="server busy, please try again.",
+            model="qwen3:8b",
+            llm_provider="ollama_chat",
+        ),
+        TimeoutError("asyncio"),
+    ],
+)
+def test_server_side_failures_classify_as_transport(exc: BaseException):
+    assert is_transport_error(exc) is True
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("Expected dict, got str"),
+        litellm.exceptions.ContextWindowExceededError(
+            message="too long", model="qwen3:8b", llm_provider="ollama_chat"
+        ),
+        litellm.exceptions.AuthenticationError(
+            message="bad key", model="gpt-4.1", llm_provider="openai"
+        ),
+    ],
+)
+def test_output_and_request_failures_are_not_transport(exc: BaseException):
+    """These must reach the split path, not the back-off path: retrying
+    them unchanged cannot help, and a malformed response is a property of
+    the batch rather than of the server."""
+    assert is_transport_error(exc) is False
+
+
+class _FakeLM:
+    def __init__(self, num_ctx: object, prompt_tokens: list[int]) -> None:
+        self.kwargs = {} if num_ctx is None else {"num_ctx": num_ctx}
+        self.history = [
+            {"usage": {"prompt_tokens": n}} for n in prompt_tokens
+        ]
+
+
+def test_context_window_filled_reports_a_saturated_prompt():
+    """Ollama truncates an oversized prompt silently, so prompt_tokens
+    saturating at num_ctx is the only observable symptom."""
+    assert context_window_filled(_FakeLM(4096, [512, 4096])) == 4096
+    assert context_window_filled(_FakeLM(4096, [512, 1024])) == 0
+
+
+def test_context_window_filled_needs_a_configured_window():
+    assert context_window_filled(_FakeLM(None, [999_999])) == 0
+    assert context_window_filled(_FakeLM(0, [999_999])) == 0
+
+
+# -- transport vs. output failure handling ---------------------------------
+
+
+def _pipeline(tmp_path: Path, model: str, **overrides: object):
+    config = PipelineConfig(
+        modpack_path=tmp_path,
+        model=model,
+        use_tm=False,
+        use_user_glossary=False,
+        use_vanilla_glossary=False,
+        use_mod_translations=False,
+        use_translation_graph=False,
+        **overrides,
+    )
+    return TranslationPipeline(config, lm=dspy.utils.DummyLM([]))
+
+
+class _RecordingTranslator:
+    """Records every dispatched batch; fails per ``fail`` policy."""
+
+    def __init__(self, exc: BaseException, *, only_multi: bool = False) -> None:
+        self.exc = exc
+        self.only_multi = only_multi
+        self.calls: list[dict[str, str]] = []
+
+    async def acall(self, *, entries: dict[str, str], **_: object):
+        self.calls.append(dict(entries))
+        if self.only_multi and len(entries) == 1:
+            return dspy.Prediction(
+                translations={key: f"ko-{key}" for key in entries}, failed={}
+            )
+        raise self.exc
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_never_splits_the_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout means the server is saturated. Splitting would double the
+    concurrent load that caused it, so the SAME batch is retried instead
+    and every dispatched batch keeps its original size."""
+    monkeypatch.setattr(orchestrator, "TRANSPORT_BACKOFF_BASE", 0.0)
+    pipeline = _pipeline(tmp_path, "ollama_chat/qwen3:8b")
+    translator = _RecordingTranslator(
+        litellm.exceptions.Timeout("slow", "qwen3:8b", "ollama_chat")
+    )
+    pipeline.translator = translator
+    batch = {f"k{i}": f"text {i}" for i in range(8)}
+    try:
+        translations, failed = await pipeline._translate_batch(batch, "", "ctx")
+    finally:
+        pipeline.close()
+
+    assert translations == {}
+    assert set(failed) == set(batch)
+    assert all("provider unavailable" in msg for msgs in failed.values() for msg in msgs)
+    # Bounded retries of the whole batch — never 2N-1 split calls.
+    assert len(translator.calls) == orchestrator.MAX_TRANSPORT_RETRIES + 1
+    assert all(len(call) == len(batch) for call in translator.calls)
+
+
+@pytest.mark.asyncio
+async def test_output_failure_still_splits_the_batch(tmp_path: Path) -> None:
+    """A malformed response is a property of THIS batch, so bisecting to
+    singletons stays the right response."""
+    pipeline = _pipeline(tmp_path, "ollama_chat/qwen3:8b")
+    translator = _RecordingTranslator(ValueError("Expected dict"), only_multi=True)
+    pipeline.translator = translator
+    batch = {f"k{i}": f"text {i}" for i in range(4)}
+    try:
+        translations, failed = await pipeline._translate_batch(batch, "", "ctx")
+    finally:
+        pipeline.close()
+
+    assert failed == {}
+    assert translations == {key: f"ko-{key}" for key in batch}
+    assert min(len(call) for call in translator.calls) == 1
+    assert max(len(call) for call in translator.calls) == len(batch)
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_shrinks_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(orchestrator, "TRANSPORT_BACKOFF_BASE", 0.0)
+    pipeline = _pipeline(tmp_path, "openai/gpt-4.1", max_concurrent=16)
+    pipeline.translator = _RecordingTranslator(
+        litellm.exceptions.RateLimitError(
+            message="429", model="gpt-4.1", llm_provider="openai"
+        )
+    )
+    assert pipeline._llm_limiter.limit == 16
+    try:
+        await pipeline._translate_batch({"k": "v"}, "", "ctx")
+    finally:
+        pipeline.close()
+    # Halved once per attempt: 16 -> 8 -> 4 -> 2.
+    assert pipeline._llm_limiter.limit == 2
+
+
+def test_ollama_starts_below_the_hosted_concurrency(tmp_path: Path) -> None:
+    """15 in parallel against a runtime that serves one at a time only
+    inflates queue latency; hosted providers must not change."""
+    local = _pipeline(tmp_path, "ollama_chat/qwen3:8b")
+    hosted = _pipeline(tmp_path, "openai/gpt-4.1")
+    try:
+        assert local._llm_limiter.limit == orchestrator.OLLAMA_START_CONCURRENT
+        assert hosted._llm_limiter.limit == hosted.config.max_concurrent == 15
+    finally:
+        local.close()
+        hosted.close()
+
+
+@pytest.mark.asyncio
+async def test_limiter_grows_back_on_sustained_success() -> None:
+    limiter = orchestrator._AdaptiveLimiter(1, 4)
+    assert limiter.limit == 1
+    for _ in range(limiter._GROW_AFTER):
+        await limiter.record_success()
+    assert limiter.limit == 2
+    await limiter.record_transport_failure()
+    assert limiter.limit == 1
+    # Never below the floor, however many failures land.
+    for _ in range(5):
+        await limiter.record_transport_failure()
+    assert limiter.limit == 1
+
+
+@pytest.mark.asyncio
+async def test_limiter_backoff_grows_and_is_capped() -> None:
+    limiter = orchestrator._AdaptiveLimiter(8, 8)
+    first = await limiter.record_transport_failure()
+    second = await limiter.record_transport_failure()
+    assert second == first * 2
+    for _ in range(20):
+        delay = await limiter.record_transport_failure()
+    assert delay == orchestrator.TRANSPORT_BACKOFF_MAX
+    # A success clears the consecutive-failure streak driving the backoff.
+    await limiter.record_success()
+    assert await limiter.record_transport_failure() == first

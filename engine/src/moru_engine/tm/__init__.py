@@ -6,6 +6,7 @@ from .local_tm import (
     LocalTM,
     TMStats,
     default_db_path,
+    is_cacheable_pair,
     tm_key,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "LocalTM",
     "TMStats",
     "default_db_path",
+    "is_cacheable_pair",
     "tm_key",
 ]

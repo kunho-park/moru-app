@@ -1,0 +1,59 @@
+{
+  "stepLabel": "검수 · 손 번역",
+  "title": "손으로 번역하기",
+  "subtitle": "한 항목씩 천천히. 자동으로 채워지는 것도, 밖으로 나가는 것도 없습니다.",
+  "colorPreview": "§ 색상 미리보기",
+  "backToReview": "검수 목록으로",
+  "next": "다음: 내보내기",
+  "empty": {
+    "title": "아직 번역할 항목이 없습니다",
+    "desc": "손 번역은 스캔된 모드팩의 항목을 대상으로 합니다. 먼저 모드팩을 스캔한 뒤 여기로 돌아오면 한 항목씩 작업할 수 있습니다.",
+    "cta": "모드팩 선택"
+  },
+  "filter": {
+    "all": "전체",
+    "failed": "실패",
+    "warning": "경고",
+    "modified": "완료",
+    "flagged": "표시"
+  },
+  "queue": {
+    "searchPlaceholder": "키 · 원문 · 번역 검색...",
+    "empty": "이 조건에 맞는 항목이 없습니다",
+    "noFlagged": "표시한 항목이 없습니다 — Ctrl+B로 표시하세요",
+    "loadMore": "↓ 더 불러오기",
+    "loading": "불러오는 중...",
+    "loaded": "{{total}}개 중 {{loaded}}개 불러옴",
+    "hasDraft": "저장하지 않은 초안"
+  },
+  "focus": {
+    "none": "목록에서 항목을 선택하세요",
+    "source": "원문 ({{lang}})",
+    "target": "내 번역 ({{lang}})",
+    "preview": "§ 미리보기",
+    "unsaved": "● 저장 안 됨",
+    "flagged": "표시됨",
+    "commitNext": "저장하고 다음",
+    "commitStay": "저장하고 머무르기",
+    "flagNext": "표시하고 넘기기"
+  },
+  "context": {
+    "origin": "출처",
+    "mod": "모드",
+    "kind": "종류",
+    "tokens": "자리표시자",
+    "insertToken": "커서 위치에 이 자리표시자 넣기",
+    "sectionCodes": "§ 코드: {{source}}개 중 {{draft}}개",
+    "siblings": "이어지는 줄",
+    "siblingsHint": "번호로 나뉜 한 문장의 조각들입니다. 한 줄에서 다음 줄로 문장이 이어지는 경우가 많으니 함께 보고 번역하세요.",
+    "runIssues": "지난 실행에서 발견된 문제"
+  },
+  "hint": {
+    "commit": "⌃↵ 저장·다음",
+    "move": "⌥↑↓ 이동",
+    "copySource": "⌃D 원문 복사",
+    "flag": "⌃B 표시",
+    "token": "⌃1-9 자리표시자",
+    "revert": "esc 되돌리기"
+  }
+}

@@ -43,6 +43,7 @@
     "step3": "번역 설정",
     "step4": "진행",
     "step5": "검수",
+    "step5Manual": "손 번역",
     "step6": "내보내기 · 공유",
     "eta": "예상 완료",
     "stepsDone": "{{done}} / 6 단계 완료"
@@ -58,6 +59,7 @@
     "modified": "수정됨",
     "tmHit": "TM 재사용",
     "skipped": "건너뜀",
+    "untranslated": "미번역",
     "shared": "공유됨"
   },
   "action": {

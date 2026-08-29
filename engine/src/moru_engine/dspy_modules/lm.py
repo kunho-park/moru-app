@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 
 import dspy
+import litellm
 
 from ..cli_providers import register_cli_providers, to_wire_model
 
@@ -24,6 +25,33 @@ register_cli_providers()
 
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_TOKENS = 8192
+
+#: Ollama's own default context window is VRAM-tiered and only 4096 tokens
+#: below 24 GiB (ollama server/routes.go), while the compiled instructions
+#: plus one batch run 36-41k characters (~16k tokens). An overflowing
+#: prompt is TRUNCATED, not rejected: ollama drops the oldest messages and
+#: logs it at debug level only (server/prompt.go), so a run silently loses
+#: the GEPA instructions and degrades with nothing to observe. Sized for
+#: prompt + DEFAULT_MAX_TOKENS of completion with headroom.
+DEFAULT_OLLAMA_NUM_CTX = 32768
+#: Ollama unloads an idle runner after 5 minutes, and a runner carrying a
+#: LoRA adapter costs a full process restart to bring back (ollama
+#: server/sched.go needsReload compares AdapterPaths). Pack runs have
+#: gaps longer than that between provider calls.
+DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
+#: litellm's own default request_timeout is 6000s, so a wedged local
+#: request would hold a client admission slot for 100 minutes. Long enough
+#: to absorb a deep server-side queue, short enough to be shed.
+DEFAULT_OLLAMA_TIMEOUT = 600.0
+#: A local runtime serves OLLAMA_NUM_PARALLEL (default 1) requests at a
+#: time and queues the rest, so blind client retries underneath our own
+#: admission limiter are pure amplification. The limiter owns that budget
+#: (see the pipeline's transport-failure path); leave one cheap retry here
+#: for a genuinely dropped connection.
+DEFAULT_OLLAMA_NUM_RETRIES = 1
+#: Fraction of the configured context window at which an observed
+#: prompt_tokens count means the window is full and ollama truncated.
+_CONTEXT_FULL_RATIO = 0.98
 
 
 def build_lm(
@@ -63,13 +91,22 @@ def build_lm(
     # default applies.
     if model.rsplit("/", 1)[-1].lower().startswith("gpt-5"):
         kwargs["temperature"] = None
-    if model.startswith("ollama") and "reasoning_effort" not in extra:
-        # Local thinking models (qwen3 family) burn the whole completion
-        # budget on reasoning_content and return empty text. Translation
-        # batches need the tokens for output; litellm maps
-        # reasoning_effort="disable" to Ollama think=false. Override by
-        # passing reasoning_effort explicitly.
-        extra["reasoning_effort"] = "disable"
+    if model.startswith("ollama"):
+        if "reasoning_effort" not in extra:
+            # Local thinking models (qwen3 family) burn the whole completion
+            # budget on reasoning_content and return empty text. Translation
+            # batches need the tokens for output; litellm maps
+            # reasoning_effort="disable" to Ollama think=false. Override by
+            # passing reasoning_effort explicitly.
+            extra["reasoning_effort"] = "disable"
+        # Locally hosted runtime defaults. Ollama ships none of these in a
+        # shape that suits a 36-41k-character prompt driven concurrently,
+        # and every one of them is silent when wrong; see the constants.
+        # setdefault so an explicit caller value always wins.
+        extra.setdefault("num_ctx", DEFAULT_OLLAMA_NUM_CTX)
+        extra.setdefault("keep_alive", DEFAULT_OLLAMA_KEEP_ALIVE)
+        extra.setdefault("timeout", DEFAULT_OLLAMA_TIMEOUT)
+        extra.setdefault("num_retries", DEFAULT_OLLAMA_NUM_RETRIES)
     if model.startswith("openrouter/") and "reasoning_effort" in extra:
         # litellm's openrouter integration rejects the OpenAI-style
         # reasoning_effort parameter outright (UnsupportedParamsError) but
@@ -106,6 +143,44 @@ def configure_engine(lm: dspy.LM, *, json_adapter: bool = True) -> None:
     """
     adapter = dspy.JSONAdapter() if json_adapter else None
     dspy.configure(lm=lm, adapter=adapter)
+
+
+#: litellm failure classes that mean "the server could not serve this now".
+_TRANSPORT_EXCEPTIONS = (
+    litellm.exceptions.Timeout,
+    litellm.exceptions.APIConnectionError,
+    litellm.exceptions.RateLimitError,
+    litellm.exceptions.ServiceUnavailableError,
+    litellm.exceptions.InternalServerError,
+)
+#: HTTP statuses meaning "retry later", never "your request was wrong".
+#: Ollama answers 503 with "server busy, please try again." once its
+#: pending queue (OLLAMA_MAX_QUEUE, 512) overflows.
+_TRANSPORT_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
+def is_transport_error(exc: BaseException) -> bool:
+    """Whether a failed provider call means the server could not serve it,
+    as opposed to the model having answered badly.
+
+    The two demand opposite responses, which is why they must not share a
+    retry budget. A malformed or oversized response is a property of the
+    batch, so splitting it and asking again is right. A timeout, dropped
+    connection or 429/503 is a property of the SERVER, and splitting
+    doubles the concurrent load that caused it: a local Ollama runtime
+    serves OLLAMA_NUM_PARALLEL (default 1) requests at a time and queues
+    the rest with no queue-wait timeout, so amplifying there is a
+    congestion collapse rather than a retry.
+
+    A 400-class request error (including ContextWindowExceededError) is
+    deliberately NOT transport: retrying it unchanged cannot help.
+    """
+    if isinstance(exc, TimeoutError):
+        return True
+    if isinstance(exc, _TRANSPORT_EXCEPTIONS):
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and status in _TRANSPORT_STATUS
 
 
 def _usage_value(usage: object, key: str) -> object:
@@ -155,3 +230,25 @@ def token_usage(lm: dspy.LM) -> dict[str, int]:
         "total_tokens": prompt + completion,
         "cached_tokens": cached,
     }
+
+
+def context_window_filled(lm: dspy.LM) -> int:
+    """Largest served prompt_tokens that filled the configured num_ctx.
+
+    Ollama does not reject a prompt longer than the context window: it
+    drops the oldest messages, keeps the system and final message, and logs
+    that at debug level only. So a window too small for the compiled
+    instructions degrades output with no error anywhere. The observable
+    symptom is prompt_eval_count saturating at the window, which is what
+    this reports; 0 means no window is configured or nothing came close.
+    """
+    window = lm.kwargs.get("num_ctx") if hasattr(lm, "kwargs") else None
+    if not isinstance(window, int) or window <= 0:
+        return 0
+    threshold = window * _CONTEXT_FULL_RATIO
+    worst = 0
+    for entry in getattr(lm, "history", None) or []:
+        prompt = int(_usage_value(entry.get("usage") or {}, "prompt_tokens") or 0)
+        if prompt >= threshold:
+            worst = max(worst, prompt)
+    return worst

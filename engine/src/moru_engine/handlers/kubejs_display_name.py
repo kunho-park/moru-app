@@ -9,6 +9,7 @@ into an otherwise byte-for-byte copy of the source file.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
+logger = logging.getLogger(__name__)
+
 _DISPLAY_NAME_CALL_RE = re.compile(r"\.displayName\s*\(\s*")
 
 
@@ -34,9 +37,9 @@ class _DisplayNameLiteral:
     end: int
 
 
-def _code_mask(source: str) -> list[bool]:
-    """Mark characters in executable JS, excluding strings and comments."""
-    mask = [False] * len(source)
+def _region_map(source: str) -> list[str]:
+    """Classify each character as ``code``, ``comment`` or ``literal``."""
+    regions = ["code"] * len(source)
     state = "code"
     cursor = 0
     while cursor < len(source):
@@ -45,42 +48,49 @@ def _code_mask(source: str) -> list[bool]:
         if state == "code":
             if char == "/" and next_char == "/":
                 state = "line_comment"
+                regions[cursor] = regions[cursor + 1] = "comment"
                 cursor += 2
                 continue
             if char == "/" and next_char == "*":
                 state = "block_comment"
+                regions[cursor] = regions[cursor + 1] = "comment"
                 cursor += 2
                 continue
             if char in {"'", '"', "`"}:
                 state = char
-            else:
-                mask[cursor] = True
+                regions[cursor] = "literal"
             cursor += 1
             continue
         if state == "line_comment":
             if char in "\r\n":
                 state = "code"
-                mask[cursor] = True
+            else:
+                regions[cursor] = "comment"
             cursor += 1
             continue
         if state == "block_comment":
+            regions[cursor] = "comment"
             if char == "*" and next_char == "/":
                 state = "code"
+                regions[cursor + 1] = "comment"
                 cursor += 2
             else:
                 cursor += 1
             continue
         # A quote-named state is a JS string/template literal.
+        regions[cursor] = "literal"
         if char == "\\":
+            if cursor + 1 < len(source):
+                regions[cursor + 1] = "literal"
             cursor += 2
             continue
         if char == state:
             state = "code"
         cursor += 1
-    return mask
+    return regions
 
 
-def _display_name_literals(source: str) -> list[_DisplayNameLiteral]:
+def _display_name_literals(source: str, path: Path) -> list[_DisplayNameLiteral]:
     """Return direct quoted arguments, ignoring expressions and comments.
 
     The small scanner deliberately understands only JavaScript string and
@@ -90,9 +100,19 @@ def _display_name_literals(source: str) -> list[_DisplayNameLiteral]:
     safe to translate.
     """
     found: list[_DisplayNameLiteral] = []
-    code = _code_mask(source)
+    regions = _region_map(source)
     for call in _DISPLAY_NAME_CALL_RE.finditer(source):
-        if not code[call.start()]:
+        region = regions[call.start()]
+        if region != "code":
+            if region == "literal":
+                # The scanner has no regex-literal state, so a pattern such as
+                # ``/'/`` shifts every later boundary. Skipping is safe (extract
+                # and apply agree), but the miss must not be silent.
+                logger.warning(
+                    "Skipped displayName at %s:%d: scanned as string literal",
+                    path,
+                    source.count("\n", 0, call.start()) + 1,
+                )
             continue
         start = call.end()
         if start >= len(source) or source[start] not in {"'", '"', "`"}:
@@ -125,11 +145,26 @@ def _display_name_literals(source: str) -> list[_DisplayNameLiteral]:
     return found
 
 
+#: Raw line terminators end a quoted JS literal; escaping them keeps the same
+#: runtime text in both quoted strings and multiline template literals.
+_LINE_TERMINATOR_ESCAPES = {
+    "\n": "\\n",
+    "\r": "\\r",
+    "\u2028": "\\u2028",
+    "\u2029": "\\u2029",
+}
+
+
 def _escape_delimiter(text: str, delimiter: str) -> str:
-    """Escape unescaped delimiters without disturbing existing JS escapes."""
+    """Escape delimiters and line breaks without disturbing existing JS escapes."""
     output: list[str] = []
     backslashes = 0
     for char in text:
+        escape = _LINE_TERMINATOR_ESCAPES.get(char)
+        if escape is not None:
+            output.append(escape)
+            backslashes = 0
+            continue
         if char == delimiter and backslashes % 2 == 0:
             output.append("\\")
         output.append(char)
@@ -137,6 +172,9 @@ def _escape_delimiter(text: str, delimiter: str) -> str:
             backslashes += 1
         else:
             backslashes = 0
+    if backslashes % 2:
+        # A dangling backslash would otherwise escape the closing delimiter.
+        output.append("\\")
     return "".join(output)
 
 
@@ -155,7 +193,8 @@ class KubeJSDisplayNameHandler(ContentHandler):
     async def extract(self, path: Path) -> Mapping[str, str]:
         async with aiofiles.open(path, encoding="utf-8", errors="replace") as file:
             source = await file.read()
-        return {literal.key: literal.text for literal in _display_name_literals(source)}
+        literals = _display_name_literals(source, path)
+        return {literal.key: literal.text for literal in literals}
 
     async def apply(
         self,
@@ -166,7 +205,7 @@ class KubeJSDisplayNameHandler(ContentHandler):
         async with aiofiles.open(path, encoding="utf-8", errors="replace") as file:
             source = await file.read()
         replacements = []
-        for literal in _display_name_literals(source):
+        for literal in _display_name_literals(source, path):
             translated = translations.get(literal.key)
             if translated is None:
                 continue

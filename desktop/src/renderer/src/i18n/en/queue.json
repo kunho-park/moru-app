@@ -1,0 +1,72 @@
+{
+  "eyebrow": "Sequential translation",
+  "title": "Modpack translation queue",
+  "subtitle": "Add several modpacks at once and Moru will run the existing translation pipeline for one pack at a time.",
+  "status": {
+    "pending": "Pending",
+    "scanning": "Scanning",
+    "translating": "Translating",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled"
+  },
+  "phase": {
+    "idle": "Ready to start",
+    "running": "Queue running",
+    "pausing": "Pausing after current pack",
+    "paused": "Paused",
+    "complete": "Queue complete",
+    "recovering": "Checking previous job state"
+  },
+  "summary": {
+    "total": "Total",
+    "pending": "Pending",
+    "done": "Done",
+    "failed": "Failed · cancelled"
+  },
+  "policy": {
+    "title": "Run policy:",
+    "body": "All packs use the translation settings captured at start and include every category. Failed packs are recorded and skipped; review and export remain available per pack in History.",
+    "lockedModel": "Locked model: {{model}}"
+  },
+  "progress": {
+    "scanning": "Inspecting modpack files",
+    "translating": "{{done}} / {{total}} entries"
+  },
+  "action": {
+    "addPacks": "Add multiple packs",
+    "checking": "Checking packs…",
+    "start": "Start queue",
+    "resume": "Resume queue",
+    "pause": "Pause after current",
+    "pausing": "Pause scheduled",
+    "clear": "Clear queue",
+    "remove": "Remove",
+    "retry": "Queue again",
+    "history": "History",
+    "moveUp": "Move up",
+    "moveDown": "Move down"
+  },
+  "empty": {
+    "title": "The queue is empty",
+    "desc": "Select multiple modpack folders to prepare sequential translation."
+  },
+  "confirmClear": {
+    "title": "Clear the queue",
+    "body": "A pack is being translated. Clearing the queue stops it and removes every row. This cannot be undone."
+  },
+  "validation": {
+    "notFound": "Folder not found: {{path}}",
+    "notDirectory": "Not a directory: {{path}}",
+    "noMods": "Skipped because no mods folder was found: {{path}}",
+    "failed": "Could not inspect pack: {{path}} ({{error}})",
+    "duplicate": "Skipped {{skipped}} folder(s) already queued."
+  },
+  "error": {
+    "interruptedScan": "The app closed before the modpack scan finished.",
+    "lostTranslation": "The translation job could not be restored after the app restarted.",
+    "scanFailed": "The modpack scan failed.",
+    "wizardBusy": "Another translation is already running. Finish or stop it before starting the queue.",
+    "recovery": "Could not restore the queue: {{error}}"
+  }
+}

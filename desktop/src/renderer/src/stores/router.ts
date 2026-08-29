@@ -12,6 +12,7 @@ export type Screen =
   | "w5"
   | "w5m"
   | "w6"
+  | "queue"
   | "history"
   | "glossary"
   | "settings";

@@ -11,6 +11,7 @@ from .orchestrator import (
     RetranslateError,
     TranslationPipeline,
     apply_entry_edits,
+    is_translatable_text,
     output_root,
     run_pipeline,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "RetranslateError",
     "TranslationPipeline",
     "apply_entry_edits",
+    "is_translatable_text",
     "output_root",
     "run_pipeline",
 ]

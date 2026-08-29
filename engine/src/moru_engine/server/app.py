@@ -292,10 +292,8 @@ def _validate_locale(value: str, name: str) -> str:
 
 
 def _entry_payload(entry: EntryResult) -> dict[str, Any]:
-    # Deviation: contract requires translated_text as a plain string, but the
-    # engine keeps None for untranslated entries -> coerced to "". The engine
-    # also has a "skipped" status the contract enum does not list; it is
-    # passed through as-is (only reachable with filter=all).
+    # Contract requires translated_text as a plain string, while the engine
+    # keeps None for untranslated entries, so coerce that one internal state.
     return {
         "key": entry.key,
         "file": entry.file,
@@ -304,7 +302,6 @@ def _entry_payload(entry: EntryResult) -> dict[str, Any]:
         "status": entry.status.value,
         "errors": list(entry.errors),
     }
-
 
 def _find_entry(
     result: PipelineResult, key: str, file: str | None = None
@@ -448,6 +445,13 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return record.to_public()
 
+    @api.get("/jobs/{job_id}/snapshot")
+    async def get_job_snapshot(job_id: str) -> dict[str, Any]:
+        try:
+            return manager.snapshot(job_id)
+        except UnknownJobError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @api.post("/jobs/{job_id}/cancel", status_code=202)
     async def cancel_job(job_id: str) -> dict[str, Any]:
         try:
@@ -466,8 +470,16 @@ def create_app(
         if not _token_matches(supplied):
             await websocket.close(code=1008, reason="unauthorized")
             return
+        after_value = websocket.query_params.get("after")
         try:
-            history, queue = manager.subscribe(job_id)
+            after = int(after_value) if after_value is not None else None
+            if after is not None and after < 0:
+                raise ValueError
+        except ValueError:
+            await websocket.close(code=1008, reason="invalid event cursor")
+            return
+        try:
+            history, queue = manager.subscribe(job_id, after=after)
         except UnknownJobError:
             await websocket.close(code=1008, reason=f"unknown job: {job_id}")
             return
@@ -709,6 +721,11 @@ def create_app(
         the journal grows past its compaction threshold.
         """
         record, result = _get_pipeline_result(job_id)
+        if not record.finished:
+            raise HTTPException(
+                status_code=409,
+                detail=f"translate job {job_id} is still running",
+            )
         entry = _find_entry(result, entry_key, body.file)
         if entry is None:
             raise HTTPException(status_code=404, detail=f"unknown entry: {entry_key}")
@@ -729,6 +746,8 @@ def create_app(
         )
         entry.translated_text = body.translated_text
         entry.status = EntryStatus.MODIFIED
+        TranslationPipeline._refresh_stats(result)
+        manager.refresh_translate_stats(record)
         if should_compact:
             await _persist_session(record)
             await manual.compacted(job_id)
@@ -770,9 +789,15 @@ def create_app(
             ) from exc
         finally:
             pipeline.close()
-
+        manager.refresh_translate_stats(record)
         await _persist_session(record)
         return _entry_payload(entry)
+
+    @api.get("/translate/{job_id}/stats")
+    async def translate_stats(job_id: str) -> dict[str, Any]:
+        """Current counters, including any post-run review mutations."""
+        _, result = _get_pipeline_result(job_id)
+        return result.stats.model_dump()
 
     # -- sessions -------------------------------------------------------------------
 

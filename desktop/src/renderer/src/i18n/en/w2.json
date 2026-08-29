@@ -40,6 +40,13 @@
     "summary": "Enabled resource packs replaced {{keys}} source strings — the text players actually see is what gets translated",
     "packLine": "{{pack}} · {{keys}} keys"
   },
+  "migration": {
+    "title": "Previous translation compared",
+    "summary": "Reuse {{reused}} previous manual translations and translate only {{translate}} entries.",
+    "zero": "No exact matches were found; all entries will follow the normal translation path.",
+    "reused": "Reused",
+    "assets": "Font assets kept"
+  },
   "tree": {
     "header": "Categories",
     "selectAll": "Select all",
@@ -71,6 +78,7 @@
   "footer": {
     "back": "Back",
     "entriesPart": "{{entries}} entries · ",
+    "reusedPart": "{{reused}} previous translations reused · ",
     "estSuffix": " est.",
     "tokensOnly": "{{count}} tokens",
     "next": "Next: Translation settings"

@@ -288,6 +288,8 @@ export interface UsageEstimateInput {
   chars: number;
   /** entry count of the selection */
   entries: number;
+  /** whole-corpus entry count used only by optional glossary extraction */
+  glossaryEntries?: number;
   /** settings.batchSize */
   batchSize: number;
   /** settings.maxRefine — allowed refine passes; scales retry pricing */
@@ -310,43 +312,44 @@ export interface UsageEstimate {
 
 export function estimateUsage(input: UsageEstimateInput): UsageEstimate {
   const { chars, entries } = input;
-  if (chars <= 0 || entries <= 0) {
-    return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-  }
-  const batchSize = Math.max(1, input.batchSize);
-  // engine splits on entry count AND char volume, whichever is tighter
-  const charsWithKeys = chars + entries * 24;
-  const batches = Math.max(
-    Math.ceil(entries / batchSize),
-    Math.ceil(charsWithKeys / MAX_BATCH_CHARS),
-  );
-
-  const sourceTokens = chars * TOKENS_PER_CHAR;
-  const keyTokens = entries * KEY_TOKENS_PER_ENTRY;
-
   const thinkingMult = input.thinking === true ? THINKING_COMPLETION_MULTIPLIER : 1;
   const refinePasses = Math.max(0, input.maxRefine ?? 2);
   const translationRetryFactor = 1 + RETRY_TRAFFIC_SHARE * refinePasses;
   const glossaryRetryFactor = 1 + RETRY_TRAFFIC_SHARE * ENGINE_GLOSSARY_MAX_RETRIES;
 
-  let prompt =
-    (batches * BATCH_OVERHEAD_TOKENS +
-      (input.glossary ? batches * GLOSSARY_TOKENS_PER_BATCH : 0) +
-      sourceTokens +
-      keyTokens) *
-    translationRetryFactor;
-  let completion =
-    (sourceTokens * COMPLETION_RATIO * thinkingMult + keyTokens) *
-    translationRetryFactor;
+  let prompt = 0;
+  let completion = 0;
+  if (chars > 0 && entries > 0) {
+    const batchSize = Math.max(1, input.batchSize);
+    // engine splits on entry count AND char volume, whichever is tighter
+    const charsWithKeys = chars + entries * 24;
+    const batches = Math.max(
+      Math.ceil(entries / batchSize),
+      Math.ceil(charsWithKeys / MAX_BATCH_CHARS),
+    );
+
+    const sourceTokens = chars * TOKENS_PER_CHAR;
+    const keyTokens = entries * KEY_TOKENS_PER_ENTRY;
+    prompt =
+      (batches * BATCH_OVERHEAD_TOKENS +
+        (input.glossary ? batches * GLOSSARY_TOKENS_PER_BATCH : 0) +
+        sourceTokens +
+        keyTokens) *
+      translationRetryFactor;
+    completion =
+      (sourceTokens * COMPLETION_RATIO * thinkingMult + keyTokens) *
+      translationRetryFactor;
+  }
 
   if (input.extractGlossary) {
     // Uncapped extraction: the miner keeps every ranked candidate, so
     // price the conservative upper bound of one candidate per entry.
+    const glossaryEntries = Math.max(0, input.glossaryEntries ?? entries);
     const configuredLimit =
       input.glossaryMaxTerms === null
-        ? entries
+        ? glossaryEntries
         : Math.max(0, Math.floor(input.glossaryMaxTerms));
-    const candidates = Math.min(entries, configuredLimit);
+    const candidates = Math.min(glossaryEntries, configuredLimit);
     const chunks = Math.ceil(candidates / GLOSSARY_CHUNK_SIZE);
     prompt +=
       (chunks * GLOSSARY_PROMPT_OVERHEAD_TOKENS +

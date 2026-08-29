@@ -10,7 +10,6 @@
  */
 
 import type { ReactNode } from "react";
-import { useEffect, useReducer } from "react";
 
 import type { EntryStatus } from "../../../shared/engine";
 
@@ -22,6 +21,8 @@ export const STATUS_COLOR: Record<EntryStatus, string> = {
   failed: "#F26B6B",
   modified: "#6BB3F5",
   tm_hit: "#A78BFA",
+  // Reuse shares one hue across the app; the glyph tells TM from migrated.
+  migrated: "#A78BFA",
   skipped: "#6A7C74",
   // Deliberately brighter than `skipped`: an untranslated entry is work to
   // do, not work that was intentionally passed over.
@@ -35,6 +36,7 @@ export const STATUS_LABEL_KEY: Record<EntryStatus, string> = {
   failed: "common.status.failed",
   modified: "common.status.modified",
   tm_hit: "common.status.tmHit",
+  migrated: "common.status.migrated",
   skipped: "common.status.skipped",
   pending: "common.status.untranslated",
 };
@@ -79,6 +81,14 @@ export function StatusIcon({
         </svg>
       );
       break;
+    case "migrated":
+      glyph = (
+        <svg width={s} height={s} viewBox="0 0 8 8" fill="none" stroke="#0A100D" strokeWidth="1.5">
+          <path d="M1 2 H5 V1 L7 3 L5 5 V4 H1 Z" fill="#0A100D" />
+          <path d="M7 6 H3 V7 L1 5 L3 3 V4 H7 Z" fill="#0A100D" />
+        </svg>
+      );
+      break;
     case "skipped":
       glyph = (
         <svg width={s} height={s} viewBox="0 0 8 8" shapeRendering="crispEdges">
@@ -114,54 +124,19 @@ export function StatusIcon({
 /* ---- placeholder token highlighting ---------------------------------- */
 
 /**
- * Fallback token grammar, used until the engine's own patterns are installed
- * (and if the sidecar is unreachable, which `EngineGate` treats as a real
- * state). It is deliberately close to, but not identical with, the engine's
- * `PATTERNS` — it lacks Patchouli `$(...)` macros and `&`-colour codes, so a
- * translator could delete one without the highlight warning them. That is why
- * `installTokenPatterns` exists: the engine is the authority on what a
- * placeholder is, because the engine is what fails the entry.
+ * Token grammar. Deliberately close to, but not identical with, the engine's
+ * `PATTERNS`: it lacks Patchouli `$(...)` macros and `&`-colour codes, so a
+ * translator could delete one of those without the highlight warning them.
+ *
+ * `GET /placeholder/patterns` now serves the engine's own list precisely so
+ * this can become engine-authoritative instead of a hand-maintained copy.
+ * That swap is a separate change: it makes the grammar load-time-variable,
+ * which needs a re-render path and a documented offline fallback, and is not
+ * worth half-landing.
  */
-const FALLBACK_TOKEN_SRC =
-  String.raw`\{\{[^{}]*\}\}|\{[^{}]*\}|<[^<>]+>|%(?:\d+\$)?[A-Za-z]|§.|\\n`;
-
-let TOKEN_SPLIT = new RegExp(`(${FALLBACK_TOKEN_SRC})`, "g");
-let TOKEN_EXACT = new RegExp(`^(?:${FALLBACK_TOKEN_SRC})$`);
-
-const listeners = new Set<() => void>();
-
-/**
- * Adopt the engine's placeholder patterns. Order matters and is preserved:
- * an earlier pattern wins an overlapping match, which is how the engine
- * resolves e.g. a `$(...)` macro containing something that looks like a
- * format specifier.
- */
-export function installTokenPatterns(patterns: readonly { regex: string }[]): void {
-  const source = patterns.map((p) => p.regex).join("|");
-  if (source === "") return;
-  try {
-    const split = new RegExp(`(${source})`, "g");
-    const exact = new RegExp(`^(?:${source})$`);
-    TOKEN_SPLIT = split;
-    TOKEN_EXACT = exact;
-  } catch {
-    // A pattern the browser's regex engine rejects must not break rendering;
-    // the fallback grammar stays in place.
-    return;
-  }
-  for (const notify of listeners) notify();
-}
-
-/** Re-render when the engine's patterns replace the fallback grammar. */
-export function useTokenPatterns(): void {
-  const [, bump] = useReducer((n: number) => n + 1, 0);
-  useEffect(() => {
-    listeners.add(bump);
-    return () => {
-      listeners.delete(bump);
-    };
-  }, [bump]);
-}
+const TOKEN_SRC = String.raw`\{\{[^{}]*\}\}|\{[^{}]*\}|<[^<>]+>|%(?:\d+\$)?[A-Za-z]|§.|\\n`;
+const TOKEN_SPLIT = new RegExp(`(${TOKEN_SRC})`, "g");
+const TOKEN_EXACT = new RegExp(`^(?:${TOKEN_SRC})$`);
 
 /** accent -> blue -> purple -> amber, cycling; same token = same color. */
 const TOKEN_PALETTE = [

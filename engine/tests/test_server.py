@@ -17,8 +17,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
-
 from moru_engine import __version__
 from moru_engine.cli_providers.credentials import STORES
 from moru_engine.graph import TranslationGraph
@@ -28,11 +26,13 @@ from moru_engine.pipeline import (
     PipelineConfig,
     PipelineResult,
     PipelineStats,
+    TranslationPipeline,
 )
 from moru_engine.server import create_app
 from moru_engine.server.jobs import JobRecord, JobStatus, JobType
 from moru_engine.server.live_models import fetch_live_models
 from moru_engine.server.upload import WebUploadError, _auth_headers
+from starlette.websockets import WebSocketDisconnect
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -204,6 +204,35 @@ def test_scan_counts_only_entries_missing_target_locale(
     }
 
 
+def test_scan_treats_source_copy_target_as_pending(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    lang = tmp_path / "copy-target/kubejs/assets/demo/lang"
+    lang.mkdir(parents=True)
+    (lang / "en_us.json").write_text(
+        '{"copied":"Same English","done":"Finished"}',
+        encoding="utf-8",
+    )
+    (lang / "ko_kr.json").write_text(
+        '{"copied":"Same English","done":"완료"}',
+        encoding="utf-8",
+    )
+    response = client.post(
+        "/jobs",
+        json={"type": "scan", "params": {"modpack_path": str(tmp_path / "copy-target")}},
+        headers=AUTH,
+    )
+    assert response.status_code == 201
+    job = _wait_for_job(client, response.json()["id"])
+    assert job["status"] == "done", job
+    payload = client.get(f"/scan/{job['id']}/result", headers=AUTH).json()
+    files = [file for category in payload["categories"] for file in category["files"]]
+    file_info = next(file for file in files if file["path"].endswith("en_us.json"))
+    assert file_info["entry_count"] == 1
+    assert file_info["sample"] == {"copied": "Same English"}
+
+
 def test_scan_result_samples_are_bounded(
     client: TestClient, scan_job: dict[str, Any]
 ) -> None:
@@ -236,6 +265,331 @@ def test_scan_ws_emits_parse_stage(
     assert "parse" in stages
 
 
+def test_scan_migration_counts_and_translate_reuses_scan_index(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = tmp_path / "current"
+    old = tmp_path / "old"
+    translated = tmp_path / "translated"
+    relative = Path("kubejs/assets/demo/lang/en_us.json")
+    for root in (current, old):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"same":"Same","changed":"New"}', encoding="utf-8")
+    target = translated / "kubejs/assets/demo/lang/ko_kr.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        '{"same":"수동 번역","changed":"변경 전 번역"}',
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(current),
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    scan = _wait_for_job(client, response.json()["id"])
+    assert scan["status"] == "done", scan
+    scan_payload = client.get(f"/scan/{scan['id']}/result", headers=AUTH).json()
+    assert scan_payload["migration"]["entry_count"] == 2
+    assert scan_payload["migration"]["char_count"] == len("Same") + len("New")
+    file_payload = scan_payload["categories"][0]["files"][0]
+    assert file_payload["migration_entry_count"] == 2
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(current),
+                "scan_job_id": scan["id"],
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    translated_job = _wait_for_job(client, response.json()["id"])
+    assert translated_job["status"] == "done", translated_job
+    stored = client.app.state.job_manager._jobs[scan["id"]].result
+    assert stored.migration_input_fingerprint is not None
+    assert captured["scan_result"] is stored.scan
+    assert captured["migration"] is stored.migration
+
+    # A scan result is only an optimization. If C changes after W2, W4 must
+    # fall back to the normal fresh scan/index path instead of using stale data.
+    (current / relative).write_text(
+        '{"same":"Same","changed":"Newest","added":"Added"}',
+        encoding="utf-8",
+    )
+    captured.clear()
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(current),
+                "scan_job_id": scan["id"],
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    refreshed_job = _wait_for_job(client, response.json()["id"])
+    assert refreshed_job["status"] == "done", refreshed_job
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
+
+
+def test_migration_scan_refreshes_when_launcher_metadata_changes(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = tmp_path / "current"
+    old = tmp_path / "old"
+    translated = tmp_path / "translated"
+    for root in (current, old, translated):
+        root.mkdir()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    scan = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(current),
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+            },
+        },
+    ).json()
+    assert _wait_for_job(client, scan["id"])["status"] == "done"
+
+    # These launcher files affect pack identity and generated pack metadata,
+    # even though they are outside the translation-content folders.
+    (current / "modrinth.index.json").write_text(
+        '{"name":"Demo","versionId":"2.0","dependencies":{"minecraft":"1.21"}}',
+        encoding="utf-8",
+    )
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(current),
+                "scan_job_id": scan["id"],
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
+
+
+def test_migration_scan_refreshes_when_an_openloader_pack_changes(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenLoader and Paxi mount packs from their own top-level folders, so
+    the scanner reads them like resourcepacks/ and the freshness check has to
+    cover them too."""
+    current = tmp_path / "current"
+    old = tmp_path / "old"
+    translated = tmp_path / "translated"
+    for root in (current, old, translated):
+        root.mkdir()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    scan = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(current),
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+            },
+        },
+    ).json()
+    assert _wait_for_job(client, scan["id"])["status"] == "done"
+
+    translate = {
+        "type": "translate",
+        "params": {
+            "modpack_path": str(current),
+            "scan_job_id": scan["id"],
+            "previous_modpack_path": str(old),
+            "previous_overrides_path": str(translated),
+            "use_tm": False,
+        },
+    }
+    response = client.post("/jobs", headers=AUTH, json=translate)
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    # Baseline: untouched inputs reuse the W2 scan and its A/B/C index, so the
+    # rebuild below can only come from the openloader pack.
+    stored = client.app.state.job_manager._jobs[scan["id"]].result
+    assert captured["scan_result"] is stored.scan
+    assert captured["migration"] is stored.migration
+
+    pack = current / "openloader" / "resources" / "extra" / "pack.mcmeta"
+    pack.parent.mkdir(parents=True, exist_ok=True)
+    pack.write_text('{"pack":{"pack_format":15}}', encoding="utf-8")
+    captured.clear()
+    response = client.post("/jobs", headers=AUTH, json=translate)
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
+
+
+def test_translate_without_migration_reuses_matching_v1_scan(
+    client: TestClient,
+    scan_job: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(MODPACK),
+                "scan_job_id": scan_job["id"],
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    final = _wait_for_job(client, response.json()["id"])
+    assert final["status"] == "done", final
+    stored = client.app.state.job_manager._jobs[scan_job["id"]].result
+    assert captured["scan_result"] is stored.scan
+    assert captured["migration"] is None
+
+
+def test_translate_falls_back_when_the_scan_job_does_not_match(
+    client: TestClient,
+    scan_job: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Param drift makes the scan unusable, not the run impossible."""
+    different = tmp_path / "different"
+    different.mkdir()
+    old = tmp_path / "old-for-mismatch"
+    translated = tmp_path / "translated-for-mismatch"
+    old.mkdir()
+    translated.mkdir()
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(different),
+                "scan_job_id": scan_job["id"],
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
+
+
+def test_translate_falls_back_when_the_scan_job_is_gone(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scan jobs are never persisted, so a sidecar restart under a live
+    renderer leaves every wizard holding an unresolvable scan id. Start must
+    re-scan instead of failing the run."""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(MODPACK),
+                "scan_job_id": str(uuid.uuid4()),
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
+
+
 def test_scan_result_of_unknown_job_is_404(client: TestClient) -> None:
     assert client.get("/scan/nope/result", headers=AUTH).status_code == 404
 
@@ -253,6 +607,38 @@ def test_scan_job_missing_modpack_path_is_422(client: TestClient) -> None:
         "/jobs", json={"type": "scan", "params": {}}, headers=AUTH
     )
     assert response.status_code == 422
+
+
+def test_scan_job_incomplete_migration_params_is_422(client: TestClient) -> None:
+    """Rejected by POST /jobs, not by a created job that immediately fails."""
+    # B without A.
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(MODPACK),
+                "previous_overrides_path": str(MODPACK),
+            },
+        },
+    )
+    assert response.status_code == 422
+    assert "previous_modpack_path" in response.json()["detail"]
+    # A with no previous translation artifact.
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(MODPACK),
+                "previous_modpack_path": str(MODPACK),
+            },
+        },
+    )
+    assert response.status_code == 422
+    assert "previous resource pack or overrides" in response.json()["detail"]
 
 
 def test_export_requires_completed_translate_job(
@@ -485,6 +871,7 @@ def test_upload_job_success_with_token(
         "coverage_percent": 90.0,
         "quality_score": 0.9,
         "tm_hits": 1,
+        "migration_hits": 0,
         "model": "openai/gpt-4o-mini",
         "duration_seconds": 12.5,
     }
@@ -1031,6 +1418,65 @@ def test_ws_replays_history_for_finished_job(
     ]
 
 
+def test_job_snapshot_compacts_history_and_cursor_replays_only_new_events(
+    client: TestClient,
+) -> None:
+    manager = client.app.state.job_manager
+    record = JobRecord(
+        id=f"snapshot-{uuid.uuid4()}",
+        type=JobType.TRANSLATE,
+        params={},
+        status=JobStatus.RUNNING,
+    )
+    manager._jobs[record.id] = record
+    manager._deliver(
+        record,
+        {"type": "progress", "stage": "translate", "file": "a.json", "done": 1, "total": 5},
+    )
+    manager._deliver(
+        record,
+        {"type": "progress", "stage": "translate", "file": "a.json", "done": 3, "total": 5},
+    )
+    manager._deliver(
+        record,
+        {"type": "batch_started", "request_id": 7, "file": "a.json", "key": "k", "entries": 2},
+    )
+    manager._deliver(
+        record,
+        {"type": "entry_failed", "key": "bad", "errors": ["broken"]},
+    )
+
+    response = client.get(f"/jobs/{record.id}/snapshot", headers=AUTH)
+    assert response.status_code == 200
+    snapshot = response.json()
+    assert snapshot["job"]["status"] == "running"
+    assert snapshot["cursor"] == 4
+    assert snapshot["failed_count"] == 1
+    progress = [event for event in snapshot["events"] if event["type"] == "progress"]
+    assert len(progress) == 1
+    assert progress[0]["done"] == 3
+    assert any(event["type"] == "batch_started" for event in snapshot["events"])
+
+    manager._deliver(
+        record,
+        {"type": "progress", "stage": "translate", "file": "a.json", "done": 5, "total": 5},
+    )
+    manager._deliver(record, {"type": "done", "status": "done"})
+    record.status = JobStatus.DONE
+    record.finished = True
+    with client.websocket_connect(
+        f"/jobs/{record.id}/events?token={TOKEN}&after={snapshot['cursor']}"
+    ) as ws:
+        assert ws.receive_json()["done"] == 5
+        terminal = ws.receive_json()
+        assert terminal["type"] == "done"
+        assert terminal["seq"] == 6
+
+
+def test_job_snapshot_unknown_job_is_404(client: TestClient) -> None:
+    assert client.get("/jobs/nope/snapshot", headers=AUTH).status_code == 404
+
+
 def test_ws_rejects_bad_token(
     client: TestClient, scan_job: dict[str, Any]
 ) -> None:
@@ -1057,6 +1503,60 @@ def test_patch_entry_unknown_job_is_404(client: TestClient) -> None:
         headers=AUTH,
     )
     assert response.status_code == 404
+
+
+def test_patch_entry_rejects_running_job(
+    client: TestClient, done_translate_job: JobRecord
+) -> None:
+    done_translate_job.finished = False
+    response = client.patch(
+        f"/translate/{done_translate_job.id}/entries/gui.ok",
+        json={"translated_text": "확인"},
+        headers=AUTH,
+    )
+    assert response.status_code == 409
+
+
+def test_patch_migrated_entry_refreshes_stats(
+    client: TestClient, done_translate_job: JobRecord
+) -> None:
+    result = done_translate_job.result
+    assert isinstance(result, PipelineResult)
+    result.entries = [
+        EntryResult(
+            key="migrated.entry",
+            file="lang/en_us.json",
+            source_text="Same source",
+            translated_text="이전 수동 번역",
+            status=EntryStatus.MIGRATED,
+        )
+    ]
+    result.stats = PipelineStats()
+    TranslationPipeline._refresh_stats(result)
+    assert result.stats.migration_hits == 1
+    assert result.stats.coverage_percent == 100
+
+    response = client.patch(
+        f"/translate/{done_translate_job.id}/entries/migrated.entry",
+        json={"translated_text": "검수 후 번역"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200, response.text
+    assert result.stats.migration_hits == 0
+    assert result.stats.translated_entries == 1
+    assert result.stats.coverage_percent == 100
+    stats_response = client.get(
+        f"/translate/{done_translate_job.id}/stats", headers=AUTH
+    )
+    assert stats_response.status_code == 200
+    assert stats_response.json()["migration_hits"] == 0
+    assert done_translate_job.done_payload == {
+        "stats": result.stats.model_dump()
+    }
+
+
+def test_translate_stats_unknown_job_is_404(client: TestClient) -> None:
+    assert client.get("/translate/nope/stats", headers=AUTH).status_code == 404
 
 
 def test_entries_unknown_job_is_404(client: TestClient) -> None:
@@ -1336,12 +1836,23 @@ def test_cli_providers_without_discovery_use_the_static_catalog(
 
 def test_codex_models_fall_back_to_static_when_the_cli_is_logged_out(
     client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Codex DOES publish /codex/models, and its plan gates the SKUs.
 
     Without a CLI login the live call cannot run, so the route degrades to
     the static catalog and surfaces why — it must never invent a lineup.
     """
+    async def logged_out(
+        provider: str,
+        *,
+        api_key: str | None = None,
+        api_base: str | None = None,
+    ) -> list[str]:
+        assert provider == "codex"
+        raise RuntimeError("codex login required")
+
+    monkeypatch.setattr("moru_engine.server.app.fetch_live_models", logged_out)
     response = client.post(
         "/providers/models", json={"provider": "codex"}, headers=AUTH
     )

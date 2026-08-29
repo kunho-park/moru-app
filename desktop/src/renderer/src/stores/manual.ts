@@ -25,7 +25,6 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { Entry, EntryFilter } from "../../../shared/engine";
-import { installTokenPatterns } from "../components/EntryText";
 import { api } from "../lib/api";
 
 /** Entries fetched per request. The engine caps `page_size` at 500. */
@@ -309,13 +308,6 @@ export const useManual = create<ManualStore>()(
         // `refresh()` is the way to deliberately re-snapshot.
         if (get().jobId === jobId) return;
         set({ jobId, ...EMPTY_STATE });
-        // Adopt the engine's placeholder grammar once per session. The
-        // renderer's fallback is close but not identical, and the engine is
-        // the authority because the engine is what fails the entry.
-        void api
-          .placeholderPatterns()
-          .then((res) => installTokenPatterns(res.patterns))
-          .catch(() => undefined);
         await get().loadMore();
       },
 

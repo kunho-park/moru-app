@@ -22,6 +22,15 @@ PATTERNS = {
     # 8642 occurrences across 269 real books are all macros — so the
     # body stays unrestricted, matching the game byte for byte.
     "patchouli_macro": re.compile(r"\$\([^)]*\)"),
+    # JavaScript template interpolation used by KubeJS display names.
+    # Keep the leading '$' inside the token so translation cannot separate it
+    # from the expression when reordering words for the target language.
+    #
+    # Must stay AHEAD of "named_placeholder": that pattern matches the inner
+    # "{...}" of "${...}", so claiming it first would drop this wider span
+    # and leave the "$" outside the token as loose prose — the very thing
+    # this entry exists to prevent.
+    "js_template": re.compile(r"\$\{[^{}]*\}"),
     # Java format specifiers: %s, %d, %1$s, %2$d, etc.
     "java_format": re.compile(r"%(?:\d+\$)?[sdifxXobeEgGaAcChHnp%]"),
     # Minecraft color codes: §a, §0-§f, §k-§o, §r
@@ -63,6 +72,7 @@ PATTERNS = {
 # renumbering tokens. Occurrences of the SAME literal share one token, so
 # restore() stays a literal, order-free replacement either way.
 TOKEN_KIND_BY_PATTERN = {
+    "js_template": "VAR",
     "java_format": "ARG",
     "named_placeholder": "VAR",
     "xml_tags": "TAG",

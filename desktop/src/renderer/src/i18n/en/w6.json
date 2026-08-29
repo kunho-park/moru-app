@@ -7,6 +7,7 @@
     "summaryNoStats": "{{name}} · {{done}} entries translated",
     "passRate": "▲ Passed {{percent}}%",
     "tmReuse": "▲ TM reuse {{percent}}% ({{count}})",
+    "migrationReuse": "▲ Previous translation {{count}}",
     "quality": "▲ Quality score {{score}}",
     "cacheSaved": "▲ Cache hit {{percent}}% — saved {{saved}}",
     "cacheHit": "▲ Cache hit {{percent}}%"

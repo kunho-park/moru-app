@@ -61,15 +61,37 @@ paths:
       parameters: [{ $ref: "#/components/parameters/JobId" }]
       responses:
         "202": { description: cancellation requested }
+  /jobs/{jobId}/snapshot:
+    get:
+      summary: Compact job progress snapshot for renderer restoration
+      description: >-
+        Reduces the full buffered history to latest progress per file/stage,
+        cumulative token/glossary state, active batches, recent ticker/error
+        samples and the terminal frame. cursor is the last event sequence in
+        the snapshot; reconnect to /events?after=cursor for a gap-free live
+        continuation without replaying tens of thousands of old frames.
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobSnapshot" }
+        "404": { description: unknown job }
   /jobs/{jobId}/events:
     get:
       summary: >
-        WebSocket upgrade (?token= query or Authorization header).
-        Replays buffered events, then streams live JSON frames:
+        WebSocket upgrade (?token= query or Authorization header; optional
+        after=N replays only frames whose seq is greater than N).
+        Every frame carries {seq, emitted_at}. Replays buffered events, then
+        streams live JSON frames:
         progress {stage, file?, done, total} (scan progress uses
         {stage, current, total, message}; the scan job emits a second
-        "parse" stage while it counts entries per file),
-        entry_failed {key, errors},
+        "parse" stage while it counts entries per file, and a
+        "migration" stage with current 0 then 1 while it indexes a previous
+        translation; the translate job emits the same "migration" stage in
+        its own {stage, done, total} shape while it rebuilds that index),
+        entry_failed {key, file, errors} (file is the source file the key
+        belongs to, relative to the modpack root),
         entry_done {key, source, translated} (sampled every ~5th freshly
         translated entry, texts truncated to 120 chars - GUI live ticker),
         tokens {prompt_tokens, completion_tokens, total_tokens, cached_tokens}
@@ -85,13 +107,20 @@ paths:
         glossary_extracted {new_terms},
         and a single terminal frame {type: done|failed|cancelled, status}
         after which the socket closes with code 1000. Done and user-cancelled
-        translate frames carry {stats}; stats.categories maps web-facing
-        category keys to non-failed entry counts (an empty map means none);
+        translate frames carry {stats}; stats.migration_hits counts exact
+        A/B/C matches reused from a previous translation, and stats.categories
+        maps web-facing category keys to non-failed entry counts (an empty map
+        means none);
         done export frames carry {zip_path (resource pack, null when the run shipped no
         resource-pack files), overrides_zip_path (kubejs/config/ftbquests
         overrides, null when none), file_count}; done upload frames carry
         {pack_id, url}.
-      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - name: after
+          in: query
+          description: last event seq already applied by the client
+          schema: { type: integer, minimum: 0 }
       responses:
         "101": { description: switching protocols }
   /scan/{jobId}/result:
@@ -246,6 +275,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Entry" }
         "404": { description: unknown entry }
+        "409": { description: translate job still running }
   /translate/{jobId}/entries/{entryKey}/retranslate:
     post:
       summary: >
@@ -438,6 +468,18 @@ paths:
                           description: >-
                             Semantic token class the protector assigns
                             (ARG, VAR, TAG, BR, COLOR, RESET).
+  /translate/{jobId}/stats:
+    get:
+      summary: Current pipeline counters after any review edits
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PipelineStats" }
+        "404": { description: unknown or non-translate job }
+        "409": { description: translate result not available }
   /sessions:
     get:
       summary: List all persisted translation session records on disk
@@ -722,7 +764,11 @@ components:
           type: object
           additionalProperties: true
           description: >
-            scan: {modpack_path, source_locale?, target_locale?}.
+            scan: {modpack_path, source_locale?, target_locale?,
+            previous_modpack_path?, previous_resourcepack_path?,
+            previous_overrides_path?}. When any previous input is supplied,
+            previous_modpack_path and at least one previous translation artifact
+            are required. Paths accept local folders or ZIP files.
             translate: engine PipelineConfig surface - {modpack_path,
             output_dir?, source_locale?, target_locale?, model?, api_key?,
             api_base?, temperature?, reasoning_effort? (low|medium|high;
@@ -733,7 +779,12 @@ components:
             (include the server-synced origin=vanilla glossary store rows;
             no bundled vanilla data), extract_glossary?, glossary_max_terms?
             (positive integer; null removes the candidate limit),
-            include_categories?, manual_seed?, seed_from_job_id?}.
+            include_categories?, manual_seed?, seed_from_job_id?,
+            scan_job_id?, previous_modpack_path?,
+            previous_resourcepack_path?, previous_overrides_path?}.
+            scan_job_id reuses a completed matching scan and its run-scoped
+            migration index; it is only a hint - an unknown, unfinished or
+            non-matching id is ignored and the run scans afresh.
             include_categories
             limits translation to the named scan categories (default all).
             manual_seed: true seeds a hand-translation session - the run
@@ -778,13 +829,38 @@ components:
         status: { type: string, enum: [pending, running, done, failed, cancelled] }
         error: { type: string, nullable: true }
         created_at: { type: string, format: date-time }
+    JobSnapshot:
+      type: object
+      required: [job, cursor, events, failed_count, translation_started_at]
+      properties:
+        job: { $ref: "#/components/schemas/Job" }
+        cursor: { type: integer, minimum: 0 }
+        events:
+          type: array
+          items:
+            type: object
+            required: [type, seq, emitted_at]
+            additionalProperties: true
+            properties:
+              type: { type: string }
+              seq: { type: integer, minimum: 1 }
+              emitted_at:
+                type: integer
+                description: engine wall-clock epoch milliseconds
+        failed_count: { type: integer, minimum: 0 }
+        translation_started_at:
+          type: integer
+          nullable: true
+          description: epoch milliseconds of the first provider batch
     ScanResult:
       type: object
       description: >
         Source files with untranslated target-locale entries, grouped by
         category. entry_count/char_count and samples exclude keys that already
         have a non-empty target value. Parser failures remain visible with zero
-        volumes instead of being treated as fully translated.
+        volumes instead of being treated as fully translated. Migration scans
+        additionally report exact A/B/C matches per file and in the nullable
+        top-level migration summary.
       properties:
         modpack_path: { type: string }
         categories:
@@ -805,10 +881,26 @@ components:
                     path: { type: string }
                     entry_count: { type: integer }
                     char_count: { type: integer }
+                    migration_entry_count:
+                      type: integer
+                      description: exact A/B/C matches that skip translation
+                    migration_char_count:
+                      type: integer
+                      description: source characters covered by those matches
                     sample:
                       type: object
                       additionalProperties: { type: string }
                       description: up to 3 entries, values truncated to 160 chars
+        migration:
+          type: object
+          nullable: true
+          description: null for a normal scan without previous-version inputs
+          properties:
+            entry_count: { type: integer }
+            char_count: { type: integer }
+            resourcepack_asset_count:
+              type: integer
+              description: non-translation files preserved from the old resource pack
         identity:
           type: object
           description: >
@@ -856,7 +948,16 @@ components:
             manual-seed run; it is deliberately outside the set that feeds
             the resource pack, so an untranslated entry can never ship.
           enum:
-            [passed, warning, failed, modified, tm_hit, skipped, pending]
+            [
+              passed,
+              warning,
+              failed,
+              modified,
+              tm_hit,
+              migrated,
+              skipped,
+              pending,
+            ]
         errors:
           type: array
           items: { type: string }
@@ -1075,6 +1176,37 @@ components:
               source: { type: string }
               target: { type: string }
               kind: { type: string, enum: [defines, mentions, sibling] }
+    PipelineStats:
+      type: object
+      required:
+        [
+          total_files,
+          total_entries,
+          translated_entries,
+          failed_entries,
+          tm_hits,
+          migration_hits,
+          skipped_entries,
+          coverage_percent,
+          quality_score,
+        ]
+      properties:
+        total_files: { type: integer }
+        total_entries: { type: integer }
+        translated_entries: { type: integer }
+        failed_entries: { type: integer }
+        tm_hits: { type: integer }
+        migration_hits: { type: integer }
+        skipped_entries: { type: integer }
+        categories:
+          type: object
+          additionalProperties: { type: integer }
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        cached_tokens: { type: integer }
+        duration_seconds: { type: number }
+        coverage_percent: { type: number }
+        quality_score: { type: number }
     Glossary:
       type: object
       properties:

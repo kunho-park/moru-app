@@ -8,12 +8,14 @@ import { EngineGate } from "@/components/EngineGate";
 import { UpdateGate } from "@/components/UpdateGate";
 import { Sidebar } from "@/components/Sidebar";
 import { Titlebar } from "@/components/Titlebar";
+import { TranslationQueueRuntime } from "@/components/TranslationQueueRuntime";
 import { WizardLayout } from "@/components/WizardLayout";
 import { GlossaryScreen } from "@/screens/Glossary";
 import { HistoryScreen } from "@/screens/History";
 import { HomeScreen } from "@/screens/Home";
 import { OnboardingScreen } from "@/screens/Onboarding";
 import { SettingsScreen } from "@/screens/Settings";
+import { TranslationQueueScreen } from "@/screens/TranslationQueue";
 import { W1Select } from "@/screens/W1Select";
 import { W2Scan } from "@/screens/W2Scan";
 import { W3Settings } from "@/screens/W3Settings";
@@ -77,6 +79,8 @@ function MainContent() {
   switch (screen) {
     case "history":
       return <HistoryScreen />;
+    case "queue":
+      return <TranslationQueueScreen />;
     case "glossary":
       return <GlossaryScreen />;
     case "settings":
@@ -102,6 +106,7 @@ export default function App() {
         <UpdateGate>
           <EngineGate>
             <StartupCommunitySync />
+            <TranslationQueueRuntime />
             {showOnboarding ? (
               <OnboardingScreen />
             ) : (

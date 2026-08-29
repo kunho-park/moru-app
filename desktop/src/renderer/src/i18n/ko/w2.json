@@ -40,6 +40,13 @@
     "summary": "활성화된 리소스팩이 원문 {{keys}}개를 교체했습니다 — 게임에 실제로 표시되는 문구를 번역합니다",
     "packLine": "{{pack}} · {{keys}}개"
   },
+  "migration": {
+    "title": "이전 번역 비교 완료",
+    "summary": "{{reused}}개는 이전 수동 번역을 그대로 사용하고 {{translate}}개만 새로 번역합니다.",
+    "zero": "일치하는 항목이 없어 기존과 동일하게 전체를 새로 번역합니다.",
+    "reused": "재사용",
+    "assets": "보존 폰트 자산"
+  },
   "tree": {
     "header": "카테고리",
     "selectAll": "전체 선택",
@@ -71,6 +78,7 @@
   "footer": {
     "back": "뒤로",
     "entriesPart": "{{entries}} 엔트리 · ",
+    "reusedPart": "이전 번역 {{reused}}개 재사용 · ",
     "estSuffix": " 예상",
     "tokensOnly": "{{count}} 토큰",
     "next": "다음: 번역 설정"

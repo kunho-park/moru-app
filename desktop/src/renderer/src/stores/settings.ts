@@ -31,6 +31,28 @@ export const DEFAULT_MOD_BLACKLIST: readonly string[] = [
 
 export type PresetId = "fast" | "balanced" | "best";
 
+/** Serializable translation inputs locked when an unattended queue starts. */
+export interface TranslationRunSettings {
+  outputDir: string | null;
+  model: string;
+  temperature: number;
+  batchSize: number;
+  maxConcurrent: number;
+  maxRefine: number;
+  thinkingEnabled: boolean;
+  thinkingEffort: "low" | "medium" | "high";
+  useTm: boolean;
+  useVanillaGlossary: boolean;
+  extractGlossary: boolean;
+  glossaryMaxTerms: number | null;
+  ollamaBaseUrl: string;
+  openaiCompatBaseUrl: string;
+  targetLocale: string;
+  /** Frozen with the rest: a queued run must use the blacklist that was
+   *  in force when the queue started, not whatever it is edited to later. */
+  modBlacklist: string[];
+}
+
 interface SettingsStore {
   uiLanguage: "ko" | "en";
   theme: "dark" | "light";
@@ -99,3 +121,26 @@ export const useSettings = create<SettingsStore>()(
     { name: "moru-settings" },
   ),
 );
+
+/** Excludes UI state, recent folders, and store actions from a queued run. */
+export function snapshotTranslationSettings(): TranslationRunSettings {
+  const state = useSettings.getState();
+  return {
+    outputDir: state.outputDir,
+    model: state.model,
+    temperature: state.temperature,
+    batchSize: state.batchSize,
+    maxConcurrent: state.maxConcurrent,
+    maxRefine: state.maxRefine,
+    thinkingEnabled: state.thinkingEnabled,
+    thinkingEffort: state.thinkingEffort,
+    useTm: state.useTm,
+    useVanillaGlossary: state.useVanillaGlossary,
+    extractGlossary: state.extractGlossary,
+    glossaryMaxTerms: state.glossaryMaxTerms,
+    ollamaBaseUrl: state.ollamaBaseUrl,
+    openaiCompatBaseUrl: state.openaiCompatBaseUrl,
+    targetLocale: state.targetLocale,
+    modBlacklist: [...state.modBlacklist],
+  };
+}

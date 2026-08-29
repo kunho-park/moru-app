@@ -15,6 +15,7 @@ import { costUsd, priceForModel, usePricingTable, type PricingTable } from "@/li
 import { useRouter } from "@/stores/router";
 import { useSessions, type SessionRecord } from "@/stores/sessions";
 import { useSettings } from "@/stores/settings";
+import { selectQueueActive, useTranslationQueue } from "@/stores/translationQueue";
 import { useSessionJobs, useWizard } from "@/stores/wizard";
 
 type StatusFilter = "all" | "done" | "running" | "stopped";
@@ -82,8 +83,9 @@ function StatusBadge({ status }: { status: SessionRecord["status"] }): React.JSX
 
 interface SessionRowProps {
   s: SessionRecord;
-  isCurrent: boolean;
-  /** engine still holds this session's translate job (this app run) */
+  /** A running job id exists to probe and restore. */
+  canView: boolean;
+  /** Finished run: the job id is probed on click, never gated here. */
   canReopen: boolean;
   lang: "ko" | "en";
   onView: () => void;
@@ -96,7 +98,7 @@ interface SessionRowProps {
 
 function SessionRow({
   s,
-  isCurrent,
+  canView,
   canReopen,
   lang,
   onView,
@@ -181,7 +183,7 @@ function SessionRow({
           menuOpen ? "opacity-100" : "opacity-0"
         }`}
       >
-        {running && isCurrent && (
+        {running && canView && (
           <button
             className={`${actionBase} border-accent bg-[rgba(61,220,132,0.08)] text-accent hover:bg-[rgba(61,220,132,0.15)]`}
             onClick={onView}
@@ -300,11 +302,12 @@ export function HistoryScreen(): React.JSX.Element {
   const go = useRouter((s) => s.go);
   const sessions = useSessions((s) => s.sessions);
   const remove = useSessions((s) => s.remove);
-  const wizardSessionId = useWizard((s) => s.sessionId);
   const resumeSession = useWizard((s) => s.resumeSession);
   const reopenSession = useWizard((s) => s.reopenSession);
+  const sessionJobs = useSessionJobs((s) => s.jobs);
   const lang = useSettings((s) => s.uiLanguage);
   const pricingTable = usePricingTable();
+  const queueActive = useTranslationQueue(selectQueueActive);
 
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [query, setQuery] = useState("");
@@ -352,7 +355,11 @@ export function HistoryScreen(): React.JSX.Element {
     { id: "stopped", label: t("history.filter.stopped"), count: counts.stopped },
   ];
 
-  const reopen = async (sessionId: string, screen: "w5" | "w6"): Promise<void> => {
+  const reopen = async (sessionId: string, screen: "w4" | "w5" | "w6"): Promise<void> => {
+    if (queueActive) {
+      go("queue");
+      return;
+    }
     const result = await reopenSession(sessionId);
     if (result === "ok") {
       go(screen);
@@ -380,6 +387,8 @@ export function HistoryScreen(): React.JSX.Element {
           finishedAt: parseTimestamp(s.finished_at),
           doneEntries: s.done_entries ?? 0,
           totalEntries: s.total_entries ?? 0,
+          translateJobId: res.job.id,
+          scanTotals: null,
           stats: (s.stats as SessionRecord["stats"]) ?? null,
           error: null,
           exportZipPath: s.export_zip_path ?? null,
@@ -529,14 +538,21 @@ export function HistoryScreen(): React.JSX.Element {
               <SessionRow
                 key={s.id}
                 s={s}
-                isCurrent={s.id === wizardSessionId}
+                canView={
+                  s.status === "running" &&
+                  (s.translateJobId !== null || sessionJobs[s.id] !== undefined)
+                }
                 canReopen={s.status === "done" || s.status === "cancelled"}
                 lang={lang}
-                onView={() => go("w4")}
+                onView={() => void reopen(s.id, "w4")}
                 onReview={() => void reopen(s.id, "w5")}
                 onExport={() => void reopen(s.id, "w6")}
                 onExportSession={() => void handleExportSession(s)}
                 onRetry={() => {
+                  if (queueActive) {
+                    go("queue");
+                    return;
+                  }
                   if (resumeSession(s.id)) go("w1");
                 }}
                 onDelete={() => setConfirmId(s.id)}

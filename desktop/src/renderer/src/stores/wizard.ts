@@ -8,6 +8,7 @@ import { create } from "zustand";
 
 import type {
   JobEventFrame,
+  JobSnapshot,
   PipelineStats,
   ScanResult,
   TranslateParams,
@@ -17,8 +18,12 @@ import { api, openJobEvents } from "../lib/api";
 import { providerIdOf } from "../lib/models";
 import { moru } from "../lib/bridge";
 import { WEB_URL } from "../lib/web";
-import { useSessions } from "./sessions";
-import { useSettings } from "./settings";
+import { useSessions, type SessionScanTotals } from "./sessions";
+import {
+  snapshotTranslationSettings,
+  useSettings,
+  type TranslationRunSettings,
+} from "./settings";
 
 export interface TickerPair {
   key: string;
@@ -57,11 +62,9 @@ export interface LogLine {
 }
 
 /**
- * Runtime map of session id -> engine translate job id.
- * Engine jobs live only as long as the sidecar process, so this map is
- * deliberately NOT persisted: after an app/engine restart no reopen
- * affordance is offered for jobs the engine no longer holds.
- * wizard.reset() keeps it; a failed reopen probe prunes the mapping.
+ * Hot runtime cache of session id -> engine translate job id. SessionRecord
+ * also persists the id so a renderer reload can probe the still-running
+ * sidecar. Every restore verifies it; a sidecar restart invalidates the id.
  */
 interface SessionJobsStore {
   jobs: Record<string, string>;
@@ -90,6 +93,10 @@ interface WizardStore {
   probe: ModpackProbe | null;
   sourceLocale: string;
   targetLocale: string;
+  migrationEnabled: boolean;
+  previousModpackPath: string | null;
+  previousResourcepackPath: string | null;
+  previousOverridesPath: string | null;
 
   /* W2 */
   scanJobId: string | null;
@@ -97,6 +104,8 @@ interface WizardStore {
   scanProgress: { current: number; total: number; message: string };
   scanError: string | null;
   scanResult: ScanResult | null;
+  /** Selected W2 totals retained when a restored run no longer has its tree. */
+  scanTotals: SessionScanTotals | null;
   /** category names excluded from translation (default: all included) */
   excludedCategories: string[];
 
@@ -114,6 +123,8 @@ interface WizardStore {
   fileProgress: Record<string, FileProgress>;
   glossaryProgress: GlossaryProgress | null;
   failedKeys: Record<string, string[]>;
+  /** Total failures; failedKeys intentionally keeps only the useful tail. */
+  failedEntryCount: number;
   promptTokens: number;
   completionTokens: number;
   /** prompt tokens served from the provider cache (subset of promptTokens) */
@@ -140,16 +151,23 @@ interface WizardStore {
   sourceExportError: string | null;
 
   /* actions */
-  startSession: (path: string, probe: ModpackProbe) => void;
+  startSession: (path: string, probe: ModpackProbe, targetLocale?: string) => void;
   resumeSession: (sessionId: string) => boolean;
   /** Reopens a finished session on W5/W6 after verifying the engine job. */
   reopenSession: (sessionId: string) => Promise<"ok" | "busy" | "gone">;
   setTargetLocale: (locale: string) => void;
+  setMigrationEnabled: (enabled: boolean) => void;
+  setMigrationInput: (
+    kind: "modpack" | "resourcepack" | "overrides",
+    path: string | null,
+  ) => void;
   toggleCategory: (name: string, included: boolean) => void;
   setCategories: (names: string[], included: boolean) => void;
   startScan: () => Promise<void>;
-  startTranslate: () => Promise<void>;
+  startTranslate: (settingsOverride?: TranslationRunSettings) => Promise<void>;
+  handleTranslationFrame: (frame: JobEventFrame, sessionId: string) => void;
   cancelTranslate: () => Promise<void>;
+  updateReviewStats: (stats: PipelineStats) => void;
   startExport: () => Promise<void>;
   /** W3 source-text export: same engine export job, untranslated values. */
   startSourceExport: () => Promise<void>;
@@ -161,19 +179,103 @@ interface WizardStore {
 export function selectedScanTotals(state: {
   scanResult: ScanResult | null;
   excludedCategories: string[];
-}): { files: number; entries: number; chars: number } {
+  scanTotals?: SessionScanTotals | null;
+}): SessionScanTotals {
+  if (state.scanResult === null && state.scanTotals != null) {
+    return state.scanTotals;
+  }
   let files = 0;
   let entries = 0;
   let chars = 0;
+  let migrationEntries = 0;
+  let migrationChars = 0;
   if (state.scanResult !== null) {
     for (const cat of state.scanResult.categories) {
       if (state.excludedCategories.includes(cat.name)) continue;
       files += cat.file_count;
       entries += cat.entry_count;
       chars += cat.char_count;
+      migrationEntries += cat.files.reduce(
+        (sum, file) => sum + (file.migration_entry_count ?? 0),
+        0,
+      );
+      migrationChars += cat.files.reduce(
+        (sum, file) => sum + (file.migration_char_count ?? 0),
+        0,
+      );
     }
   }
-  return { files, entries, chars };
+  return {
+    files,
+    entries,
+    chars,
+    migrationEntries,
+    migrationChars,
+    translationEntries: Math.max(0, entries - migrationEntries),
+    translationChars: Math.max(0, chars - migrationChars),
+  };
+}
+
+type TranslateParamState = Pick<
+  WizardStore,
+  | "sourceLocale"
+  | "targetLocale"
+  | "migrationEnabled"
+  | "previousModpackPath"
+  | "previousResourcepackPath"
+  | "previousOverridesPath"
+  | "scanJobId"
+  | "scanResult"
+  | "excludedCategories"
+> & { modpackPath: string };
+
+/** Pure request builder shared by manual and queued ordinary translations. */
+export function buildTranslateParams(
+  state: TranslateParamState,
+  settings: TranslationRunSettings,
+  apiKey?: string,
+): TranslateParams {
+  const providerId = providerIdOf(settings.model);
+  const apiBase =
+    providerId === "ollama"
+      ? settings.ollamaBaseUrl
+      : providerId === "openai-compatible"
+        ? settings.openaiCompatBaseUrl
+        : undefined;
+  return {
+    modpack_path: state.modpackPath,
+    source_locale: state.sourceLocale,
+    target_locale: state.targetLocale,
+    model: settings.model,
+    api_key: apiKey,
+    api_base: apiBase,
+    temperature: settings.temperature,
+    batch_size: settings.batchSize,
+    max_concurrent: settings.maxConcurrent,
+    max_refine: settings.maxRefine,
+    reasoning_effort: settings.thinkingEnabled ? settings.thinkingEffort : undefined,
+    use_tm: settings.useTm,
+    use_vanilla_glossary: settings.useVanillaGlossary,
+    extract_glossary: settings.extractGlossary,
+    glossary_max_terms: settings.glossaryMaxTerms,
+    include_categories: includedCategories(state),
+    // A per-mod axis, frozen with the rest of the run settings so a queued
+    // pack uses the blacklist that was in force when the queue started.
+    mod_blacklist: settings.modBlacklist,
+    output_dir: settings.outputDir ?? undefined,
+    // Reuse the completed W2 scan through the official v1.0 session pipeline.
+    // Migration scans receive an additional A/B/C fingerprint check server-side.
+    scan_job_id: state.scanJobId ?? undefined,
+    ...(state.migrationEnabled && state.previousModpackPath !== null
+      ? { previous_modpack_path: state.previousModpackPath }
+      : {}),
+    ...(state.migrationEnabled && state.previousResourcepackPath !== null
+      ? { previous_resourcepack_path: state.previousResourcepackPath }
+      : {}),
+    ...(state.migrationEnabled && state.previousOverridesPath !== null
+      ? { previous_overrides_path: state.previousOverridesPath }
+      : {}),
+  };
 }
 
 /**
@@ -198,9 +300,186 @@ let closeScanEvents: (() => void) | null = null;
 let closeTranslateEvents: (() => void) | null = null;
 let closeExportEvents: (() => void) | null = null;
 let closeSourceExportEvents: (() => void) | null = null;
+let lastSessionProgressPersistedAt = 0;
 
 const MAX_LOG_LINES = 500;
 const MAX_TICKER = 24;
+const MAX_FAILED_KEY_SAMPLES = 50;
+
+function attachTranslationEvents(jobId: string, sessionId: string, after?: number): void {
+  closeTranslateEvents?.();
+  closeTranslateEvents = openJobEvents(
+    jobId,
+    (frame) => useWizard.getState().handleTranslationFrame(frame, sessionId),
+    (_event, manuallyClosed) => {
+      const state = useWizard.getState();
+      if (
+        manuallyClosed ||
+        state.sessionId !== sessionId ||
+        state.translateJobId !== jobId ||
+        state.runState !== "running"
+      ) {
+        return;
+      }
+      state.appendLog("warn", "event stream disconnected; restoring current engine state");
+      window.setTimeout(() => {
+        const current = useWizard.getState();
+        if (
+          current.sessionId === sessionId &&
+          current.translateJobId === jobId &&
+          current.runState === "running"
+        ) {
+          void current.reopenSession(sessionId);
+        }
+      }, 500);
+    },
+    after,
+  );
+}
+
+function withLog(
+  log: LogLine[],
+  level: LogLine["level"],
+  text: string,
+  ts: number,
+): LogLine[] {
+  if (log.at(-1)?.text === text) return log;
+  return [...log.slice(-MAX_LOG_LINES + 1), { ts, level, text }];
+}
+
+/** Pure event reducer shared by first-run streaming and snapshot restoration. */
+function translationFramePatch(
+  prev: WizardStore,
+  frame: JobEventFrame,
+): Partial<WizardStore> {
+  const ts = frame.emitted_at ?? Date.now();
+  switch (frame.type) {
+    case "progress": {
+      const file = frame.file;
+      if (frame.stage === "translate" && file !== undefined) {
+        const done = frame.done ?? 0;
+        const total = frame.total ?? 0;
+        const previousDone = prev.fileProgress[file]?.done ?? 0;
+        return {
+          fileProgress: {
+            ...prev.fileProgress,
+            [file]: { file, done, total },
+          },
+          doneEntries: Math.max(0, prev.doneEntries - previousDone + done),
+        };
+      }
+      return { log: withLog(prev.log, "info", `stage: ${frame.stage}`, ts) };
+    }
+    case "batch_started":
+      return {
+        translationStartedAt: prev.translationStartedAt ?? ts,
+        activeBatches: {
+          ...prev.activeBatches,
+          [frame.request_id]: {
+            requestId: frame.request_id,
+            file: frame.file,
+            key: frame.key,
+            entries: frame.entries,
+            startedAt: ts,
+          },
+        },
+      };
+    case "batch_finished": {
+      const activeBatches = { ...prev.activeBatches };
+      delete activeBatches[frame.request_id];
+      return { activeBatches };
+    }
+    case "tokens":
+      return {
+        promptTokens: frame.prompt_tokens,
+        completionTokens: frame.completion_tokens,
+        ...(frame.cached_tokens !== undefined ? { cachedTokens: frame.cached_tokens } : {}),
+      };
+    case "entry_done":
+      return {
+        ticker: [
+          { key: frame.key, source: frame.source, translated: frame.translated },
+          ...prev.ticker,
+        ].slice(0, MAX_TICKER),
+      };
+    case "entry_failed": {
+      const failedKeys = { ...prev.failedKeys };
+      // Keys are only unique within a file, so a bare key collapses distinct
+      // failures (every KubeJS script mints display_name.0001) into one row.
+      failedKeys[frame.file !== undefined ? `${frame.file}:${frame.key}` : frame.key] =
+        frame.errors;
+      while (Object.keys(failedKeys).length > MAX_FAILED_KEY_SAMPLES) {
+        const oldest = Object.keys(failedKeys)[0];
+        if (oldest === undefined) break;
+        delete failedKeys[oldest];
+      }
+      return {
+        failedKeys,
+        failedEntryCount: prev.failedEntryCount + 1,
+        log: withLog(
+          prev.log,
+          "warn",
+          `entry failed: ${frame.key} — ${frame.errors.join("; ")}`,
+          ts,
+        ),
+      };
+    }
+    case "glossary_progress": {
+      const failedAttempt = frame.error !== undefined;
+      const patch: Partial<WizardStore> = {
+        glossaryProgress: {
+          done: frame.done,
+          total: frame.total,
+          newTerms: frame.new_terms,
+          retrying: failedAttempt && !frame.skipped ? (frame.attempt ?? 1) : null,
+          lastError: failedAttempt ? (frame.error ?? null) : null,
+        },
+      };
+      if (failedAttempt) {
+        patch.log = withLog(
+          prev.log,
+          "warn",
+          `glossary chunk ${frame.chunk ?? frame.done + 1}/${frame.total} ` +
+            (frame.skipped ? "skipped" : `retry ${frame.attempt}`) +
+            `: ${frame.error}`,
+          ts,
+        );
+      }
+      return patch;
+    }
+    case "glossary_extracted":
+      return {
+        log: withLog(prev.log, "info", `glossary: +${frame.new_terms} terms extracted`, ts),
+      };
+    case "done":
+      return {
+        runState: "done",
+        runError: null,
+        finishedAt: ts,
+        activeBatches: {},
+        stats: frame.stats ?? null,
+        log: withLog(prev.log, "info", "translate done", ts),
+      };
+    case "failed": {
+      const error = frame.error ?? "translate failed";
+      return {
+        runState: "failed",
+        runError: error,
+        finishedAt: ts,
+        activeBatches: {},
+        log: withLog(prev.log, "error", error, ts),
+      };
+    }
+    case "cancelled":
+      return {
+        runState: "cancelled",
+        finishedAt: ts,
+        activeBatches: {},
+        stats: frame.stats ?? null,
+        log: withLog(prev.log, "warn", "translate cancelled; partial result preserved", ts),
+      };
+  }
+}
 
 const initialJobState = {
   scanJobId: null,
@@ -208,6 +487,7 @@ const initialJobState = {
   scanProgress: { current: 0, total: 0, message: "" },
   scanError: null,
   scanResult: null,
+  scanTotals: null,
   excludedCategories: [],
   translateJobId: null,
   model: null,
@@ -220,6 +500,7 @@ const initialJobState = {
   fileProgress: {},
   glossaryProgress: null,
   failedKeys: {},
+  failedEntryCount: 0,
   promptTokens: 0,
   completionTokens: 0,
   cachedTokens: 0,
@@ -246,9 +527,13 @@ export const useWizard = create<WizardStore>((set, get) => ({
   probe: null,
   sourceLocale: "en_us",
   targetLocale: useSettings.getState().targetLocale,
+  migrationEnabled: false,
+  previousModpackPath: null,
+  previousResourcepackPath: null,
+  previousOverridesPath: null,
   ...initialJobState,
 
-  startSession: (path, probe) => {
+  startSession: (path, probe, targetLocale) => {
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
@@ -258,7 +543,11 @@ export const useWizard = create<WizardStore>((set, get) => ({
       modpackPath: path,
       modpackName: probe.name,
       probe,
-      targetLocale: useSettings.getState().targetLocale,
+      targetLocale: targetLocale ?? useSettings.getState().targetLocale,
+      migrationEnabled: false,
+      previousModpackPath: null,
+      previousResourcepackPath: null,
+      previousOverridesPath: null,
       ...initialJobState,
     });
     useSettings.getState().rememberFolder(path);
@@ -277,6 +566,10 @@ export const useWizard = create<WizardStore>((set, get) => ({
       probe: null,
       sourceLocale: record.sourceLocale,
       targetLocale: record.targetLocale,
+      migrationEnabled: false,
+      previousModpackPath: null,
+      previousResourcepackPath: null,
+      previousOverridesPath: null,
       ...initialJobState,
     });
     return true;
@@ -284,126 +577,142 @@ export const useWizard = create<WizardStore>((set, get) => ({
 
   reopenSession: async (sessionId) => {
     const state = get();
-    // The sidecar can restart (dropping every job) under a live renderer,
-    // so even the wizard's own finished session is probed before "ok".
-    const liveJobId =
-      state.sessionId === sessionId &&
-      (state.runState === "done" || state.runState === "cancelled")
-        ? state.translateJobId
-        : null;
-    if (liveJobId !== null) {
-      try {
-        await api.entries(liveJobId, "all", 1, 1);
-      } catch {
-        useSessionJobs.getState().unregister(sessionId);
-        return "gone";
-      }
-      // Keep the richer in-run state (scan identity, failed keys, log).
-      return "ok";
-    }
-    // One wizard session at a time - never clobber a run in flight.
+    const record = useSessions.getState().sessions.find((s) => s.id === sessionId);
+    if (record === undefined || record.status === "failed") return "gone";
     if (
       state.scanState === "running" ||
-      state.runState === "running" ||
       state.exportState === "running" ||
-      state.sourceExportState === "running"
+      state.sourceExportState === "running" ||
+      (state.sessionId !== sessionId && state.runState === "running")
     ) {
       return "busy";
     }
-    const record = useSessions.getState().sessions.find((s) => s.id === sessionId);
-    const jobId = useSessionJobs.getState().jobs[sessionId] ?? sessionId;
-    if (
-      record === undefined ||
-      (record.status !== "done" && record.status !== "cancelled")
-    ) {
-      return "gone";
-    }
-    // Engine jobs are process-scoped or persisted on disk. Probing api.entries
-    // auto-restores disk session files if sidecar dropped in-RAM job state.
-    try {
-      await api.entries(jobId, "all", 1, 1);
-      useSessionJobs.getState().register(sessionId, jobId);
-    } catch {
-      try {
-        await api.restoreSession(sessionId);
-        useSessionJobs.getState().register(sessionId, sessionId);
-      } catch {
-        useSessionJobs.getState().unregister(sessionId);
-        return "gone";
-      }
-    }
-    const activeJobId = useSessionJobs.getState().jobs[sessionId] ?? jobId;
-    const failedKeys: Record<string, string[]> = {};
-    const restoredLog: LogLine[] = [];
-    try {
-      let page = 1;
-      while (true) {
-        const res = await api.entries(activeJobId, "failed", page, 500);
-        for (const e of res.entries) {
-          failedKeys[e.key] = e.errors.length > 0 ? e.errors : ["translation failed"];
-          restoredLog.push({
-            ts: record.finishedAt ?? record.createdAt,
-            level: "warn",
-            text: `entry failed: ${e.key} — ${e.errors.join("; ") || "failed"}`,
-          });
-        }
-        if (res.entries.length === 0 || page * 500 >= res.total) break;
-        page++;
-      }
+    const candidates = [
+      record.translateJobId,
+      useSessionJobs.getState().jobs[sessionId],
+      state.sessionId === sessionId ? state.translateJobId : null,
+      sessionId,
+    ].filter((value, index, values): value is string =>
+      value !== null && value !== undefined && values.indexOf(value) === index,
+    );
 
-      page = 1;
-      while (true) {
-        const res = await api.entries(activeJobId, "warning", page, 500);
-        for (const e of res.entries) {
-          if (e.errors.length > 0) {
-            restoredLog.push({
-              ts: record.finishedAt ?? record.createdAt,
-              level: "warn",
-              text: `entry warning: ${e.key} — ${e.errors.join("; ")}`,
-            });
-          }
-        }
-        if (res.entries.length === 0 || page * 500 >= res.total) break;
-        page++;
+    const probe = async (jobId: string): Promise<JobSnapshot> => {
+      const value = await api.jobSnapshot(jobId);
+      if (value.job.type !== "translate") throw new Error("not a translate job");
+      // Review/export require an actual PipelineResult, not only metadata.
+      if (value.job.status === "done" || value.job.status === "cancelled") {
+        await api.entries(jobId, "all", 1, 1);
       }
-    } catch {
-      // ignore
+      return value;
+    };
+
+    let jobId: string | null = null;
+    let snapshot: JobSnapshot | null = null;
+    for (const candidate of candidates) {
+      try {
+        snapshot = await probe(candidate);
+        jobId = candidate;
+        break;
+      } catch {
+        // Try the next live/persisted identity before declaring the row gone.
+      }
+    }
+    if (snapshot === null || jobId === null) {
+      try {
+        const restored = await api.restoreSession(sessionId);
+        snapshot = await probe(restored.id);
+        jobId = restored.id;
+      } catch {
+        snapshot = null;
+        jobId = null;
+      }
+    }
+    if (snapshot === null || jobId === null) {
+      useSessionJobs.getState().unregister(sessionId);
+      useSessions.getState().patch(sessionId, { translateJobId: null });
+      if (record.status === "running") {
+        const error = "engine no longer holds this translation job";
+        useSessions.getState().patch(sessionId, {
+          status: "failed",
+          finishedAt: Date.now(),
+          error,
+        });
+        if (get().sessionId === sessionId) {
+          set({ runState: "failed", runError: error, finishedAt: Date.now() });
+          moru.setBusy(false);
+        }
+      }
+      return "gone";
     }
 
     let scanResult: ScanResult | null = null;
     try {
-      scanResult = await api.scanResult(activeJobId);
+      scanResult = await api.scanResult(jobId);
     } catch {
-      // ignore
+      // Older sessions may not carry their W2 payload; compact totals remain.
     }
 
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
     closeSourceExportEvents?.();
-    set({
+
+    const engineRunState =
+      snapshot.job.status === "pending" ? "running" : snapshot.job.status;
+    const startedAt = Date.parse(snapshot.job.created_at);
+    let restored: WizardStore = {
+      ...get(),
       sessionId: record.id,
       modpackPath: record.modpackPath,
       modpackName: record.modpackName,
       probe: null,
       sourceLocale: record.sourceLocale,
       targetLocale: record.targetLocale,
+      migrationEnabled: false,
+      previousModpackPath: null,
+      previousResourcepackPath: null,
+      previousOverridesPath: null,
       ...initialJobState,
-      scanState: scanResult !== null ? ("done" as const) : ("idle" as const),
+      scanState: scanResult !== null || record.scanTotals !== null ? "done" : "idle",
       scanResult,
-      failedKeys,
-      log: restoredLog,
-      translateJobId: activeJobId,
+      scanTotals:
+        scanResult !== null
+          ? selectedScanTotals({ scanResult, excludedCategories: [] })
+          : record.scanTotals,
+      translateJobId: jobId,
       model: record.model,
-      runState: record.status,
-      startedAt: record.createdAt,
-      finishedAt: record.finishedAt,
-      doneEntries: record.doneEntries,
-      stats: record.stats,
-      exportState: record.exportZipPath !== null ? ("done" as const) : ("idle" as const),
+      runState: engineRunState,
+      runError: snapshot.job.error,
+      startedAt: Number.isFinite(startedAt) ? startedAt : record.createdAt,
+      translationStartedAt: snapshot.translation_started_at,
+      finishedAt: engineRunState === "running" ? null : record.finishedAt,
+      stats: engineRunState === "running" ? null : record.stats,
+      exportState: record.exportZipPath !== null ? "done" : "idle",
       exportZipPath: record.exportZipPath,
       exportOverridesZipPath: record.exportOverridesZipPath,
+    };
+    for (const frame of snapshot.events) {
+      restored = { ...restored, ...translationFramePatch(restored, frame) };
+    }
+    restored.failedEntryCount = Math.max(restored.failedEntryCount, snapshot.failed_count);
+    if (Object.keys(restored.fileProgress).length === 0) {
+      restored.doneEntries = record.doneEntries;
+    }
+    set(restored);
+    useSessionJobs.getState().register(sessionId, jobId);
+    const current = get();
+    useSessions.getState().patch(sessionId, {
+      translateJobId: jobId,
+      status: current.runState === "idle" ? record.status : current.runState,
+      finishedAt: current.runState === "running" ? null : current.finishedAt,
+      doneEntries: current.doneEntries,
+      stats: current.stats,
+      error: current.runError,
     });
+    moru.setBusy(current.runState === "running");
+    if (current.runState === "running") {
+      attachTranslationEvents(jobId, sessionId, snapshot.cursor);
+    }
     return "ok";
   },
 
@@ -411,6 +720,17 @@ export const useWizard = create<WizardStore>((set, get) => ({
     set({ targetLocale: locale });
     useSettings.getState().set({ targetLocale: locale });
   },
+
+  setMigrationEnabled: (enabled) => set({ migrationEnabled: enabled }),
+
+  setMigrationInput: (kind, path) =>
+    set(
+      kind === "modpack"
+        ? { previousModpackPath: path }
+        : kind === "resourcepack"
+          ? { previousResourcepackPath: path }
+          : { previousOverridesPath: path },
+    ),
 
   toggleCategory: (name, included) =>
     set((state) => ({
@@ -427,14 +747,23 @@ export const useWizard = create<WizardStore>((set, get) => ({
     })),
 
   startScan: async () => {
-    const { modpackPath, sourceLocale, targetLocale } = get();
+    const {
+      modpackPath,
+      sourceLocale,
+      targetLocale,
+      migrationEnabled,
+      previousModpackPath,
+      previousResourcepackPath,
+      previousOverridesPath,
+    } = get();
     if (modpackPath === null || get().scanState === "running") return;
     closeScanEvents?.();
-    set({
-      scanState: "running",
-      scanError: null,
-      scanResult: null,
-      scanProgress: { current: 0, total: 0, message: "" },
+      set({
+        scanState: "running",
+        scanError: null,
+        scanResult: null,
+        scanTotals: null,
+        scanProgress: { current: 0, total: 0, message: "" },
     });
     try {
       const job = await api.startScan({
@@ -444,77 +773,98 @@ export const useWizard = create<WizardStore>((set, get) => ({
         // The blacklist decides which mods the scan even opens, so it has
         // to travel with the scan, not just with the translate run.
         mod_blacklist: useSettings.getState().modBlacklist,
+        ...(migrationEnabled && previousModpackPath !== null
+          ? { previous_modpack_path: previousModpackPath }
+          : {}),
+        ...(migrationEnabled && previousResourcepackPath !== null
+          ? { previous_resourcepack_path: previousResourcepackPath }
+          : {}),
+        ...(migrationEnabled && previousOverridesPath !== null
+          ? { previous_overrides_path: previousOverridesPath }
+          : {}),
       });
       set({ scanJobId: job.id });
-      closeScanEvents = openJobEvents(job.id, (frame) => {
-        if (frame.type === "progress") {
-          set({
-            scanProgress: {
-              current: frame.current ?? frame.done ?? 0,
-              total: frame.total ?? 0,
-              message: frame.message ?? "",
-            },
-          });
-        } else if (frame.type === "done") {
-          void api.scanResult(job.id).then((result) => {
+      // The scan must always reach a terminal state: an unhandled result
+      // rejection used to pin scanState at "running", which now also blocks
+      // the queue runner waiting on it.
+      let settling = false;
+      const settleScan = (): void => {
+        if (settling) return;
+        settling = true;
+        void api
+          .scanResult(job.id)
+          .then((result) => {
             // Confident launcher-metadata identity beats the folder-name guess.
             const identity = result.identity;
             set({
               scanState: "done",
               scanResult: result,
+              scanTotals: selectedScanTotals({
+                scanResult: result,
+                excludedCategories: [],
+              }),
               excludedCategories: [],
               ...(identity?.confident === true && identity.name !== null
                 ? { modpackName: identity.name }
                 : {}),
             });
+          })
+          .catch((error) => {
+            set({ scanState: "failed", scanError: String(error) });
           });
-        } else if (frame.type === "failed") {
-          set({ scanState: "failed", scanError: frame.error ?? "scan failed" });
-        } else if (frame.type === "cancelled") {
-          set({ scanState: "idle" });
-        }
-      });
+      };
+      closeScanEvents = openJobEvents(
+        job.id,
+        (frame) => {
+          if (frame.type === "progress") {
+            set({
+              scanProgress: {
+                current: frame.current ?? frame.done ?? 0,
+                total: frame.total ?? 0,
+                message: frame.message ?? "",
+              },
+            });
+          } else if (frame.type === "done") {
+            settleScan();
+          } else if (frame.type === "failed") {
+            set({ scanState: "failed", scanError: frame.error ?? "scan failed" });
+          } else if (frame.type === "cancelled") {
+            set({ scanState: "idle" });
+          }
+        },
+        (_event, manuallyClosed) => {
+          // Like the translate stream, a dropped socket must not leave the
+          // scan running forever; the result probe decides done vs failed.
+          const state = get();
+          if (manuallyClosed || state.scanJobId !== job.id || state.scanState !== "running") {
+            return;
+          }
+          settleScan();
+        },
+      );
     } catch (error) {
       set({ scanState: "failed", scanError: String(error) });
     }
   },
 
-  startTranslate: async () => {
+  startTranslate: async (settingsOverride) => {
     const state = get();
     if (state.modpackPath === null || state.runState === "running") return;
-    const settings = useSettings.getState();
+    const settings = settingsOverride ?? snapshotTranslationSettings();
+    const scanTotals = selectedScanTotals(state);
     closeTranslateEvents?.();
 
     const providerId = providerIdOf(settings.model);
     const apiKey = (await moru.secrets.get(`apikey:${providerId}`)) ?? undefined;
-    const apiBase =
-      providerId === "ollama"
-        ? settings.ollamaBaseUrl
-        : providerId === "openai-compatible"
-          ? settings.openaiCompatBaseUrl
-          : undefined;
     const sessionId = state.sessionId ?? crypto.randomUUID();
     const params: TranslateParams = {
+      ...buildTranslateParams(
+        { ...state, modpackPath: state.modpackPath },
+        settings,
+        apiKey,
+      ),
       session_id: sessionId,
-      scan_job_id: state.scanJobId ?? undefined,
-      modpack_path: state.modpackPath,
-      source_locale: state.sourceLocale,
-      target_locale: state.targetLocale,
-      model: settings.model,
-      api_key: apiKey,
-      api_base: apiBase,
-      temperature: settings.temperature,
-      batch_size: settings.batchSize,
-      max_concurrent: settings.maxConcurrent,
-      max_refine: settings.maxRefine,
-      reasoning_effort: settings.thinkingEnabled ? settings.thinkingEffort : undefined,
-      use_tm: settings.useTm,
-      use_vanilla_glossary: settings.useVanillaGlossary,
-      extract_glossary: settings.extractGlossary,
-      glossary_max_terms: settings.glossaryMaxTerms,
-      include_categories: includedCategories(state),
-      mod_blacklist: settings.modBlacklist,
-      output_dir: settings.outputDir ?? undefined,
+
     };
 
     set({
@@ -525,9 +875,11 @@ export const useWizard = create<WizardStore>((set, get) => ({
       translationStartedAt: null,
       finishedAt: null,
       doneEntries: 0,
+      scanTotals,
       fileProgress: {},
       glossaryProgress: null,
       failedKeys: {},
+      failedEntryCount: 0,
       promptTokens: 0,
       completionTokens: 0,
       cachedTokens: 0,
@@ -573,7 +925,9 @@ export const useWizard = create<WizardStore>((set, get) => ({
       createdAt: Date.now(),
       finishedAt: null,
       doneEntries: 0,
-      totalEntries: selectedScanTotals(state).entries,
+      totalEntries: scanTotals.entries,
+      translateJobId: null,
+      scanTotals,
       stats: null,
       error: null,
       exportZipPath: null,
@@ -602,117 +956,33 @@ export const useWizard = create<WizardStore>((set, get) => ({
       const job = await api.startTranslate(params);
       set({ translateJobId: job.id });
       useSessionJobs.getState().register(sessionId, job.id);
-      closeTranslateEvents = openJobEvents(job.id, (frame: JobEventFrame) => {
-        switch (frame.type) {
-          case "progress": {
-            const file = frame.file;
-            if (frame.stage === "translate" && file !== undefined) {
-              const done = frame.done ?? 0;
-              const total = frame.total ?? 0;
-              set((prev) => {
-                const fileProgress = {
-                  ...prev.fileProgress,
-                  [file]: { file, done, total },
-                };
-                const doneEntries = Object.values(fileProgress).reduce(
-                  (sum, f) => sum + f.done,
-                  0,
-                );
-                return { fileProgress, doneEntries };
-              });
-            } else {
-              get().appendLog("info", `stage: ${frame.stage}`);
-            }
-            break;
-          }
-          case "batch_started": {
-            const batchStartedAt = Date.now();
-            set((prev) => ({
-              translationStartedAt: prev.translationStartedAt ?? batchStartedAt,
-              activeBatches: {
-                ...prev.activeBatches,
-                [frame.request_id]: {
-                  requestId: frame.request_id,
-                  file: frame.file,
-                  key: frame.key,
-                  entries: frame.entries,
-                  startedAt: batchStartedAt,
-                },
-              },
-            }));
-            break;
-          }
-          case "batch_finished":
-            set((prev) => {
-              const activeBatches = { ...prev.activeBatches };
-              delete activeBatches[frame.request_id];
-              return { activeBatches };
-            });
-            break;
-          case "tokens":
-            set({
-              promptTokens: frame.prompt_tokens,
-              completionTokens: frame.completion_tokens,
-              ...(frame.cached_tokens !== undefined
-                ? { cachedTokens: frame.cached_tokens }
-                : {}),
-            });
-            break;
-          case "entry_done":
-            set((prev) => ({
-              ticker: [
-                { key: frame.key, source: frame.source, translated: frame.translated },
-                ...prev.ticker,
-              ].slice(0, MAX_TICKER),
-            }));
-            break;
-          case "entry_failed":
-            set((prev) => ({
-              failedKeys: { ...prev.failedKeys, [frame.key]: frame.errors },
-            }));
-            get().appendLog("warn", `entry failed: ${frame.key} — ${frame.errors.join("; ")}`);
-            break;
-          case "glossary_progress": {
-            const failedAttempt = frame.error !== undefined;
-            if (failedAttempt) {
-              get().appendLog(
-                "warn",
-                `glossary chunk ${frame.chunk ?? frame.done + 1}/${frame.total} ` +
-                  (frame.skipped ? "skipped" : `retry ${frame.attempt}`) +
-                  `: ${frame.error}`,
-              );
-            }
-            set({
-              glossaryProgress: {
-                done: frame.done,
-                total: frame.total,
-                newTerms: frame.new_terms,
-                retrying: failedAttempt && !frame.skipped ? (frame.attempt ?? 1) : null,
-                lastError: failedAttempt ? (frame.error ?? null) : null,
-              },
-            });
-            break;
-          }
-          case "glossary_extracted":
-            get().appendLog("info", `glossary: +${frame.new_terms} terms extracted`);
-            break;
-          case "done":
-            get().appendLog("info", "translate done");
-            finish("done", { stats: frame.stats ?? null });
-            break;
-          case "failed":
-            get().appendLog("error", frame.error ?? "translate failed");
-            finish("failed", { runError: frame.error ?? "translate failed" });
-            break;
-          case "cancelled":
-            get().appendLog("warn", "translate cancelled; partial result preserved");
-            finish("cancelled", { stats: frame.stats ?? null });
-            break;
-        }
-      });
+      useSessions.getState().patch(sessionId, { translateJobId: job.id });
+      lastSessionProgressPersistedAt = 0;
+      attachTranslationEvents(job.id, sessionId);
     } catch (error) {
       get().appendLog("error", String(error));
       finish("failed", { runError: String(error) });
+    }
+  },
+
+  handleTranslationFrame: (frame, sessionId) => {
+    if (get().sessionId !== sessionId) return;
+    set((prev) => translationFramePatch(prev, frame));
+    const current = get();
+    const terminal =
+      frame.type === "done" || frame.type === "failed" || frame.type === "cancelled";
+    if (terminal) moru.setBusy(false);
+
+    const now = Date.now();
+    if (terminal || (frame.type === "progress" && now - lastSessionProgressPersistedAt >= 1000)) {
+      lastSessionProgressPersistedAt = now;
+      useSessions.getState().patch(sessionId, {
+        ...(current.runState === "idle" ? {} : { status: current.runState }),
+        finishedAt: current.finishedAt,
+        doneEntries: current.doneEntries,
+        stats: current.stats,
+        error: current.runError,
+      });
     }
   },
 
@@ -720,6 +990,29 @@ export const useWizard = create<WizardStore>((set, get) => ({
     const { translateJobId } = get();
     if (translateJobId === null) return;
     await api.cancelJob(translateJobId);
+  },
+
+  updateReviewStats: (stats) => {
+    // Any successful review mutation makes previously built archives stale.
+    // The engine already drops zip paths from its persisted done payload;
+    // mirror that invalidation in the renderer and local history so W6 offers
+    // "Create export" again instead of only opening the obsolete artifact.
+    set({
+      stats,
+      exportJobId: null,
+      exportState: "idle",
+      exportZipPath: null,
+      exportOverridesZipPath: null,
+      exportError: null,
+    });
+    const sessionId = get().sessionId;
+    if (sessionId !== null) {
+      useSessions.getState().patch(sessionId, {
+        stats,
+        exportZipPath: null,
+        exportOverridesZipPath: null,
+      });
+    }
   },
 
   startExport: async () => {
@@ -812,6 +1105,10 @@ export const useWizard = create<WizardStore>((set, get) => ({
       modpackPath: null,
       modpackName: "",
       probe: null,
+      migrationEnabled: false,
+      previousModpackPath: null,
+      previousResourcepackPath: null,
+      previousOverridesPath: null,
       ...initialJobState,
     });
   },

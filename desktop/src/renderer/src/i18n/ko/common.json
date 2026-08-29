@@ -8,6 +8,7 @@
   "nav": {
     "newTranslation": "새 번역",
     "home": "홈",
+    "queue": "번역 대기열",
     "history": "작업 기록",
     "glossary": "용어사전",
     "community": "커뮤니티",
@@ -58,6 +59,7 @@
     "passed": "통과",
     "modified": "수정됨",
     "tmHit": "TM 재사용",
+    "migrated": "이전 번역 재사용",
     "skipped": "건너뜀",
     "untranslated": "미번역",
     "shared": "공유됨"

@@ -26,6 +26,7 @@ export type EntryStatus =
   | "failed"
   | "modified"
   | "tm_hit"
+  | "migrated"
   | "skipped"
   | "pending";
 
@@ -238,7 +239,19 @@ export interface ScanFile {
   path: string;
   entry_count: number;
   char_count: number;
+  /** Exact A/B/C matches that skip AI translation (migration scans only). */
+  migration_entry_count?: number;
+  migration_char_count?: number;
   sample: Record<string, string>;
+}
+
+/** Compact restore payload: current UI state plus a gap-free WS cursor. */
+export interface JobSnapshot {
+  job: Job;
+  cursor: number;
+  events: JobEventFrame[];
+  failed_count: number;
+  translation_started_at: number | null;
 }
 
 export interface ScanCategory {
@@ -316,6 +329,11 @@ export interface ScanResult {
   source_overrides?: SourceOverride[];
   /** Mods that hardcode display text in compiled code; absent on legacy records. */
   hardcoded_mods?: HardcodedMod[];
+  migration?: {
+    entry_count: number;
+    char_count: number;
+    resourcepack_asset_count: number;
+  } | null;
 }
 
 export type GlossaryOrigin = "vanilla" | "extracted" | "manual" | "community";
@@ -391,6 +409,8 @@ export interface PipelineStats {
   translated_entries: number;
   failed_entries: number;
   tm_hits: number;
+  /** Exact A/B/C matches reused from a user-supplied previous translation. */
+  migration_hits?: number;
   skipped_entries: number;
   prompt_tokens: number;
   completion_tokens: number;
@@ -451,6 +471,9 @@ export interface TranslateParams {
    * pack never re-translates and never overwrites the human work.
    */
   seed_from_job_id?: string;
+  previous_modpack_path?: string;
+  previous_resourcepack_path?: string;
+  previous_overrides_path?: string;
 }
 
 export interface ScanParams {
@@ -459,6 +482,9 @@ export interface ScanParams {
   target_locale?: string;
   /** Mod ids to leave out of the scan; omitted or empty scans every mod. */
   mod_blacklist?: string[];
+  previous_modpack_path?: string;
+  previous_resourcepack_path?: string;
+  previous_overrides_path?: string;
 }
 
 /** Params for POST /jobs {type: "export"} - archives a translate job's trees. */
@@ -503,7 +529,14 @@ export interface UploadParams {
 
 /* ---- WebSocket event frames (/jobs/{id}/events) ---- */
 
-export interface ProgressFrame {
+export interface JobEventMeta {
+  /** Monotonic within one job; used as the reconnect cursor. */
+  seq?: number;
+  /** Engine wall-clock timestamp in epoch milliseconds. */
+  emitted_at?: number;
+}
+
+export interface ProgressFrame extends JobEventMeta {
   type: "progress";
   stage: string;
   /** translate/export style */
@@ -515,20 +548,22 @@ export interface ProgressFrame {
   message?: string;
 }
 
-export interface EntryFailedFrame {
+export interface EntryFailedFrame extends JobEventMeta {
   type: "entry_failed";
   key: string;
+  /** Owning file; keys are unique per file, not across the pack. */
+  file?: string;
   errors: string[];
 }
 
-export interface EntryDoneFrame {
+export interface EntryDoneFrame extends JobEventMeta {
   type: "entry_done";
   key: string;
   source: string;
   translated: string;
 }
 
-export interface BatchStartedFrame {
+export interface BatchStartedFrame extends JobEventMeta {
   type: "batch_started";
   request_id: number;
   file: string;
@@ -536,12 +571,12 @@ export interface BatchStartedFrame {
   entries: number;
 }
 
-export interface BatchFinishedFrame {
+export interface BatchFinishedFrame extends JobEventMeta {
   type: "batch_finished";
   request_id: number;
 }
 
-export interface TokensFrame {
+export interface TokensFrame extends JobEventMeta {
   type: "tokens";
   prompt_tokens: number;
   completion_tokens: number;
@@ -549,12 +584,12 @@ export interface TokensFrame {
   cached_tokens?: number;
 }
 
-export interface GlossaryExtractedFrame {
+export interface GlossaryExtractedFrame extends JobEventMeta {
   type: "glossary_extracted";
   new_terms: number;
 }
 
-export interface GlossaryProgressFrame {
+export interface GlossaryProgressFrame extends JobEventMeta {
   type: "glossary_progress";
   /** extraction chunks completed */
   done: number;
@@ -570,7 +605,7 @@ export interface GlossaryProgressFrame {
   skipped?: boolean;
 }
 
-export interface TerminalFrame {
+export interface TerminalFrame extends JobEventMeta {
   type: "done" | "failed" | "cancelled";
   status: JobStatus;
   error?: string;

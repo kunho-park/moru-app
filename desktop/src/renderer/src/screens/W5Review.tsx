@@ -56,6 +56,7 @@ const FILTER_COLOR: Record<ReviewFilter, string> = {
   warning: "#F5B454",
   modified: "#6BB3F5",
 };
+
 /* ---- small pieces ------------------------------------------------------ */
 
 function SummaryBox({
@@ -94,7 +95,9 @@ export function W5Review() {
   const modpackName = useWizard((s) => s.modpackName);
   const translateJobId = useWizard((s) => s.translateJobId);
   const failedKeys = useWizard((s) => s.failedKeys);
+  const failedEntryCount = useWizard((s) => s.failedEntryCount);
   const stats = useWizard((s) => s.stats);
+  const updateReviewStats = useWizard((s) => s.updateReviewStats);
   const scanState = useWizard((s) => s.scanState);
   const sourceLocale = useWizard((s) => s.sourceLocale);
   const targetLocale = useWizard((s) => s.targetLocale);
@@ -176,27 +179,44 @@ export function W5Review() {
     void queryClient.invalidateQueries({ queryKey: ["w5", translateJobId] });
   };
 
+  // The write and the stats refresh are two engine calls: when the write
+  // lands but the refresh fails, reconcile what did succeed instead of
+  // reporting the whole mutation as failed.
+  const refreshStats = async (jobId: string): Promise<void> => {
+    try {
+      updateReviewStats(await api.translateStats(jobId));
+    } catch {
+      // Entry invalidation in onSettled still refreshes the visible rows.
+    }
+  };
+
   // Mutations carry file + key: the same key can live in two source files,
   // and the engine would otherwise patch whichever one it finds first.
   const patchMut = useMutation({
-    mutationFn: ({ key, file, text }: EntryRef & { text: string }) =>
-      api.commitEntry(translateJobId as string, key, text, { file }),
-    onSuccess: () => {
-      setActionError(null);
-      invalidate();
+    mutationFn: async ({ key, file, text }: EntryRef & { text: string }) => {
+      const jobId = translateJobId as string;
+      const entry = await api.commitEntry(jobId, key, text, { file });
+      await refreshStats(jobId);
+      return entry;
     },
+    onSuccess: () => setActionError(null),
     onError: (err) => setActionError(errorText(err)),
+    onSettled: () => invalidate(),
   });
 
   const retransMut = useMutation({
-    mutationFn: ({ key, file }: EntryRef) =>
-      api.retranslateEntry(translateJobId as string, key, file),
+    mutationFn: async ({ key, file }: EntryRef) => {
+      const jobId = translateJobId as string;
+      const entry = await api.retranslateEntry(jobId, key, file);
+      await refreshStats(jobId);
+      return entry;
+    },
     onSuccess: (entry) => {
       setActionError(null);
       setDraft(entry.translated_text);
-      invalidate();
     },
     onError: (err) => setActionError(errorText(err)),
+    onSettled: () => invalidate(),
   });
 
   const bulkMut = useMutation({
@@ -207,11 +227,25 @@ export function W5Review() {
       const jobId = translateJobId as string;
       const refs = await api.allFailedRefs(jobId);
       setBulkDone(0);
-      for (const ref of refs) {
-        await api.retranslateEntry(jobId, ref.key, ref.file);
-        setBulkDone((n) => n + 1);
+      try {
+        for (const ref of refs) {
+          await api.retranslateEntry(jobId, ref.key, ref.file);
+          setBulkDone((n) => n + 1);
+        }
+      } catch (error) {
+        // Earlier entries may already have succeeded when a later one fails.
+        // Reconcile what did succeed without hiding the original error.
+        try {
+          updateReviewStats(await api.translateStats(jobId));
+        } catch {
+          // Entry invalidation below still refreshes the visible review rows.
+        }
+        throw error;
       }
-      return refs.length;
+      return { count: refs.length, stats: await api.translateStats(jobId) };
+    },
+    onSuccess: (result) => {
+      updateReviewStats(result.stats);
     },
     onError: (err) => setActionError(errorText(err)),
     onSettled: () => {
@@ -220,7 +254,7 @@ export function W5Review() {
     },
   });
 
-  const failedTotal = counts.failed ?? Object.keys(failedKeys).length;
+  const failedTotal = counts.failed ?? Math.max(failedEntryCount, Object.keys(failedKeys).length);
   const allTotal = counts.all ?? stats?.total_entries ?? null;
   const passRate =
     stats !== null

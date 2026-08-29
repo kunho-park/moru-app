@@ -29,6 +29,23 @@
   "badge": {
     "translated": "Already translated"
   },
+  "migration": {
+    "title": "Continue a previous translation",
+    "subtitle": "Compare the old original and translation, reuse unchanged text, and translate only the diff.",
+    "on": "Enabled",
+    "off": "Optional",
+    "selectCurrentFirst": "Select the current version first",
+    "oldModpack": "A · Previous original modpack",
+    "resourcepack": "B · Previous resource pack",
+    "overrides": "B · Previous overrides",
+    "required": "Required · folder or CurseForge ZIP",
+    "optional": "At least one B artifact · folder or ZIP",
+    "notSelected": "Not selected",
+    "folder": "Folder",
+    "zipFilter": "Modpack or translation ZIP",
+    "ready": "Ready · resource-pack and overrides content stays in its original output channel.",
+    "incomplete": "Select A and at least one B artifact (resource pack or overrides)."
+  },
   "jarCount": "{{n}} mods",
   "selectedStatus": "{{name}} selected",
   "next": "Next: Scan"

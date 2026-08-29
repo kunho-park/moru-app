@@ -16,6 +16,7 @@ from pathlib import Path
 import dspy
 import litellm
 import pytest
+from litellm.utils import get_optional_params
 
 from moru_engine.dspy_modules.lm import (
     DEFAULT_OLLAMA_KEEP_ALIVE,
@@ -316,3 +317,21 @@ async def test_limiter_backoff_grows_and_is_capped() -> None:
     # A success clears the consecutive-failure streak driving the backoff.
     await limiter.record_success()
     assert await limiter.record_transport_failure() == first
+def test_cli_reasoning_effort_passes_litellm_pre_dispatch_validation():
+    lm = build_lm("codex/gpt-5.6-terra", reasoning_effort="high", cache=False)
+
+    assert lm.kwargs["reasoning_effort"] == "high"
+    assert lm.kwargs["allowed_openai_params"] == ["reasoning_effort"]
+    assert get_optional_params(
+        model="@/gpt-5.6-terra",
+        custom_llm_provider="codex",
+        reasoning_effort=lm.kwargs["reasoning_effort"],
+        allowed_openai_params=lm.kwargs["allowed_openai_params"],
+    )["reasoning_effort"] == "high"
+
+
+def test_hosted_reasoning_effort_does_not_gain_cli_override():
+    lm = build_lm("openai/gpt-5.6-terra", reasoning_effort="high", cache=False)
+
+    assert lm.kwargs["reasoning_effort"] == "high"
+    assert "allowed_openai_params" not in lm.kwargs

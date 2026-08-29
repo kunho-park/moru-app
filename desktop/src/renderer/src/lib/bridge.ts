@@ -26,6 +26,15 @@ function makeBrowserShim(): MoruBridge {
       onState: () => noop,
     },
     pickFolder: async () => window.prompt("모드팩 폴더 경로 입력"),
+    pickFolders: async () => {
+      const value = window.prompt("모드팩 폴더 경로를 줄바꿈으로 구분해 입력");
+      return value === null
+        ? []
+        : value
+            .split(/\r?\n/)
+            .map((path) => path.trim())
+            .filter((path) => path.length > 0);
+    },
     pickFile: async () => window.prompt("파일 경로 입력"),
     saveFile: async (defaultPath) => window.prompt("저장 경로 입력", defaultPath),
     probeModpack: async (path) => ({

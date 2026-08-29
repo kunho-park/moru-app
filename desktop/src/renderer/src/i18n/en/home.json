@@ -2,6 +2,7 @@
   "greeting": "Hello",
   "title": "Ready to <1>translate</1> today?",
   "import": "Import",
+  "queue": "Translate multiple packs",
   "stats": {
     "totalEntries": "Total translated entries",
     "thisWeek": "+{{n}} this week",

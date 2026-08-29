@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import dspy
-import pytest
-
 import moru_engine.dspy_modules.lm as lm_module
 import moru_engine.pipeline.orchestrator as orchestrator
+import pytest
+from moru_engine.migration import MigrationCatalog, logical_file_id
 from moru_engine.models import Glossary, LanguageFilePair, TermRule
 from moru_engine.pipeline.orchestrator import (
     EntryResult,
@@ -80,6 +80,240 @@ class RecordingTranslator:
         )
 
 
+class FailingTranslator:
+    async def acall(self, **kwargs: Any) -> dspy.Prediction:
+        entries = kwargs["entries"]
+        return dspy.Prediction(
+            translations={},
+            failed={key: ["provider rejected request"] for key in entries},
+        )
+
+
+class DuplicateConsistencyTranslator:
+    """Translate one duplicate and copy the others unchanged."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def acall(self, **kwargs: Any) -> dspy.Prediction:
+        self.calls += 1
+        entries = kwargs["entries"]
+        return dspy.Prediction(
+            translations={
+                key: "고급 상점" if key == "title" else text
+                for key, text in entries.items()
+            },
+            failed={},
+        )
+
+
+class UnchangedThenTranslatedTranslator:
+    """Exercise the one-shot unchanged-output retry."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.contexts: list[str] = []
+
+    async def acall(self, **kwargs: Any) -> dspy.Prediction:
+        self.calls += 1
+        self.contexts.append(kwargs["context"])
+        entries = kwargs["entries"]
+        return dspy.Prediction(
+            translations={
+                key: (text if self.calls == 1 else "외로운 항목")
+                for key, text in entries.items()
+            },
+            failed={},
+        )
+
+
+async def _run_lang_fixture(
+    tmp_path: Path, payload: dict[str, str], translator: Any
+) -> PipelineResult:
+    modpack_path = tmp_path / "modpack"
+    source_path = modpack_path / "kubejs/assets/test/lang/en_us.json"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(json.dumps(payload), encoding="utf-8")
+    scan_result = ScanResult(
+        modpack_path=modpack_path,
+        source_only_files=[LanguageFilePair(source_path=source_path)],
+        translation_files=[
+            TranslationFile(input_path=str(source_path), file_type="kubejs")
+        ],
+    )
+    pipeline = TranslationPipeline(
+        PipelineConfig(
+            modpack_path=modpack_path,
+            output_dir=tmp_path / "out",
+            batch_size=20,
+            use_tm=False,
+            use_mod_translations=False,
+            use_user_glossary=False,
+            use_vanilla_glossary=False,
+            use_translation_graph=False,
+        ),
+        lm=dspy.utils.DummyLM([]),
+    )
+    pipeline.translator = translator
+    try:
+        return await pipeline.run(scan_result)
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_source_reuses_successful_translation(tmp_path: Path) -> None:
+    translator = DuplicateConsistencyTranslator()
+    result = await _run_lang_fixture(
+        tmp_path,
+        {
+            "title": "Superior Shop",
+            "sidebar": "Superior Shop",
+            "key_category": "Superior Shop",
+        },
+        translator,
+    )
+
+    assert translator.calls == 1
+    assert {entry.translated_text for entry in result.entries} == {"고급 상점"}
+    assert {entry.status for entry in result.entries} == {EntryStatus.PASSED}
+
+
+@pytest.mark.asyncio
+async def test_unchanged_user_text_is_retried_once(tmp_path: Path) -> None:
+    translator = UnchangedThenTranslatedTranslator()
+    result = await _run_lang_fixture(
+        tmp_path, {"only": "Lonely Item"}, translator
+    )
+
+    assert translator.calls == 2
+    assert "prior attempt copied the source unchanged" in translator.contexts[1]
+    assert result.entries[0].translated_text == "외로운 항목"
+    assert result.entries[0].status is EntryStatus.PASSED
+
+
+class UnchangedThenFailingTranslator:
+    """Copy the source unchanged, then fail the one-shot retry."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def acall(self, **kwargs: Any) -> dspy.Prediction:
+        self.calls += 1
+        entries = kwargs["entries"]
+        if self.calls == 1:
+            return dspy.Prediction(translations=dict(entries), failed={})
+        return dspy.Prediction(
+            translations={},
+            failed={key: ["provider rejected request"] for key in entries},
+        )
+
+
+class RecordingTM:
+    """Capture every translation-memory write without touching SQLite."""
+
+    def __init__(self) -> None:
+        self.stored: list[tuple[str, str]] = []
+
+    def lookup_many(
+        self, entries: dict[str, str], target_lang: str, glossary_version: str
+    ) -> dict[str, str]:
+        return {}
+
+    def store_many(
+        self,
+        items: list[tuple[str, str]],
+        target_lang: str,
+        glossary_version: str,
+    ) -> None:
+        self.stored.extend(items)
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_failed_retry_keeps_the_unchanged_translation(
+    tmp_path: Path,
+) -> None:
+    """A rate-limited retry must not delete the value it retried."""
+    translator = UnchangedThenFailingTranslator()
+    result = await _run_lang_fixture(
+        tmp_path, {"only": "Lonely Item"}, translator
+    )
+
+    assert translator.calls == 2
+    assert result.entries[0].translated_text == "Lonely Item"
+    assert result.stats.failed_entries == 0
+    lang_file = next(
+        path for path in result.output_files if path.name == "ko_kr.json"
+    )
+    assert json.loads(lang_file.read_text(encoding="utf-8")) == {
+        "only": "Lonely Item"
+    }
+
+
+@pytest.mark.asyncio
+async def test_migrated_value_is_reused_in_run_but_never_stored_in_tm(
+    tmp_path: Path,
+) -> None:
+    """A borrowed A/B/C value stays run-scoped: reused, never persisted."""
+    modpack_path = tmp_path / "modpack"
+    source_path = modpack_path / "kubejs/assets/test/lang/en_us.json"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(
+        json.dumps(
+            {
+                "old": "Lonely Item",
+                "copy": "Lonely Item",
+                "title": "Superior Shop",
+            }
+        ),
+        encoding="utf-8",
+    )
+    scan_result = ScanResult(
+        modpack_path=modpack_path,
+        source_only_files=[LanguageFilePair(source_path=source_path)],
+        translation_files=[
+            TranslationFile(input_path=str(source_path), file_type="kubejs")
+        ],
+    )
+    logical = logical_file_id(source_path, modpack_path)
+    migration = MigrationCatalog(
+        old_sources={logical: {"old": "Lonely Item"}},
+        previous_translations={logical: {"old": "외로운 항목"}},
+    )
+    translator = DuplicateConsistencyTranslator()
+    tm = RecordingTM()
+    pipeline = TranslationPipeline(
+        PipelineConfig(
+            modpack_path=modpack_path,
+            output_dir=tmp_path / "out",
+            batch_size=20,
+            use_tm=False,
+            use_mod_translations=False,
+            use_user_glossary=False,
+            use_vanilla_glossary=False,
+            use_translation_graph=False,
+        ),
+        lm=dspy.utils.DummyLM([]),
+    )
+    pipeline.translator = translator
+    pipeline.tm = tm
+    try:
+        result = await pipeline.run(scan_result, migration=migration)
+    finally:
+        pipeline.close()
+
+    entries = {entry.key: entry for entry in result.entries}
+    assert entries["old"].status is EntryStatus.MIGRATED
+    # The migrated value repairs the duplicate without a second LLM call...
+    assert translator.calls == 1
+    assert entries["copy"].translated_text == "외로운 항목"
+    # ...but only the genuinely fresh translation reaches the shared TM.
+    assert tm.stored == [("Superior Shop", "고급 상점")]
+
+
 @pytest.mark.asyncio
 async def test_identifier_source_is_skipped_before_the_llm(
     tmp_path: Path,
@@ -120,6 +354,56 @@ async def test_identifier_source_is_skipped_before_the_llm(
     assert entry.translated_text == identifier
     assert translator.batches == [{"normal": "Hello world"}]
     assert result.stats.categories == {"scripts": 2}
+
+
+@pytest.mark.asyncio
+async def test_failed_batches_still_reach_full_progress_and_emit_failures(
+    tmp_path: Path,
+) -> None:
+    modpack_path = tmp_path / "modpack"
+    source_path = modpack_path / "kubejs/assets/test/lang/en_us.json"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(
+        json.dumps({"one": "Hello one", "two": "Hello two"}),
+        encoding="utf-8",
+    )
+    pair = LanguageFilePair(source_path=source_path)
+    scan_result = ScanResult(
+        modpack_path=modpack_path,
+        source_only_files=[pair],
+        translation_files=[
+            TranslationFile(input_path=str(source_path), file_type="kubejs")
+        ],
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    pipeline = TranslationPipeline(
+        PipelineConfig(
+            modpack_path=modpack_path,
+            output_dir=tmp_path / "out",
+            batch_size=2,
+            use_tm=False,
+            use_mod_translations=False,
+            use_user_glossary=False,
+            use_vanilla_glossary=False,
+        ),
+        lm=dspy.utils.DummyLM([]),
+        on_event=lambda event, payload: events.append((event, payload)),
+    )
+    pipeline.translator = FailingTranslator()
+    try:
+        result = await pipeline.run(scan_result)
+    finally:
+        pipeline.close()
+
+    failures = [payload for event, payload in events if event == "entry_failed"]
+    progress = [
+        payload
+        for event, payload in events
+        if event == "progress" and payload.get("stage") == "translate"
+    ]
+    assert {str(payload["key"]) for payload in failures} == {"one", "two"}
+    assert progress[-1]["done"] == progress[-1]["total"] == 2
+    assert result.stats.failed_entries == 2
 
 
 class GlossaryRecordingTranslator:
@@ -367,6 +651,60 @@ def test_category_stats_bucket_refresh_and_upload_payload(
         **expected,
         "quests": 3,
     }
+
+
+def test_refresh_stats_reclassifies_migrated_and_cached_entries(
+    tmp_path: Path,
+) -> None:
+    result = PipelineResult(
+        config=PipelineConfig(modpack_path=tmp_path / "modpack"),
+        entries=[
+            EntryResult(
+                key="migrated",
+                file="lang/en_us.json",
+                source_text="Old source",
+                translated_text="이전 수동 번역",
+                status=EntryStatus.MIGRATED,
+            ),
+            EntryResult(
+                key="cached",
+                file="lang/en_us.json",
+                source_text="Cached source",
+                translated_text="TM 번역",
+                status=EntryStatus.TM_HIT,
+            ),
+            EntryResult(
+                key="skipped",
+                file="lang/en_us.json",
+                source_text="Identifier",
+                status=EntryStatus.SKIPPED,
+            ),
+            EntryResult(
+                key="failed",
+                file="lang/en_us.json",
+                source_text="Failed source",
+                status=EntryStatus.FAILED,
+            ),
+        ],
+    )
+
+    TranslationPipeline._refresh_stats(result)
+    assert result.stats.total_entries == 4
+    assert result.stats.migration_hits == 1
+    assert result.stats.tm_hits == 1
+    assert result.stats.skipped_entries == 1
+    assert result.stats.failed_entries == 1
+    assert result.stats.translated_entries == 0
+    assert result.stats.coverage_percent == 66.67
+
+    result.entries[0].status = EntryStatus.MODIFIED
+    result.entries[0].translated_text = "새 번역"
+    TranslationPipeline._refresh_stats(result)
+    assert result.stats.migration_hits == 0
+    assert result.stats.tm_hits == 1
+    assert result.stats.translated_entries == 1
+    assert result.stats.coverage_percent == 66.67
+    assert result.stats.coverage_percent <= 100
 
 
 def _pack_payload(result: PipelineResult) -> dict[str, Any]:
@@ -714,6 +1052,67 @@ async def test_wave2_cancellation_preserves_wave1_entries(
     assert orb.translated_text == "KO Void Orb"
     assert all(e.key != "gui.questmod.hint" for e in result.entries)
 
+
+class CancelOnKeyUnchangedTranslator:
+    """Copy the source unchanged until a batch holds the poisoned key."""
+
+    def __init__(self, cancel_key: str) -> None:
+        self.cancel_key = cancel_key
+        self.batches: list[dict[str, str]] = []
+
+    async def acall(self, **kwargs: Any) -> dspy.Prediction:
+        entries = kwargs["entries"]
+        self.batches.append(dict(entries))
+        if self.cancel_key in entries:
+            raise asyncio.CancelledError("simulated mid-flight cancellation")
+        return dspy.Prediction(translations=dict(entries), failed={})
+
+
+@pytest.mark.asyncio
+async def test_cancelled_file_is_skipped_by_the_unchanged_retry(
+    tmp_path: Path,
+) -> None:
+    """Cancelling stops further LLM work and keeps the settled batches."""
+    modpack_path = tmp_path / "modpack"
+    source_path = modpack_path / "kubejs/assets/test/lang/en_us.json"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(
+        json.dumps({"kept": "Lonely Item", "boom": "Collect the orb"}),
+        encoding="utf-8",
+    )
+    scan_result = ScanResult(
+        modpack_path=modpack_path,
+        source_only_files=[LanguageFilePair(source_path=source_path)],
+        translation_files=[
+            TranslationFile(input_path=str(source_path), file_type="kubejs")
+        ],
+    )
+    translator = CancelOnKeyUnchangedTranslator("boom")
+    pipeline = TranslationPipeline(
+        PipelineConfig(
+            modpack_path=modpack_path,
+            output_dir=tmp_path / "out",
+            batch_size=1,
+            use_tm=False,
+            use_mod_translations=False,
+            use_user_glossary=False,
+            use_vanilla_glossary=False,
+            use_translation_graph=False,
+        ),
+        lm=dspy.utils.DummyLM([]),
+    )
+    pipeline.translator = translator
+    try:
+        result = await pipeline.run(scan_result)
+    finally:
+        pipeline.close()
+
+    # No retry batch after the cancellation...
+    assert [sorted(batch) for batch in translator.batches] == [["kept"], ["boom"]]
+    # ...and the batch that did settle survives.
+    kept = next(entry for entry in result.entries if entry.key == "kept")
+    assert kept.translated_text == "Lonely Item"
+    assert all(entry.key != "boom" for entry in result.entries)
 
 @pytest.mark.asyncio
 async def test_wave_batches_receive_sibling_context(tmp_path: Path) -> None:

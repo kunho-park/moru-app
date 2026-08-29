@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 # patterns match overlapping spans, the earlier pattern keeps its match
 # and the later one is dropped (see protect()).
 PATTERNS = {
+    # JavaScript template interpolation used by KubeJS display names.
+    # Keep the leading '$' inside the token so translation cannot separate it
+    # from the expression when reordering words for the target language.
+    "js_template": re.compile(r"\$\{[^{}]*\}"),
     # Java format specifiers: %s, %d, %1$s, %2$d, etc.
     "java_format": re.compile(r"%(?:\d+\$)?[sdifxXobeEgGaAcChHnp%]"),
     # Minecraft color codes: §a, §0-§f, §k-§o, §r
@@ -53,6 +57,7 @@ PATTERNS = {
 # renumbering tokens. Occurrences of the SAME literal share one token, so
 # restore() stays a literal, order-free replacement either way.
 TOKEN_KIND_BY_PATTERN = {
+    "js_template": "VAR",
     "java_format": "ARG",
     "named_placeholder": "VAR",
     "xml_tags": "TAG",

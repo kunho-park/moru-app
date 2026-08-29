@@ -44,6 +44,15 @@ PACK_ROOTS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: A locale-shaped chunk counts only at a real boundary: preceded by a
+#: non-alphanumeric (start, /, \, _, -) and followed by a separator or
+#: the end. An optional prefix here once made "act_ii.snbt" and
+#: "act_iv.snbt" both normalize to ".../a/LOCALE.snbt" ("ct_ii"/"ct_iv"
+#: read as locales), so one chapter silently overwrote the other in the
+#: pairing dict — which file survived depended on glob order.
+LOCALE_CHUNK_RE = re.compile(r"(?<![a-z0-9])[a-z]{2}_[a-z]{2}(?=[/\\.]|$)")
+
+
 @dataclass
 class TranslationFile:
     """Information about a translation file."""
@@ -776,20 +785,12 @@ class ModpackScanner:
             if base_path not in matched_targets:
                 result.target_only_files.append(Path(target_tf.input_path))
 
-    #: A locale-shaped chunk counts only at a real boundary: preceded by a
-    #: non-alphanumeric (start, /, \, _, -) and followed by a separator or
-    #: the end. An optional prefix here once made "act_ii.snbt" and
-    #: "act_iv.snbt" both normalize to ".../a/LOCALE.snbt" ("ct_ii"/"ct_iv"
-    #: read as locales), so one chapter silently overwrote the other in the
-    #: pairing dict — which file survived depended on glob order.
-    _LOCALE_CHUNK_RE = re.compile(r"(?<![a-z0-9])[a-z]{2}_[a-z]{2}(?=[/\\.]|$)")
-
     @classmethod
     def _path_has_locale(cls, path_lower: str, locale: str) -> bool:
         """True when ``locale`` appears in the path at a locale boundary."""
         return any(
             match.group() == locale
-            for match in cls._LOCALE_CHUNK_RE.finditer(path_lower)
+            for match in LOCALE_CHUNK_RE.finditer(path_lower)
         )
 
     def _get_base_path(self, file_path: str) -> str:
@@ -797,7 +798,7 @@ class ModpackScanner:
         path_normalized = file_path.replace("\\", "/").lower()
         # Replace boundary-anchored locale codes so source/target paths of
         # the same file collapse to one matching key.
-        return self._LOCALE_CHUNK_RE.sub("LOCALE", path_normalized)
+        return LOCALE_CHUNK_RE.sub("LOCALE", path_normalized)
 
     def _extract_namespace(
         self, file_path: Path, tf: TranslationFile

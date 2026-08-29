@@ -7,6 +7,7 @@
     "summaryNoStats": "{{name}} · {{done}} 엔트리 번역됨",
     "passRate": "▲ 통과 {{percent}}%",
     "tmReuse": "▲ TM 재사용 {{percent}}% ({{count}}건)",
+    "migrationReuse": "▲ 이전 번역 재사용 {{count}}건",
     "quality": "▲ 품질 점수 {{score}}",
     "cacheSaved": "▲ 캐시 적중 {{percent}}% — {{saved}} 절약",
     "cacheHit": "▲ 캐시 적중 {{percent}}%"

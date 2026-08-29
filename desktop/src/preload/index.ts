@@ -29,6 +29,7 @@ const bridge: MoruBridge = {
   },
 
   pickFolder: () => ipcRenderer.invoke("dialog:pick-folder"),
+  pickFolders: () => ipcRenderer.invoke("dialog:pick-folders"),
   pickFile: (filters) => ipcRenderer.invoke("dialog:pick-file", filters),
   saveFile: (defaultPath) => ipcRenderer.invoke("dialog:save-file", defaultPath),
   probeModpack: (path) => ipcRenderer.invoke("fs:probe-modpack", path),

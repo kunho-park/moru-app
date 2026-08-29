@@ -88,6 +88,25 @@ test("uncapped glossary extraction prices one candidate per entry", () => {
   expect(uncapped.totalTokens).toBeGreaterThan(tight.totalTokens);
 });
 
+test("migration reuse removes translation cost but keeps whole-corpus glossary cost", () => {
+  const extractionOnly = estimateUsage({
+    ...BASE_INPUT,
+    chars: 0,
+    entries: 0,
+    glossaryEntries: BASE_INPUT.entries,
+    extractGlossary: true,
+  });
+  const full = estimateUsage({ ...BASE_INPUT, extractGlossary: true });
+  const translationOnly = estimateUsage({ ...BASE_INPUT, extractGlossary: false });
+
+  expect(extractionOnly.promptTokens).toBe(
+    full.promptTokens - translationOnly.promptTokens,
+  );
+  expect(extractionOnly.completionTokens).toBe(
+    full.completionTokens - translationOnly.completionTokens,
+  );
+});
+
 test("retry pricing scales with the configured refine passes", () => {
   const noRefine = estimateUsage({ ...BASE_INPUT, extractGlossary: false, maxRefine: 0 });
   const defaults = estimateUsage({ ...BASE_INPUT, extractGlossary: false });

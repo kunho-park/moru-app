@@ -39,6 +39,7 @@ from ..glossary.pair_harvester import (
 from ..glossary.term_miner import TermCandidate, mine_candidates
 from ..graph import SIBLING_CONTEXT_HEADER, TranslationGraph, is_name_entry
 from ..handlers.base import ContentHandler, create_default_registry
+from ..migration import MigrationCatalog, build_migration_catalog, logical_file_id
 from ..models import Glossary, TermRule, ValidationSeverity
 from ..models.glossary_filter import GlossaryFilter
 from ..output import (
@@ -69,6 +70,7 @@ TICKER_TEXT_LIMIT = 120
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_./:-]+")
 _DOTTED_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
+_TEXT_PROTECTOR = PlaceholderProtector()  # stateless; safe to share for estimates
 _CATEGORY_BUCKET_BY_FILE_TYPE = {
     "ftbquests": "quests",
     "the_vault_quest": "quests",
@@ -104,6 +106,17 @@ def looks_like_identifier(text: str) -> bool:
     return len(segments) >= 2 and all(segments)
 
 
+def is_translatable_text(
+    text: str,
+    protected: ProtectedText | None = None,
+) -> bool:
+    """Mirror the pipeline's pre-LLM skip rules for scan-time estimates."""
+    prepared = protected or _TEXT_PROTECTOR.protect(text)
+    return bool(text.strip()) and not (
+        _TEXT_PROTECTOR.is_only_placeholders(prepared) or looks_like_identifier(text)
+    )
+
+
 class RetranslateError(Exception):
     """Single-entry retranslation produced no acceptable output."""
 
@@ -113,6 +126,7 @@ class EntryStatus(str, Enum):
     WARNING = "warning"
     FAILED = "failed"
     TM_HIT = "tm_hit"
+    MIGRATED = "migrated"
     SKIPPED = "skipped"
     MODIFIED = "modified"
 
@@ -134,6 +148,7 @@ class PipelineStats(BaseModel):
     translated_entries: int = 0
     failed_entries: int = 0
     tm_hits: int = 0
+    migration_hits: int = 0
     skipped_entries: int = 0
     categories: dict[str, int] = Field(default_factory=dict)
     prompt_tokens: int = 0
@@ -144,7 +159,7 @@ class PipelineStats(BaseModel):
     quality_score: float = 0.0
 
     def finalize(self) -> None:
-        done = self.translated_entries + self.tm_hits
+        done = self.translated_entries + self.tm_hits + self.migration_hits
         translatable = max(self.total_entries - self.skipped_entries, 1)
         self.coverage_percent = round(100.0 * done / translatable, 2)
         checked = done + self.failed_entries
@@ -217,6 +232,13 @@ class PipelineConfig(BaseModel):
     #: payload convention: TranslationFile.category or file_type fallback.
     include_categories: list[str] | None = None
 
+    #: Optional A/B inputs for run-scoped previous-version migration.  A is a
+    #: previous original modpack folder or CurseForge export ZIP.  B can have
+    #: either or both of the normal Moru output channels.
+    previous_modpack_path: Path | None = None
+    previous_resourcepack_path: Path | None = None
+    previous_overrides_path: Path | None = None
+
 
 class PipelineResult(BaseModel):
     """Mutable across stages: retry mutates in place."""
@@ -234,6 +256,9 @@ class PipelineResult(BaseModel):
     #: terms and LLM-curated terms are run-scoped and would be lost by a
     #: bare rebuild.
     glossary: Glossary | None = None
+    #: Run-scoped A/B index. It also owns the preserved resource-pack asset
+    #: directory needed when review edits regenerate the output trees.
+    migration: MigrationCatalog | None = None
 
     @property
     def failed(self) -> list[EntryResult]:
@@ -288,6 +313,9 @@ class _PreparedFile:
     known_translations: dict[str, str] = field(default_factory=dict)
     #: Fresh restored translations accumulated across waves.
     translated_raw: dict[str, str] = field(default_factory=dict)
+    #: Keys whose value came from the run-scoped migration catalog, plus
+    #: keys that borrowed such a value: they never reach the global TM.
+    migrated_keys: set[str] = field(default_factory=set)
     was_cancelled: bool = False
 
 
@@ -339,6 +367,9 @@ class TranslationPipeline:
         #: Entry relationship graph of the current run (built after the
         #: prepare phase; rebuilt from entries for post-run paths).
         self._graph: TranslationGraph | None = None
+        #: Built only when previous-version inputs are supplied; the default
+        #: path pays no scan/index cost and follows the existing pipeline.
+        self.migration: MigrationCatalog | None = None
 
     @property
     def graph(self) -> TranslationGraph | None:
@@ -829,11 +860,7 @@ class TranslationPipeline:
                     )
                     continue
                 protected = protector.protect(text)
-                if (
-                    protector.is_only_placeholders(protected)
-                    or not text.strip()
-                    or looks_like_identifier(text)
-                ):
+                if not is_translatable_text(text, protected):
                     prepared.final[key] = text
                     prepared.file_entries.append(
                         EntryResult(
@@ -847,6 +874,33 @@ class TranslationPipeline:
                     continue
                 prepared.protected_map[key] = protected
                 prepared.to_translate[key] = protected.protected
+
+            # Previous-version A/B/C match is deliberately stricter than the
+            # global source-text TM: file identity + entry key + exact A/C
+            # source equality.  It is run-scoped and never stored globally.
+            if self.migration is not None and prepared.to_translate:
+                logical = logical_file_id(
+                    pair.source_path, self.config.modpack_path
+                )
+                for key in list(prepared.to_translate):
+                    translated = self.migration.lookup(
+                        logical, key, source_data[key]
+                    )
+                    if translated is None:
+                        continue
+                    prepared.final[key] = translated
+                    prepared.known_translations[key] = translated
+                    prepared.migrated_keys.add(key)
+                    prepared.to_translate.pop(key, None)
+                    prepared.file_entries.append(
+                        EntryResult(
+                            key=key,
+                            file=rel,
+                            source_text=source_data[key],
+                            translated_text=translated,
+                            status=EntryStatus.MIGRATED,
+                        )
+                    )
 
             # TM lookup on raw source text
             if self.tm is not None and prepared.to_translate:
@@ -889,6 +943,8 @@ class TranslationPipeline:
         keys: list[str],
         glossary: Glossary,
         graph: TranslationGraph | None,
+        *,
+        retry_unchanged: bool = False,
     ) -> None:
         """Translate a subset of one file's pending entries.
 
@@ -908,6 +964,12 @@ class TranslationPipeline:
         rel = prepared.rel
         source_data = prepared.source_data
         base_context = f"file: {rel}; handler: {prepared.handler.name}"
+        if retry_unchanged:
+            base_context += (
+                "; retry: the prior attempt copied the source unchanged; "
+                "translate user-facing natural language while preserving "
+                "intentional proper nouns and placeholders"
+            )
 
         async def translate_one(
             batch: dict[str, str],
@@ -945,14 +1007,19 @@ class TranslationPipeline:
                     out = translations.get(key)
                     errors = list(failed.get(key, []))
                     if out is None:
+                        reported = errors or ["no translation returned"]
                         prepared.file_entries.append(
                             EntryResult(
                                 key=key,
                                 file=rel,
                                 source_text=source_data[key],
                                 status=EntryStatus.FAILED,
-                                errors=errors or ["no translation returned"],
+                                errors=reported,
                             )
+                        )
+                        self._emit(
+                            "entry_failed",
+                            {"key": key, "file": rel, "errors": reported},
                         )
                         continue
                     try:
@@ -967,6 +1034,14 @@ class TranslationPipeline:
                                 status=EntryStatus.FAILED,
                                 errors=[*errors, str(exc)],
                             )
+                        )
+                        self._emit(
+                            "entry_failed",
+                            {
+                                "key": key,
+                                "file": rel,
+                                "errors": [*errors, str(exc)],
+                            },
                         )
                         continue
                     prepared.translated_raw[key] = restored
@@ -983,19 +1058,25 @@ class TranslationPipeline:
                                 "translated": restored[:TICKER_TEXT_LIMIT],
                             },
                         )
-                self._emit(
-                    "progress",
-                    {
-                        "stage": "translate",
-                        "file": rel,
-                        # Existing target-locale keys are excluded from the
-                        # scan totals and therefore from live progress.
-                        "done": len(prepared.final)
-                        - len(prepared.existing_keys)
-                        + len(prepared.translated_raw),
-                        "total": prepared.work_total,
-                    },
-                )
+                if not retry_unchanged:
+                    # Retry waves re-enter keys the file already reported as
+                    # done; re-emitting would walk the bar backwards.
+                    self._emit(
+                        "progress",
+                        {
+                            "stage": "translate",
+                            "file": rel,
+                            # Existing target-locale keys are excluded from
+                            # the scan totals and therefore from live
+                            # progress. Every key removed from to_translate
+                            # has reached a terminal outcome, including
+                            # failed model batches.
+                            "done": (
+                                prepared.work_total - len(prepared.to_translate)
+                            ),
+                            "total": prepared.work_total,
+                        },
+                    )
                 # lm.history aggregation is O(calls); once per completed
                 # batch keeps live token/cost counters current.
                 self._emit("tokens", token_usage(self.lm))
@@ -1007,6 +1088,124 @@ class TranslationPipeline:
                     task.cancel()
             if batch_tasks:
                 await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+    @staticmethod
+    def _canonicalize_unchanged_duplicates(
+        prepared_files: Iterable[_PreparedFile],
+        graph: TranslationGraph | None = None,
+    ) -> int:
+        """Reuse the dominant real translation for an identical source.
+
+        A model can translate one occurrence of ``Superior Shop`` and copy
+        another unchanged even inside the same language file.  Existing,
+        migrated, TM, and fresh translations are all valid evidence; only
+        source-equal fresh results are replaced.  Majority vote with
+        first-seen tie breaking avoids arbitrary last-writer behavior.
+        """
+        prepared_files = list(prepared_files)
+        votes: dict[str, dict[str, int]] = {}
+        first_seen: dict[tuple[str, str], int] = {}
+        # (source, translation) pairs evidenced outside the run-scoped
+        # migration catalog; the rest must never reach the global TM.
+        storable: set[tuple[str, str]] = set()
+        order = 0
+        for prepared in prepared_files:
+            candidates = {**prepared.final, **prepared.translated_raw}
+            for key, translated in candidates.items():
+                source = prepared.source_data[key]
+                if is_untranslated_copy(source, translated):
+                    continue
+                by_translation = votes.setdefault(source, {})
+                by_translation[translated] = by_translation.get(translated, 0) + 1
+                first_seen.setdefault((source, translated), order)
+                order += 1
+                if key not in prepared.migrated_keys:
+                    storable.add((source, translated))
+
+        canonical = {
+            source: min(
+                choices,
+                key=lambda translated: (
+                    -choices[translated],
+                    first_seen[(source, translated)],
+                ),
+            )
+            for source, choices in votes.items()
+        }
+        repaired = 0
+        for prepared in prepared_files:
+            for key, translated in list(prepared.translated_raw.items()):
+                source = prepared.source_data[key]
+                replacement = canonical.get(source)
+                if replacement is None or not is_untranslated_copy(source, translated):
+                    continue
+                prepared.translated_raw[key] = replacement
+                if (source, replacement) not in storable:
+                    prepared.migrated_keys.add(key)
+                if graph is not None:
+                    graph.record_translation(prepared.rel, key, replacement)
+                repaired += 1
+        return repaired
+
+    async def _retry_unchanged_translations(
+        self,
+        prepared_files: Iterable[_PreparedFile],
+        glossary: Glossary,
+        graph: TranslationGraph | None,
+    ) -> int:
+        """Retry fresh user-facing values that remain source-identical once."""
+        work: list[tuple[_PreparedFile, dict[str, str]]] = []
+        count = 0
+        for prepared in prepared_files:
+            # Cancelled files keep whatever their completed batches settled.
+            if prepared.was_cancelled:
+                continue
+            stashed = {
+                key: translated
+                for key, translated in prepared.translated_raw.items()
+                if is_untranslated_copy(prepared.source_data[key], translated)
+            }
+            if not stashed:
+                continue
+            count += len(stashed)
+            for key in stashed:
+                prepared.translated_raw.pop(key, None)
+                prepared.to_translate[key] = prepared.protected_map[key].protected
+            work.append((prepared, stashed))
+        if not work:
+            return 0
+        await asyncio.gather(
+            *(
+                self._translate_wave(
+                    prepared,
+                    list(stashed),
+                    glossary,
+                    graph,
+                    retry_unchanged=True,
+                )
+                for prepared, stashed in work
+            )
+        )
+        # A retry that produced nothing must not destroy the value it was
+        # retrying: the source-identical string still ships, and the retry's
+        # FAILED entry would book it as a loss on top.
+        for prepared, stashed in work:
+            recovered = {
+                key: translated
+                for key, translated in stashed.items()
+                if key not in prepared.translated_raw
+            }
+            if not recovered:
+                continue
+            prepared.file_entries = [
+                entry
+                for entry in prepared.file_entries
+                if entry.key not in recovered
+            ]
+            for key, translated in recovered.items():
+                prepared.to_translate.pop(key, None)
+                prepared.translated_raw[key] = translated
+        return count
 
     @staticmethod
     def _with_sibling_context(
@@ -1098,7 +1297,8 @@ class TranslationPipeline:
                         )
                     )
                     self._emit(
-                        "entry_failed", {"key": key, "errors": issues}
+                        "entry_failed",
+                        {"key": key, "file": rel, "errors": issues},
                     )
                     continue
                 prepared.final[key] = translated
@@ -1123,11 +1323,12 @@ class TranslationPipeline:
         result.entries.extend(file_entries)
 
         # Persist fresh translations into TM only on the normal path.
+        # Migration-derived values stay run-scoped.
         if self.tm is not None and not prepared.was_cancelled:
             stored = [
                 (source_data[k], v)
                 for k, v in translated_raw.items()
-                if k in prepared.final
+                if k in prepared.final and k not in prepared.migrated_keys
             ]
             if stored:
                 await asyncio.to_thread(
@@ -1154,7 +1355,11 @@ class TranslationPipeline:
 
     # -- entry point ---------------------------------------------------------
 
-    async def run(self, scan_result: ScanResult | None = None) -> PipelineResult:
+    async def run(
+        self,
+        scan_result: ScanResult | None = None,
+        migration: MigrationCatalog | None = None,
+    ) -> PipelineResult:
         started = time.monotonic()
         result = PipelineResult(config=self.config)
         cancelled = False
@@ -1169,6 +1374,46 @@ class TranslationPipeline:
                 scan_result = await scanner.scan(self.config.modpack_path)
             result.scan_result = scan_result
             result.artifact_id = self.artifact_id
+            self.migration = migration
+            result.migration = migration
+
+            migration_inputs = (
+                self.config.previous_modpack_path,
+                self.config.previous_resourcepack_path,
+                self.config.previous_overrides_path,
+            )
+            if self.migration is None and any(
+                path is not None for path in migration_inputs
+            ):
+                if self.config.previous_modpack_path is None:
+                    raise ValueError(
+                        "previous_modpack_path is required for translation migration"
+                    )
+                if (
+                    self.config.previous_resourcepack_path is None
+                    and self.config.previous_overrides_path is None
+                ):
+                    raise ValueError(
+                        "a previous resource pack or overrides artifact is required"
+                    )
+                self._emit(
+                    "progress", {"stage": "migration", "done": 0, "total": 1}
+                )
+                migration_assets = output_root(self.config) / ".migration_assets"
+                self.migration = await build_migration_catalog(
+                    previous_modpack_path=self.config.previous_modpack_path,
+                    previous_resourcepack_path=self.config.previous_resourcepack_path,
+                    previous_overrides_path=self.config.previous_overrides_path,
+                    current_modpack_root=self.config.modpack_path,
+                    current_scan=scan_result,
+                    source_locale=self.config.source_locale,
+                    target_locale=self.config.target_locale,
+                    asset_cache_dir=migration_assets,
+                )
+                result.migration = self.migration
+                self._emit(
+                    "progress", {"stage": "migration", "done": 1, "total": 1}
+                )
 
             all_pairs = scan_result.all_translation_pairs
             pairs = all_pairs
@@ -1310,6 +1555,25 @@ class TranslationPipeline:
                     glossary,
                     graph,
                 )
+
+                repaired = self._canonicalize_unchanged_duplicates(
+                    prepared_files, graph
+                )
+                if repaired:
+                    logger.info(
+                        "Reused consistent translations for %d unchanged model outputs",
+                        repaired,
+                    )
+                retried = await self._retry_unchanged_translations(
+                    prepared_files, glossary, graph
+                )
+                if retried:
+                    logger.info(
+                        "Retried %d user-facing translations copied from source",
+                        retried,
+                    )
+                    # A successful retry can now repair other duplicate copies.
+                    self._canonicalize_unchanged_duplicates(prepared_files, graph)
             except asyncio.CancelledError:
                 interrupted = True
                 for prepared in prepared_files:
@@ -1340,7 +1604,11 @@ class TranslationPipeline:
 
         # Generate installable trees from every preserved partial entry. A
         # cancellation arriving during the write is consumed once and retried.
-        if result.entries:
+        has_migrated_assets = (
+            result.migration is not None
+            and result.migration.stats.preserved_resourcepack_assets > 0
+        )
+        if result.entries or has_migrated_assets:
             self._emit("progress", self._stage_frame(0))
             try:
                 await write_outputs(result)
@@ -1354,6 +1622,9 @@ class TranslationPipeline:
         stats.total_entries = len(result.entries)
         stats.tm_hits = sum(
             1 for e in result.entries if e.status == EntryStatus.TM_HIT
+        )
+        stats.migration_hits = sum(
+            1 for e in result.entries if e.status == EntryStatus.MIGRATED
         )
         stats.skipped_entries = sum(
             1 for e in result.entries if e.status == EntryStatus.SKIPPED
@@ -1377,10 +1648,11 @@ class TranslationPipeline:
             self._emit("done", {"stats": stats.model_dump()})
             logger.info(
                 "Pipeline done: %d translated, %d TM hits, %d failed, "
-                "%d skipped (%.1fs)",
+                "%d migrated, %d skipped (%.1fs)",
                 stats.translated_entries,
                 stats.tm_hits,
                 stats.failed_entries,
+                stats.migration_hits,
                 stats.skipped_entries,
                 stats.duration_seconds,
             )
@@ -1512,7 +1784,19 @@ class TranslationPipeline:
     def _refresh_stats(result: PipelineResult) -> None:
         """Recompute the counters a post-run mutation can change."""
         stats = result.stats
-        stats.failed_entries = len(result.failed)
+        stats.total_entries = len(result.entries)
+        stats.tm_hits = sum(
+            1 for entry in result.entries if entry.status == EntryStatus.TM_HIT
+        )
+        stats.migration_hits = sum(
+            1 for entry in result.entries if entry.status == EntryStatus.MIGRATED
+        )
+        stats.skipped_entries = sum(
+            1 for entry in result.entries if entry.status == EntryStatus.SKIPPED
+        )
+        stats.failed_entries = sum(
+            1 for entry in result.entries if entry.status == EntryStatus.FAILED
+        )
         stats.translated_entries = sum(
             1
             for e in result.entries
@@ -1533,6 +1817,8 @@ async def run_pipeline(
     on_event: Callable[[str, dict[str, object]], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     on_pipeline: Callable[[TranslationPipeline], None] | None = None,
+    scan_result: ScanResult | None = None,
+    migration: MigrationCatalog | None = None,
 ) -> PipelineResult:
     """Convenience wrapper: build, run, close.
 
@@ -1546,7 +1832,7 @@ async def run_pipeline(
     if on_pipeline is not None:
         on_pipeline(pipeline)
     try:
-        return await pipeline.run()
+        return await pipeline.run(scan_result=scan_result, migration=migration)
     finally:
         pipeline.close()
 
@@ -1562,6 +1848,7 @@ _FRESH_STATUSES = (
     EntryStatus.WARNING,
     EntryStatus.MODIFIED,
     EntryStatus.TM_HIT,
+    EntryStatus.MIGRATED,
 )
 
 
@@ -1616,6 +1903,11 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
             target_locale=config.target_locale,
             pack_format=pack_format,
             description=f"{version_prefix}§a모루§7로 한국어로 번역됨 — §amoru.gg",
+            resourcepack_seed_dir=(
+                result.migration.resourcepack_assets_dir
+                if result.migration is not None
+                else None
+            ),
         )
     )
     generation = await generator.generate(list(outputs.values()))

@@ -167,8 +167,9 @@ export function W3Settings() {
 
   const totals = selectedScanTotals(wizard);
   const usage = estimateUsage({
-    chars: totals.chars,
-    entries: totals.entries,
+    chars: totals.translationChars,
+    entries: totals.translationEntries,
+    glossaryEntries: totals.entries,
     batchSize: settings.batchSize,
     maxRefine: settings.maxRefine,
     glossary: settings.useVanillaGlossary || settings.useTm,
@@ -360,12 +361,12 @@ export function W3Settings() {
       ? null
       : price.source === "free"
         ? t("w3.footer.free")
-        : totals.chars > 0
+        : totals.translationChars > 0
           ? `${formatUsd(costUsd(usage, price))} ${t("w3.footer.estimated")}`
           : null;
   const recommendedPrice = estimatePriceForModel(pricingTable, RECOMMENDED_MODEL);
   const recommendedCostText =
-    recommendedPrice !== null && totals.chars > 0
+    recommendedPrice !== null && totals.translationChars > 0
       ? formatUsd(costUsd(usage, recommendedPrice))
       : null;
 
@@ -1067,7 +1068,7 @@ export function W3Settings() {
         <div className="flex items-center gap-3">
           <span className="font-mono text-[11px] text-text3">
             {presetName} · {modelDisplayName(settings.model)}
-            {totals.chars > 0 && (
+            {totals.translationChars > 0 && (
               <>
                 {" · "}
                 {t("w3.footer.tokens", { n: formatCompact(usage.totalTokens) })}

@@ -195,6 +195,15 @@ export function registerIpc(sidecar: EngineSidecar, getBusy: () => boolean): voi
     return result.canceled ? null : result.filePaths[0];
   });
 
+  ipcMain.handle("dialog:pick-folders", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win === null) return [];
+    const result = await dialog.showOpenDialog(win, {
+      properties: ["openDirectory", "multiSelections"],
+    });
+    return result.canceled ? [] : result.filePaths;
+  });
+
   ipcMain.handle(
     "dialog:pick-file",
     async (event, filters?: { name: string; extensions: string[] }[]) => {

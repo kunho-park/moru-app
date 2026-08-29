@@ -202,6 +202,9 @@ components:
             coverage_percent: { type: number }
             quality_score: { type: number, description: validator pass rate 0-1 }
             tm_hits: { type: integer }
+            migration_hits:
+              type: integer
+              description: exact A/B/C matches reused from a previous translation
             categories:
               type: object
               additionalProperties: { type: integer }

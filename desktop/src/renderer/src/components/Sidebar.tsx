@@ -1,6 +1,6 @@
 /** Hub navigation sidebar. */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { moru } from "@/lib/bridge";
@@ -8,6 +8,7 @@ import { WEB_URL } from "@/lib/web";
 import { useAccount } from "@/stores/account";
 import { useRouter } from "@/stores/router";
 import { useSessions } from "@/stores/sessions";
+import { selectQueueActive, useTranslationQueue } from "@/stores/translationQueue";
 import { useWizard } from "@/stores/wizard";
 import type { UpdateState } from "../../../shared/bridge";
 
@@ -46,6 +47,16 @@ export function Sidebar() {
   const screen = useRouter((s) => s.screen);
   const go = useRouter((s) => s.go);
   const sessionCount = useSessions((s) => s.sessions.length);
+  const queueCount = useTranslationQueue(
+    (s) =>
+      s.items.filter(
+        (item) =>
+          item.status === "pending" ||
+          item.status === "scanning" ||
+          item.status === "translating",
+      ).length,
+  );
+  const queueActive = useTranslationQueue(selectQueueActive);
   const account = useAccount();
   const [update, setUpdate] = useState<UpdateState>({ status: "idle" });
 
@@ -54,10 +65,14 @@ export function Sidebar() {
     return moru.updates.onState(setUpdate);
   }, []);
 
-  const startNewTranslation = (): void => {
+  const startNewTranslation = useCallback((): void => {
+    if (queueActive) {
+      go("queue");
+      return;
+    }
     useWizard.getState().reset();
     go("w1");
-  };
+  }, [go, queueActive]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -68,8 +83,7 @@ export function Sidebar() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [startNewTranslation]);
 
   const updateVisible = update.status === "available" || update.status === "downloading" || update.status === "ready";
 
@@ -107,6 +121,22 @@ export function Sidebar() {
               <path d="M2 7 L8 2 L14 7 V14 H2 Z" />
               <path d="M6 14 V10 H10 V14" />
             </svg>
+          }
+        />
+        <NavButton
+          active={screen === "queue"}
+          onClick={() => go("queue")}
+          label={t("common.nav.queue")}
+          icon={
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M3 3 H13 M3 8 H13 M3 13 H13" />
+              <path d="M1.5 3 H1.6 M1.5 8 H1.6 M1.5 13 H1.6" strokeWidth="2" />
+            </svg>
+          }
+          trailing={
+            queueCount > 0 ? (
+              <span className="ml-auto font-mono text-[10px] text-text4">{queueCount}</span>
+            ) : undefined
           }
         />
         <NavButton

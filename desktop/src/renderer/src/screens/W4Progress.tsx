@@ -261,6 +261,7 @@ export function W4Progress() {
     glossaryProgress,
     activeBatches,
     failedKeys,
+    failedEntryCount,
     promptTokens,
     completionTokens,
     cachedTokens,
@@ -268,6 +269,7 @@ export function W4Progress() {
     log,
     stats,
     scanResult,
+    scanTotals,
     excludedCategories,
     sourceLocale,
     targetLocale,
@@ -294,7 +296,9 @@ export function W4Progress() {
     if (!running) return;
     const id = setInterval(() => {
       const samples = rateSamplesRef.current;
-      samples.push(useWizard.getState().doneEntries);
+      const current = useWizard.getState();
+      const migrated = selectedScanTotals(current).migrationEntries;
+      samples.push(Math.max(0, current.doneEntries - migrated));
       if (samples.length > 9) samples.shift();
       setNow(Date.now());
     }, 1000);
@@ -313,19 +317,26 @@ export function W4Progress() {
 
   /* ---- derived progress numbers ---- */
   const totals = useMemo(
-    () => selectedScanTotals({ scanResult, excludedCategories }),
-    [scanResult, excludedCategories],
+    () => selectedScanTotals({ scanResult, scanTotals, excludedCategories }),
+    [scanResult, scanTotals, excludedCategories],
   );
   const totalEntries = totals.entries > 0 ? totals.entries : (stats?.total_entries ?? 0);
   const doneShown =
-    doneEntries > 0 ? doneEntries : stats !== null ? stats.translated_entries + stats.tm_hits : 0;
+    doneEntries > 0
+      ? doneEntries
+      : stats !== null
+        ? stats.translated_entries + stats.tm_hits + (stats.migration_hits ?? 0)
+        : 0;
   const pct =
     totalEntries > 0 ? Math.min(1, doneShown / totalEntries) : runState === "done" ? 1 : null;
 
   const elapsedLiveSec = startedAt !== null ? Math.max(0, ((finishedAt ?? now) - startedAt) / 1000) : 0;
   const elapsedSec = !running && stats !== null ? stats.duration_seconds : elapsedLiveSec;
-  const rate = ratePerSecond(doneShown, translationStartedAt, finishedAt ?? now);
-  const remainingSec = running ? remainingSeconds(totalEntries, doneShown, rate) : null;
+  const translatedDone = Math.max(0, doneShown - totals.migrationEntries);
+  const rate = ratePerSecond(translatedDone, translationStartedAt, finishedAt ?? now);
+  const remainingSec = running
+    ? remainingSeconds(totals.translationEntries, translatedDone, rate)
+    : null;
 
   /* rate chart: last 8 per-second deltas (re-derived each 1s tick render) */
   const rateSamples = rateSamplesRef.current;
@@ -345,10 +356,11 @@ export function W4Progress() {
   const cachePercent = cacheRatioPercent(liveUsage);
   const estimate = useMemo(
     () =>
-      totals.chars > 0
+      totals.translationChars > 0 || (extractGlossary && totals.entries > 0)
         ? estimateUsage({
-            chars: totals.chars,
-            entries: totals.entries,
+            chars: totals.translationChars,
+            entries: totals.translationEntries,
+            glossaryEntries: totals.entries,
             batchSize,
             maxRefine,
             glossary: useVanillaGlossary,
@@ -358,7 +370,8 @@ export function W4Progress() {
           })
         : null,
     [
-      totals.chars,
+      totals.translationChars,
+      totals.translationEntries,
       totals.entries,
       batchSize,
       maxRefine,
@@ -391,7 +404,11 @@ export function W4Progress() {
   const doneFiles = fileList.filter((f) => f.total > 0 && f.done >= f.total);
   const totalFiles = totals.files > 0 ? totals.files : (stats?.total_files ?? fileList.length);
   const pendingFiles = Math.max(0, totalFiles - fileList.length);
-  const failedCount = Object.keys(failedKeys).length;
+  const failedCount = Math.max(
+    failedEntryCount,
+    Object.keys(failedKeys).length,
+    stats?.failed_entries ?? 0,
+  );
 
   const latestTick = ticker[0];
   const activeBatchList = Object.values(activeBatches).sort(
@@ -745,21 +762,21 @@ export function W4Progress() {
               }
             />
             <StatCard
-              label={t("w4.stats.tmHits")}
+              label={t("w4.stats.reuse")}
               dotClass="bg-purple"
               value={
                 <div className="font-mono text-[20px] font-bold tracking-[-0.02em] text-purple">
-                  {stats !== null ? formatInt(stats.tm_hits) : "—"}
+                  {stats !== null
+                    ? formatInt(stats.tm_hits + (stats.migration_hits ?? 0))
+                    : "—"}
                 </div>
               }
               sub={
                 <div className="mt-[6px] font-mono text-[10px] text-text3">
                   {stats !== null
-                    ? t("w4.stats.tmReuse", {
-                        percent:
-                          stats.total_entries > 0
-                            ? ((stats.tm_hits / stats.total_entries) * 100).toFixed(1)
-                            : "0",
+                    ? t("w4.stats.reuseBreakdown", {
+                        migrated: formatInt(stats.migration_hits ?? 0),
+                        tm: formatInt(stats.tm_hits),
                       })
                     : t("w4.stats.afterDone")}
                 </div>
@@ -809,6 +826,13 @@ export function W4Progress() {
               {stats !== null && (
                 <span className="text-purple">
                   {t("w4.files.chipTm", { count: formatInt(stats.tm_hits) })}
+                </span>
+              )}
+              {stats !== null && (stats.migration_hits ?? 0) > 0 && (
+                <span className="text-purple">
+                  {t("w4.files.chipMigrated", {
+                    count: formatInt(stats.migration_hits ?? 0),
+                  })}
                 </span>
               )}
               <span className="text-red">

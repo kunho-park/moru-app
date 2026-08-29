@@ -2,6 +2,7 @@
   "greeting": "안녕하세요",
   "title": "오늘도 <1>한글화</1> 해볼까요?",
   "import": "가져오기",
+  "queue": "여러 팩 번역",
   "stats": {
     "totalEntries": "누적 번역 엔트리",
     "thisWeek": "이번 주 +{{n}}",

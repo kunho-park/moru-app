@@ -312,7 +312,7 @@ export function W6Export() {
                 })}
               </span>
               {(stats.migration_hits ?? 0) > 0 && (
-                <span className="text-blue">
+                <span className="text-purple">
                   {t("w6.banner.migrationReuse", {
                     count: formatInt(stats.migration_hits ?? 0),
                   })}

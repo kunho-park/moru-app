@@ -51,10 +51,22 @@
     "title": "The queue is empty",
     "desc": "Select multiple modpack folders to prepare sequential translation."
   },
+  "confirmClear": {
+    "title": "Clear the queue",
+    "body": "A pack is being translated. Clearing the queue stops it and removes every row. This cannot be undone."
+  },
   "validation": {
     "notFound": "Folder not found: {{path}}",
     "notDirectory": "Not a directory: {{path}}",
     "noMods": "Skipped because no mods folder was found: {{path}}",
-    "failed": "Could not inspect pack: {{path}} ({{error}})"
+    "failed": "Could not inspect pack: {{path}} ({{error}})",
+    "duplicate": "Skipped {{skipped}} folder(s) already queued."
+  },
+  "error": {
+    "interruptedScan": "The app closed before the modpack scan finished.",
+    "lostTranslation": "The translation job could not be restored after the app restarted.",
+    "scanFailed": "The modpack scan failed.",
+    "wizardBusy": "Another translation is already running. Finish or stop it before starting the queue.",
+    "recovery": "Could not restore the queue: {{error}}"
   }
 }

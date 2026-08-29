@@ -15,6 +15,7 @@ import { costUsd, priceForModel, usePricingTable, type PricingTable } from "@/li
 import { useRouter } from "@/stores/router";
 import { useSessions, type SessionRecord } from "@/stores/sessions";
 import { useSettings } from "@/stores/settings";
+import { selectQueueActive, useTranslationQueue } from "@/stores/translationQueue";
 import { useSessionJobs, useWizard } from "@/stores/wizard";
 
 type StatusFilter = "all" | "done" | "running" | "stopped";
@@ -84,7 +85,7 @@ interface SessionRowProps {
   s: SessionRecord;
   /** A running job id exists to probe and restore. */
   canView: boolean;
-  /** A job id exists to probe; the engine remains source of truth. */
+  /** Finished run: the job id is probed on click, never gated here. */
   canReopen: boolean;
   lang: "ko" | "en";
   onView: () => void;
@@ -306,6 +307,7 @@ export function HistoryScreen(): React.JSX.Element {
   const sessionJobs = useSessionJobs((s) => s.jobs);
   const lang = useSettings((s) => s.uiLanguage);
   const pricingTable = usePricingTable();
+  const queueActive = useTranslationQueue(selectQueueActive);
 
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [query, setQuery] = useState("");
@@ -354,6 +356,10 @@ export function HistoryScreen(): React.JSX.Element {
   ];
 
   const reopen = async (sessionId: string, screen: "w4" | "w5" | "w6"): Promise<void> => {
+    if (queueActive) {
+      go("queue");
+      return;
+    }
     const result = await reopenSession(sessionId);
     if (result === "ok") {
       go(screen);
@@ -536,16 +542,17 @@ export function HistoryScreen(): React.JSX.Element {
                   s.status === "running" &&
                   (s.translateJobId !== null || sessionJobs[s.id] !== undefined)
                 }
-                canReopen={
-                  (s.status === "done" || s.status === "cancelled") &&
-                  (s.translateJobId !== null || sessionJobs[s.id] !== undefined)
-                }
+                canReopen={s.status === "done" || s.status === "cancelled"}
                 lang={lang}
                 onView={() => void reopen(s.id, "w4")}
                 onReview={() => void reopen(s.id, "w5")}
                 onExport={() => void reopen(s.id, "w6")}
                 onExportSession={() => void handleExportSession(s)}
                 onRetry={() => {
+                  if (queueActive) {
+                    go("queue");
+                    return;
+                  }
                   if (resumeSession(s.id)) go("w1");
                 }}
                 onDelete={() => setConfirmId(s.id)}

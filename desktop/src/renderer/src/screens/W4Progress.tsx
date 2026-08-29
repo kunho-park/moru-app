@@ -829,7 +829,7 @@ export function W4Progress() {
                 </span>
               )}
               {stats !== null && (stats.migration_hits ?? 0) > 0 && (
-                <span className="text-blue">
+                <span className="text-purple">
                   {t("w4.files.chipMigrated", {
                     count: formatInt(stats.migration_hits ?? 0),
                   })}

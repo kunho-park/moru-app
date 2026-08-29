@@ -54,8 +54,12 @@ interface SessionsStore {
 }
 
 /** Normalize older persisted records before Zustand merges in store actions. */
-export function migrateSessionsState(persisted: unknown, now = Date.now()): unknown {
-  const state = persisted as Partial<SessionsStore>;
+export function migrateSessionsState(
+  persisted: unknown,
+  now = Date.now(),
+): { sessions: SessionRecord[] } {
+  // merge runs on a fresh install too, with nothing persisted yet.
+  const state = (persisted ?? {}) as Partial<SessionsStore>;
   return {
     ...state,
     sessions: (state.sessions ?? []).map((session) => {
@@ -108,6 +112,10 @@ export const useSessions = create<SessionsStore>()(
       // Zustand passes the old schema version as migrate's second argument;
       // do not accidentally use that small integer as an epoch timestamp.
       migrate: (persisted) => migrateSessionsState(persisted),
+      // migrate only runs on a version change, but a crash inside
+      // startTranslate's await window persists a running row with no job id
+      // at the current version too - merge always runs, so normalize here.
+      merge: (persisted, current) => ({ ...current, ...migrateSessionsState(persisted) }),
     },
   ),
 );

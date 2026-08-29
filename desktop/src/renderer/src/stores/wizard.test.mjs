@@ -13,7 +13,14 @@ const win = (globalThis.window ??= {});
 win.localStorage ??= localStorageStub;
 win.location ??= { search: "" };
 win.setTimeout ??= globalThis.setTimeout;
-win.moru ??= {};
+// lib/bridge caches `window.moru ?? shim` at import; a partial stub here
+// silently strips fields (platform) from every test file that loads later.
+win.moru ??= {
+  platform: "win32",
+  versions: { app: "test", electron: "test" },
+  setBusy: () => undefined,
+  secrets: { get: async () => null },
+};
 
 const fetchCalls = [];
 let nextResponse = null;
@@ -43,6 +50,10 @@ class FakeWebSocket {
   close() {}
   emit(frame) {
     this.onmessage?.({ data: JSON.stringify(frame) });
+  }
+  /** Engine-side close (a sidecar restart), not our own unsubscribe. */
+  emitClose() {
+    this.onclose?.({});
   }
 }
 globalThis.WebSocket = FakeWebSocket;
@@ -119,6 +130,19 @@ function record(id, status, overrides = {}) {
     exportOverridesZipPath: null,
     sharedUrl: null,
     ...overrides,
+  };
+}
+
+function probe(name) {
+  return {
+    exists: true,
+    isDirectory: true,
+    name,
+    hasMods: true,
+    hasConfig: true,
+    hasKubejs: false,
+    hasResourcepacks: false,
+    modJarCount: 3,
   };
 }
 
@@ -421,5 +445,83 @@ test("restores the scan screen only when the session carries a scan payload", as
   expect(await useWizard.getState().reopenSession("s5")).toBe("ok");
   expect(useWizard.getState().scanResult).toBe(null);
   expect(useWizard.getState().scanState).toBe("idle");
+  routeResponses.clear();
+});
+
+test("a rejected scan result probe still settles the scan state", async () => {
+  useWizard.getState().startSession("C:/packs/new", probe("New Pack"), "ko_kr");
+  routeResponses.set("/jobs", response({ id: "scan-1", type: "scan", status: "pending" }));
+  routeResponses.set("/scan/scan-1/result", notFound);
+
+  await useWizard.getState().startScan();
+  expect(useWizard.getState().scanState).toBe("running");
+  sockets.at(-1).emit({ type: "done" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // Otherwise the queue runner's waitForWizard never resolves and the whole
+  // drain loop deadlocks with no in-app escape.
+  expect(useWizard.getState().scanState).toBe("failed");
+  expect(useWizard.getState().scanError).toContain("unknown job");
+  routeResponses.clear();
+});
+
+test("a dropped scan socket settles the scan instead of parking it", async () => {
+  const scanPayload = { modpack_path: "C:/packs/new", categories: [], identity: null };
+  useWizard.getState().startSession("C:/packs/new", probe("New Pack"), "ko_kr");
+  routeResponses.set("/jobs", response({ id: "scan-2", type: "scan", status: "pending" }));
+  routeResponses.set("/scan/scan-2/result", response(scanPayload));
+
+  await useWizard.getState().startScan();
+  sockets.at(-1).emitClose();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(useWizard.getState().scanState).toBe("done");
+  expect(useWizard.getState().scanResult).toEqual(scanPayload);
+  routeResponses.clear();
+});
+
+test("entry failures from different files stay separate rows", () => {
+  useWizard.setState({ sessionId: "s1", runState: "running", translateJobId: "job-1" });
+  const frame = { type: "entry_failed", key: "display_name.0001", errors: ["schema"] };
+  useWizard.getState().handleTranslationFrame({ ...frame, file: "a.js" }, "s1");
+  useWizard.getState().handleTranslationFrame({ ...frame, file: "b.js" }, "s1");
+  // The screens only read Object.keys(failedKeys).length, so a bare key would
+  // report one failure for every KubeJS script that minted the same id.
+  expect(Object.keys(useWizard.getState().failedKeys)).toEqual([
+    "a.js:display_name.0001",
+    "b.js:display_name.0001",
+  ]);
+
+  // Replayed snapshots and older engines carry no file: still one row each.
+  useWizard.getState().handleTranslationFrame(
+    { type: "entry_failed", key: "legacy.key", errors: ["boom"] },
+    "s1",
+  );
+  expect(useWizard.getState().failedKeys["legacy.key"]).toEqual(["boom"]);
+});
+
+test("reset keeps the runtime job registry so history can still reopen", () => {
+  useSessionJobs.getState().register("s1", "job-1");
+  useWizard.setState({ sessionId: "s1" });
+  useWizard.getState().reset();
+  expect(useWizard.getState().sessionId).toBe(null);
+  expect(useSessionJobs.getState().jobs.s1).toBe("job-1"); // affordance survives
+});
+
+test("a failed probe of an unrelated session leaves the live wizard alone", async () => {
+  useSessions.getState().upsert(record("live", "done", { translateJobId: "job-live" }));
+  useSessions.getState().upsert(record("dead", "cancelled", { translateJobId: "job-dead" }));
+  useSessionJobs.getState().register("dead", "job-dead");
+  routeResponses.set("/jobs/job-live/snapshot", response(snapshot("job-live", "done")));
+  routeResponses.set("/translate/job-live/entries", okPage);
+  routeResponses.set("/scan/job-live/result", notFound);
+  expect(await useWizard.getState().reopenSession("live")).toBe("ok");
+  useWizard.setState({ failedKeys: { "block.x": ["schema"] } }); // richer in-run state
+
+  nextResponse = notFound;
+  expect(await useWizard.getState().reopenSession("dead")).toBe("gone");
+  expect(useSessionJobs.getState().jobs.dead).toBeUndefined(); // affordance revoked
+  expect(useWizard.getState().sessionId).toBe("live"); // untouched
+  expect(useWizard.getState().failedKeys["block.x"]).toEqual(["schema"]);
   routeResponses.clear();
 });

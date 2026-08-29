@@ -8,7 +8,7 @@ import { WEB_URL } from "@/lib/web";
 import { useAccount } from "@/stores/account";
 import { useRouter } from "@/stores/router";
 import { useSessions } from "@/stores/sessions";
-import { useTranslationQueue } from "@/stores/translationQueue";
+import { selectQueueActive, useTranslationQueue } from "@/stores/translationQueue";
 import { useWizard } from "@/stores/wizard";
 import type { UpdateState } from "../../../shared/bridge";
 
@@ -56,12 +56,7 @@ export function Sidebar() {
           item.status === "translating",
       ).length,
   );
-  const queueActive = useTranslationQueue(
-    (s) =>
-      s.phase === "running" ||
-      s.phase === "pausing" ||
-      s.items.some((item) => item.status === "scanning" || item.status === "translating"),
-  );
+  const queueActive = useTranslationQueue(selectQueueActive);
   const account = useAccount();
   const [update, setUpdate] = useState<UpdateState>({ status: "idle" });
 

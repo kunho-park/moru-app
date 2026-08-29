@@ -130,6 +130,16 @@ function QueueRow({
             {t("queue.action.history")}
           </button>
         )}
+
+        {!active && item.status !== "pending" && (
+          <button
+            type="button"
+            onClick={() => remove(item.id)}
+            className="shrink-0 border border-line2 px-2.5 py-[6px] text-[11px] font-semibold text-text3 hover:border-red/50 hover:text-red"
+          >
+            {t("queue.action.remove")}
+          </button>
+        )}
       </div>
 
       {active && (
@@ -167,6 +177,7 @@ export function TranslationQueueScreen() {
   const add = useTranslationQueue((state) => state.add);
   const clear = useTranslationQueue((state) => state.clear);
   const [adding, setAdding] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
   const [selectionErrors, setSelectionErrors] = useState<string[]>([]);
 
   const counts = useMemo(() => {
@@ -205,7 +216,14 @@ export function TranslationQueueScreen() {
           errors.push(t("queue.validation.failed", { path, error: String(error) }));
         }
       }
-      if (inputs.length > 0) add(inputs);
+      if (inputs.length > 0) {
+        const before = useTranslationQueue.getState().items.length;
+        add(inputs);
+        const skipped =
+          inputs.length - (useTranslationQueue.getState().items.length - before);
+        // A fully duplicate selection must never vanish without a word.
+        if (skipped > 0) errors.push(t("queue.validation.duplicate", { skipped }));
+      }
       setSelectionErrors(errors);
     } finally {
       setAdding(false);
@@ -279,9 +297,8 @@ export function TranslationQueueScreen() {
         <div className="flex gap-2">
           <button
             type="button"
-            disabled={active}
-            onClick={clear}
-            className="border border-line2 px-3 py-2 text-[11px] font-semibold text-text3 enabled:hover:border-edge2 enabled:hover:text-text disabled:opacity-35"
+            onClick={() => (active ? setConfirmClear(true) : clear())}
+            className="border border-line2 px-3 py-2 text-[11px] font-semibold text-text3 hover:border-edge2 hover:text-text"
           >
             {t("queue.action.clear")}
           </button>
@@ -322,6 +339,44 @@ export function TranslationQueueScreen() {
           {items.map((item, index) => (
             <QueueRow key={item.id} item={item} index={index} pendingIds={pendingIds} />
           ))}
+        </div>
+      )}
+
+      {confirmClear && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={() => setConfirmClear(false)}
+        >
+          <div
+            className="w-[380px] border border-line2 bg-raised p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-2 text-[14px] font-bold text-text">
+              {t("queue.confirmClear.title")}
+            </div>
+            <p className="m-0 mb-5 text-[12px] leading-relaxed text-text2">
+              {t("queue.confirmClear.body")}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="border border-edge px-3.5 py-2 text-[12px] font-semibold text-text2 hover:border-edge2 hover:text-text"
+                onClick={() => setConfirmClear(false)}
+              >
+                {t("common.action.cancel")}
+              </button>
+              <button
+                type="button"
+                className="bg-red px-3.5 py-2 text-[12px] font-bold text-[#0A100D] hover:bg-[#f58585]"
+                onClick={() => {
+                  clear();
+                  setConfirmClear(false);
+                }}
+              >
+                {t("queue.action.clear")}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

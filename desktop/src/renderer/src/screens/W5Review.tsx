@@ -43,8 +43,9 @@ const STATUS_COLOR: Record<EntryStatus, string> = {
   warning: "#F5B454",
   failed: "#F26B6B",
   modified: "#6BB3F5",
+  // Reuse shares one hue across the app; the glyph tells TM from migrated.
   tm_hit: "#A78BFA",
-  migrated: "#2DD4BF",
+  migrated: "#A78BFA",
   skipped: "#6A7C74",
 };
 
@@ -358,35 +359,44 @@ export function W5Review() {
     void queryClient.invalidateQueries({ queryKey: ["w5", translateJobId] });
   };
 
+  // The write and the stats refresh are two engine calls: when the write
+  // lands but the refresh fails, reconcile what did succeed instead of
+  // reporting the whole mutation as failed.
+  const refreshStats = async (jobId: string): Promise<void> => {
+    try {
+      updateReviewStats(await api.translateStats(jobId));
+    } catch {
+      // Entry invalidation in onSettled still refreshes the visible rows.
+    }
+  };
+
   // Mutations carry file + key: the same key can live in two source files,
   // and the engine would otherwise patch whichever one it finds first.
   const patchMut = useMutation({
     mutationFn: async ({ key, file, text }: EntryRef & { text: string }) => {
-      const entry = await api.patchEntry(translateJobId as string, key, text, file);
-      const refreshedStats = await api.translateStats(translateJobId as string);
-      return { entry, stats: refreshedStats };
+      const jobId = translateJobId as string;
+      const entry = await api.patchEntry(jobId, key, text, file);
+      await refreshStats(jobId);
+      return entry;
     },
-    onSuccess: (result) => {
-      setActionError(null);
-      updateReviewStats(result.stats);
-      invalidate();
-    },
+    onSuccess: () => setActionError(null),
     onError: (err) => setActionError(errorText(err)),
+    onSettled: () => invalidate(),
   });
 
   const retransMut = useMutation({
     mutationFn: async ({ key, file }: EntryRef) => {
-      const entry = await api.retranslateEntry(translateJobId as string, key, file);
-      const refreshedStats = await api.translateStats(translateJobId as string);
-      return { entry, stats: refreshedStats };
+      const jobId = translateJobId as string;
+      const entry = await api.retranslateEntry(jobId, key, file);
+      await refreshStats(jobId);
+      return entry;
     },
-    onSuccess: (result) => {
+    onSuccess: (entry) => {
       setActionError(null);
-      setDraft(result.entry.translated_text);
-      updateReviewStats(result.stats);
-      invalidate();
+      setDraft(entry.translated_text);
     },
     onError: (err) => setActionError(errorText(err)),
+    onSettled: () => invalidate(),
   });
 
   const bulkMut = useMutation({

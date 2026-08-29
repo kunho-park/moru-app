@@ -12,7 +12,7 @@ import { useAccount } from "@/stores/account";
 import { useRouter } from "@/stores/router";
 import { aggregateStats, useSessions, type SessionRecord } from "@/stores/sessions";
 import { useSettings } from "@/stores/settings";
-import { useTranslationQueue } from "@/stores/translationQueue";
+import { selectQueueActive, useTranslationQueue } from "@/stores/translationQueue";
 import { useWizard } from "@/stores/wizard";
 
 /**
@@ -411,13 +411,9 @@ export function HomeScreen() {
   const resumeSession = useWizard((s) => s.resumeSession);
   const reopenSession = useWizard((s) => s.reopenSession);
   const recentFolders = useSettings((s) => s.recentFolders);
-  const queueActive = useTranslationQueue(
-    (s) =>
-      s.phase === "running" ||
-      s.phase === "pausing" ||
-      s.items.some((item) => item.status === "scanning" || item.status === "translating"),
-  );
+  const queueActive = useTranslationQueue(selectQueueActive);
   const [dragOver, setDragOver] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const stats = useMemo(() => aggregateStats(sessions), [sessions]);
   const recent = sessions.slice(0, 3);
@@ -456,7 +452,11 @@ export function HomeScreen() {
       return;
     }
     const result = await reopenSession(id);
-    if (result === "ok") go("w4");
+    if (result === "ok") {
+      go("w4");
+      return;
+    }
+    setNotice(t(result === "busy" ? "history.reopen.busy" : "history.reopen.gone"));
   };
 
   const handleRetry = (id: string) => {
@@ -509,6 +509,18 @@ export function HomeScreen() {
           </button>
         </div>
       </div>
+
+      {notice !== null && (
+        <div className="mb-4 flex items-center justify-between gap-3 border border-amber/50 bg-amber/[0.08] px-3 py-2">
+          <span className="font-mono text-[11px] text-amber">{notice}</span>
+          <button
+            className="font-mono text-[11px] text-text3 hover:text-text"
+            onClick={() => setNotice(null)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Stats strip */}
       <div className="mb-8 grid grid-cols-4 gap-3">

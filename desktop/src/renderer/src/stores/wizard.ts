@@ -376,7 +376,10 @@ function translationFramePatch(
       };
     case "entry_failed": {
       const failedKeys = { ...prev.failedKeys };
-      failedKeys[frame.key] = frame.errors;
+      // Keys are only unique within a file, so a bare key collapses distinct
+      // failures (every KubeJS script mints display_name.0001) into one row.
+      failedKeys[frame.file !== undefined ? `${frame.file}:${frame.key}` : frame.key] =
+        frame.errors;
       while (Object.keys(failedKeys).length > MAX_FAILED_KEY_SAMPLES) {
         const oldest = Object.keys(failedKeys)[0];
         if (oldest === undefined) break;
@@ -742,17 +745,16 @@ export const useWizard = create<WizardStore>((set, get) => ({
           : {}),
       });
       set({ scanJobId: job.id });
-      closeScanEvents = openJobEvents(job.id, (frame) => {
-        if (frame.type === "progress") {
-          set({
-            scanProgress: {
-              current: frame.current ?? frame.done ?? 0,
-              total: frame.total ?? 0,
-              message: frame.message ?? "",
-            },
-          });
-        } else if (frame.type === "done") {
-          void api.scanResult(job.id).then((result) => {
+      // The scan must always reach a terminal state: an unhandled result
+      // rejection used to pin scanState at "running", which now also blocks
+      // the queue runner waiting on it.
+      let settling = false;
+      const settleScan = (): void => {
+        if (settling) return;
+        settling = true;
+        void api
+          .scanResult(job.id)
+          .then((result) => {
             // Confident launcher-metadata identity beats the folder-name guess.
             const identity = result.identity;
             set({
@@ -767,13 +769,40 @@ export const useWizard = create<WizardStore>((set, get) => ({
                 ? { modpackName: identity.name }
                 : {}),
             });
+          })
+          .catch((error) => {
+            set({ scanState: "failed", scanError: String(error) });
           });
-        } else if (frame.type === "failed") {
-          set({ scanState: "failed", scanError: frame.error ?? "scan failed" });
-        } else if (frame.type === "cancelled") {
-          set({ scanState: "idle" });
-        }
-      });
+      };
+      closeScanEvents = openJobEvents(
+        job.id,
+        (frame) => {
+          if (frame.type === "progress") {
+            set({
+              scanProgress: {
+                current: frame.current ?? frame.done ?? 0,
+                total: frame.total ?? 0,
+                message: frame.message ?? "",
+              },
+            });
+          } else if (frame.type === "done") {
+            settleScan();
+          } else if (frame.type === "failed") {
+            set({ scanState: "failed", scanError: frame.error ?? "scan failed" });
+          } else if (frame.type === "cancelled") {
+            set({ scanState: "idle" });
+          }
+        },
+        (_event, manuallyClosed) => {
+          // Like the translate stream, a dropped socket must not leave the
+          // scan running forever; the result probe decides done vs failed.
+          const state = get();
+          if (manuallyClosed || state.scanJobId !== job.id || state.scanState !== "running") {
+            return;
+          }
+          settleScan();
+        },
+      );
     } catch (error) {
       set({ scanState: "failed", scanError: String(error) });
     }

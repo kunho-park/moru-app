@@ -297,6 +297,8 @@ export interface ProgressFrame extends JobEventMeta {
 export interface EntryFailedFrame extends JobEventMeta {
   type: "entry_failed";
   key: string;
+  /** Owning file; keys are unique per file, not across the pack. */
+  file?: string;
   errors: string[];
 }
 

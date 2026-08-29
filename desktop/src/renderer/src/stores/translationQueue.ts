@@ -7,6 +7,7 @@
  * review/export flow.
  */
 
+import i18next from "i18next";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
@@ -73,12 +74,14 @@ interface PersistedTranslationQueueState {
   lastError: string | null;
 }
 
-const INTERRUPTED_SCAN_ERROR = "앱이 종료되어 모드팩 스캔이 중단되었습니다.";
-const LOST_TRANSLATION_ERROR = "앱 재시작 후 번역 작업을 복원할 수 없습니다.";
-
 export function queuePathKey(path: string, platform: DesktopPlatform): string {
   const normalized = path.trim().replace(/[\\/]+$/, "").replaceAll("\\", "/");
   return platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
+}
+
+/** Rows that own the wizard right now. */
+function ownsWizard(status: TranslationQueueItemStatus): boolean {
+  return status === "scanning" || status === "translating";
 }
 
 export function appendUniqueQueueItems(
@@ -88,7 +91,13 @@ export function appendUniqueQueueItems(
   makeId: () => string = () => crypto.randomUUID(),
   now: () => number = () => Date.now(),
 ): TranslationQueueItem[] {
-  const keys = new Set(existing.map((item) => queuePathKey(item.path, platform)));
+  // Only active rows reserve their path; terminal rows stay as history
+  // instead of permanently blocking a re-add of the same folder.
+  const keys = new Set(
+    existing
+      .filter((item) => item.status === "pending" || ownsWizard(item.status))
+      .map((item) => queuePathKey(item.path, platform)),
+  );
   const added: TranslationQueueItem[] = [];
   for (const input of inputs) {
     const key = queuePathKey(input.path, platform);
@@ -150,6 +159,31 @@ function validStatus(value: unknown): value is TranslationQueueItemStatus {
   );
 }
 
+/** A truncated snapshot would drive real spend, so re-snapshot instead. */
+function validSettingsSnapshot(value: unknown): value is TranslationRunSettings {
+  if (value === null || typeof value !== "object") return false;
+  const snapshot = value as Partial<TranslationRunSettings>;
+  return (
+    (snapshot.outputDir === null || typeof snapshot.outputDir === "string") &&
+    typeof snapshot.model === "string" &&
+    typeof snapshot.temperature === "number" &&
+    typeof snapshot.batchSize === "number" &&
+    typeof snapshot.maxConcurrent === "number" &&
+    typeof snapshot.maxRefine === "number" &&
+    typeof snapshot.thinkingEnabled === "boolean" &&
+    (snapshot.thinkingEffort === "low" ||
+      snapshot.thinkingEffort === "medium" ||
+      snapshot.thinkingEffort === "high") &&
+    typeof snapshot.useTm === "boolean" &&
+    typeof snapshot.useVanillaGlossary === "boolean" &&
+    typeof snapshot.extractGlossary === "boolean" &&
+    (snapshot.glossaryMaxTerms === null || typeof snapshot.glossaryMaxTerms === "number") &&
+    typeof snapshot.ollamaBaseUrl === "string" &&
+    typeof snapshot.openaiCompatBaseUrl === "string" &&
+    typeof snapshot.targetLocale === "string"
+  );
+}
+
 /** Normalize localStorage data and never resume paid work automatically. */
 export function normalizePersistedQueueState(
   persisted: unknown,
@@ -179,7 +213,9 @@ export function normalizePersistedQueueState(
   return {
     items,
     phase: storedPhase === "running" || storedPhase === "pausing" ? "paused" : storedPhase,
-    settingsSnapshot: value.settingsSnapshot ?? null,
+    settingsSnapshot: validSettingsSnapshot(value.settingsSnapshot)
+      ? value.settingsSnapshot
+      : null,
     lastError: typeof value.lastError === "string" ? value.lastError : null,
   };
 }
@@ -201,19 +237,39 @@ export const useTranslationQueue = create<TranslationQueueStore>()(
       remove: (id) =>
         set((state) => ({
           items: state.items.filter(
-            (item) => item.id !== id || item.status !== "pending",
+            (item) => item.id !== id || ownsWizard(item.status),
           ),
         })),
       move: (id, direction) =>
         set((state) => ({ items: movePendingQueueItem(state.items, id, direction) })),
       retry: (id) =>
-        set((state) => ({
-          items: state.items.map((item) => (item.id === id ? retryQueueItem(item) : item)),
-          phase: state.phase === "complete" ? "idle" : state.phase,
-          lastError: null,
-        })),
+        set((state) => {
+          const target = state.items.find((item) => item.id === id);
+          if (target === undefined) return state;
+          // Terminal rows no longer block a re-add, so the same folder may
+          // already be queued again; never translate one pack twice.
+          const key = queuePathKey(target.path, moru.platform);
+          const queuedAgain = state.items.some(
+            (item) =>
+              item.id !== id &&
+              (item.status === "pending" || ownsWizard(item.status)) &&
+              queuePathKey(item.path, moru.platform) === key,
+          );
+          if (queuedAgain) return state;
+          return {
+            items: state.items.map((item) => (item.id === id ? retryQueueItem(item) : item)),
+            phase: state.phase === "complete" ? "idle" : state.phase,
+            lastError: null,
+          };
+        }),
       clear: () => {
-        if (get().phase === "running" || get().phase === "pausing") return;
+        if (get().items.some((item) => ownsWizard(item.status))) {
+          // Abandoning is the only in-app escape when a wizard wait never
+          // settles. Stop the engine job first, then release the wizard so
+          // the parked drain loop resolves and exits on the idle phase.
+          void useWizard.getState().cancelTranslate().catch(() => undefined);
+          useWizard.getState().reset();
+        }
         set({ items: [], phase: "idle", settingsSnapshot: null, lastError: null });
       },
       patchItem: (id, patch) =>
@@ -274,7 +330,10 @@ export async function drainTranslationQueue(driver: TranslationQueueDriver): Pro
       outcome = { status: "failed", error: String(error) };
     }
     driver.settle(item, outcome);
-    if (driver.getPhase() === "pausing") {
+    const settled = driver.getPhase();
+    // An explicit cancel of the running pack must not silently start the next
+    // pack's paid translation; treat it like the pause request it really is.
+    if (settled === "pausing" || (settled === "running" && outcome.status === "cancelled")) {
       driver.setPhase("paused");
       return;
     }
@@ -298,10 +357,19 @@ function waitForWizard(
 }
 
 function probeError(path: string, probe: ModpackProbe): string | null {
-  if (!probe.exists) return `모드팩 폴더를 찾을 수 없습니다: ${path}`;
-  if (!probe.isDirectory) return `폴더가 아닙니다: ${path}`;
-  if (!probe.hasMods) return `mods 폴더가 없는 모드팩입니다: ${path}`;
+  if (!probe.exists) return i18next.t("queue.validation.notFound", { path });
+  if (!probe.isDirectory) return i18next.t("queue.validation.notDirectory", { path });
+  if (!probe.hasMods) return i18next.t("queue.validation.noMods", { path });
   return null;
+}
+
+/** The queue lost the wizard mid-item, so the row is abandoned, not failed. */
+function abandonOutcome(sessionId: string | null): QueueItemOutcome {
+  if (sessionId !== null) {
+    // Never leave a permanently "running" row behind in History.
+    useSessions.getState().patch(sessionId, { status: "cancelled", finishedAt: Date.now() });
+  }
+  return { status: "cancelled", sessionId };
 }
 
 function ensureFailedSession(
@@ -373,9 +441,14 @@ async function runQueueItem(
     queue.patchItem(item.id, { sessionId, name: probe.name });
 
     await useWizard.getState().startScan();
-    const scanned = await waitForWizard((state) => state.scanState !== "running");
+    // A cleared queue resets the wizard: without that escape these waits, and
+    // with them the whole drain loop, would park forever.
+    const scanned = await waitForWizard(
+      (state) => state.sessionId !== sessionId || state.scanState !== "running",
+    );
+    if (scanned.sessionId !== sessionId) return abandonOutcome(sessionId);
     if (scanned.scanState !== "done") {
-      const error = scanned.scanError ?? "모드팩 스캔에 실패했습니다.";
+      const error = scanned.scanError ?? i18next.t("queue.error.scanFailed");
       sessionId = ensureFailedSession(item, sessionId, settings, error);
       return { status: "failed", sessionId, name: scanned.modpackName, error };
     }
@@ -384,10 +457,12 @@ async function runQueueItem(
     await useWizard.getState().startTranslate(settings);
     const translated = await waitForWizard(
       (state) =>
+        state.sessionId !== sessionId ||
         state.runState === "done" ||
         state.runState === "failed" ||
         state.runState === "cancelled",
     );
+    if (translated.sessionId !== sessionId) return abandonOutcome(sessionId);
     const status =
       translated.runState === "done" ||
       translated.runState === "failed" ||
@@ -424,7 +499,7 @@ export function startTranslationQueue(): void {
   if (wizardBusy()) {
     useTranslationQueue.setState({
       phase: "paused",
-      lastError: "다른 번역 작업이 진행 중입니다. 완료하거나 중단한 뒤 대기열을 시작하세요.",
+      lastError: i18next.t("queue.error.wizardBusy"),
     });
     return;
   }
@@ -454,7 +529,12 @@ export function startTranslationQueue(): void {
         finishedAt: Date.now(),
       });
     },
-    setPhase: (phase) => useTranslationQueue.setState({ phase }),
+    // A finished queue must not advertise, or silently reuse, the settings
+    // locked by the run that just ended.
+    setPhase: (phase) =>
+      useTranslationQueue.setState(
+        phase === "complete" ? { phase, settingsSnapshot: null } : { phase },
+      ),
   }).finally(() => {
     runnerPromise = null;
     if (useTranslationQueue.getState().phase === "running") {
@@ -476,28 +556,28 @@ export function initializeTranslationQueue(): Promise<void> {
   initializationPromise = (async () => {
     const queue = useTranslationQueue.getState();
     const settings = queue.settingsSnapshot ?? snapshotTranslationSettings();
-    const activeItems = queue.items.filter(
-      (item) => item.status === "scanning" || item.status === "translating",
-    );
+    const activeItems = queue.items.filter((item) => ownsWizard(item.status));
 
     for (const item of activeItems) {
       if (item.status === "scanning") {
-        const sessionId = ensureFailedSession(item, item.sessionId, settings, INTERRUPTED_SCAN_ERROR);
+        const error = i18next.t("queue.error.interruptedScan");
+        const sessionId = ensureFailedSession(item, item.sessionId, settings, error);
         useTranslationQueue.getState().patchItem(item.id, {
           status: "failed",
           sessionId,
-          error: INTERRUPTED_SCAN_ERROR,
+          error,
           finishedAt: Date.now(),
         });
         continue;
       }
 
       if (item.sessionId === null) {
-        const sessionId = ensureFailedSession(item, null, settings, LOST_TRANSLATION_ERROR);
+        const error = i18next.t("queue.error.lostTranslation");
+        const sessionId = ensureFailedSession(item, null, settings, error);
         useTranslationQueue.getState().patchItem(item.id, {
           status: "failed",
           sessionId,
-          error: LOST_TRANSLATION_ERROR,
+          error,
           finishedAt: Date.now(),
         });
         continue;
@@ -510,7 +590,7 @@ export function initializeTranslationQueue(): Promise<void> {
           .sessions.find((record) => record.id === item.sessionId);
         useTranslationQueue.getState().patchItem(item.id, {
           status: "failed",
-          error: session?.error ?? LOST_TRANSLATION_ERROR,
+          error: session?.error ?? i18next.t("queue.error.lostTranslation"),
           finishedAt: Date.now(),
         });
         continue;
@@ -534,28 +614,41 @@ export function initializeTranslationQueue(): Promise<void> {
       });
     }
 
-    const remaining = useTranslationQueue
-      .getState()
-      .items.some((item) => item.status === "pending");
+    const state = useTranslationQueue.getState();
+    const remaining = state.items.some((item) => item.status === "pending");
+    // Only an interrupted or explicitly paused run may resume with the locked
+    // snapshot; a queue restored with pending items it never started reads as
+    // idle so startTranslationQueue re-snapshots the current settings.
+    const resumable = remaining && state.phase === "paused";
+    const phase: TranslationQueuePhase = resumable
+      ? "paused"
+      : remaining || state.items.length === 0
+        ? "idle"
+        : "complete";
     useTranslationQueue.setState({
-      phase: remaining ? "paused" : queue.items.length > 0 ? "complete" : "idle",
+      phase,
+      ...(resumable ? {} : { settingsSnapshot: null }),
       ready: true,
     });
   })().catch((error) => {
     useTranslationQueue.setState({
       phase: "paused",
       ready: true,
-      lastError: `대기열 복원 중 오류가 발생했습니다: ${String(error)}`,
+      lastError: i18next.t("queue.error.recovery", { error: String(error) }),
     });
   });
   return initializationPromise;
 }
 
-export function translationQueueIsActive(): boolean {
-  const state = useTranslationQueue.getState();
+/** Subscribe with this so a screen re-renders when the queue takes the wizard. */
+export function selectQueueActive(state: TranslationQueueStore): boolean {
   return (
     state.phase === "running" ||
     state.phase === "pausing" ||
-    state.items.some((item) => item.status === "scanning" || item.status === "translating")
+    state.items.some((item) => ownsWizard(item.status))
   );
+}
+
+export function translationQueueIsActive(): boolean {
+  return selectQueueActive(useTranslationQueue.getState());
 }

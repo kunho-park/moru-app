@@ -61,12 +61,17 @@ text follows the normal translation pipeline.
 - For a CurseForge export A, unchanged installed mod JAR and resource-pack ZIP
   payloads are proven by matching `(projectID, fileID)` against C and C itself
   is used as the old source for those archives. Modified addons and changed
-  file IDs never take this shortcut.
+  file IDs never take this shortcut. Inference never overrides an explicitly
+  scanned A payload, and when two unchanged addons share one logical file
+  identity, coordinates whose inferred source text disagrees become ambiguous
+  instead of one of them silently winning.
 - ZIP extraction must reject absolute paths, `..` traversal, links, and entries
   outside a per-run temporary directory.
-- Archive extraction scratch is removed after indexing. The filtered resource
-  asset cache remains only for the sidecar session so review edits can safely
-  regenerate the output, and is removed when the sidecar shuts down.
+- Archive extraction scratch is removed after indexing, and each nested
+  archive's extraction is reclaimed as soon as that archive is indexed. The
+  filtered resource asset cache remains only for the sidecar session so review
+  edits can safely regenerate the output, and is removed when the sidecar
+  shuts down.
 - W2's parsed A/B/C index is reused only when a lightweight path/size/mtime
   fingerprint is unchanged at W4. If any migration input changed, W4
   automatically rebuilds the scan and migration index. Ordinary translation

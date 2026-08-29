@@ -103,6 +103,24 @@ def test_logical_file_id_keeps_kubejs_assets_in_overrides(tmp_path: Path) -> Non
     assert logical_file_id(jar, root) == "resource:demo/lang/{locale}.json"
 
 
+def test_logical_file_id_only_folds_real_locale_codes(tmp_path: Path) -> None:
+    root = tmp_path / "pack"
+    lang = root / "config/quests/lang/en_us.json"
+    chore = root / "config/quests/lang/to_do.json"
+    chapter = root / "config/quests/chapters/go_to_nether.snbt"
+    suffixed = root / "config/quests/lang/defaults_ko_kr.json"
+    assert logical_file_id(lang, root) == "override:config/quests/lang/{locale}.json"
+    assert logical_file_id(chore, root) == "override:config/quests/lang/to_do.json"
+    assert (
+        logical_file_id(chapter, root)
+        == "override:config/quests/chapters/go_to_nether.snbt"
+    )
+    assert (
+        logical_file_id(suffixed, root)
+        == "override:config/quests/lang/defaults_{locale}.json"
+    )
+
+
 def test_safe_extract_zip_rejects_traversal(tmp_path: Path) -> None:
     archive = tmp_path / "unsafe.zip"
     with zipfile.ZipFile(archive, "w") as zf:
@@ -552,6 +570,81 @@ async def test_manifest_inference_never_overrides_explicit_old_source(
 
 
 @pytest.mark.asyncio
+async def test_manifest_inference_conflict_between_addons_stays_ambiguous(
+    tmp_path: Path,
+) -> None:
+    current = tmp_path / "current"
+    mods = current / "mods"
+    mods.mkdir(parents=True)
+    with zipfile.ZipFile(mods / "alpha-1.0.jar", "w") as zf:
+        zf.writestr(
+            "assets/minecraft/lang/en_us.json",
+            json.dumps({"conflict": "Alpha text", "alpha_only": "Alpha only"}),
+        )
+    with zipfile.ZipFile(mods / "beta-1.0.jar", "w") as zf:
+        zf.writestr(
+            "assets/minecraft/lang/en_us.json",
+            json.dumps({"conflict": "Beta text"}),
+        )
+    _write_json(
+        current / "minecraftinstance.json",
+        {
+            "installedAddons": [
+                {
+                    "addonID": 111,
+                    "fileNameOnDisk": "alpha-1.0.jar",
+                    "installedFile": {"id": 222, "fileName": "alpha-1.0.jar"},
+                },
+                {
+                    "addonID": 333,
+                    "fileNameOnDisk": "beta-1.0.jar",
+                    "installedFile": {"id": 444, "fileName": "beta-1.0.jar"},
+                },
+            ]
+        },
+    )
+    old_export = tmp_path / "old-export.zip"
+    with zipfile.ZipFile(old_export, "w") as zf:
+        zf.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "files": [
+                        {"projectID": 111, "fileID": 222},
+                        {"projectID": 333, "fileID": 444},
+                    ]
+                }
+            ),
+        )
+        zf.writestr("overrides/options.txt", "")
+    translated = tmp_path / "translated"
+    _write_json(
+        translated / "assets/minecraft/lang/ko_kr.json",
+        {"conflict": "충돌 번역", "alpha_only": "알파 전용 번역"},
+    )
+
+    scan = await scan_modpack(current)
+    catalog = await build_migration_catalog(
+        previous_modpack_path=old_export,
+        previous_resourcepack_path=translated,
+        previous_overrides_path=None,
+        current_modpack_root=current,
+        current_scan=scan,
+        source_locale="en_us",
+        target_locale="ko_kr",
+        asset_cache_dir=tmp_path / "assets",
+    )
+
+    # Both addons collapse to one logical file, so a key whose inferred source
+    # text differs between them cannot be attributed to either mod.
+    logical = "resource:minecraft/lang/{locale}.json"
+    assert (logical, "conflict") in catalog.ambiguous
+    assert catalog.match(logical, "conflict", "Alpha text") is None
+    assert catalog.match(logical, "conflict", "Beta text") is None
+    assert catalog.match(logical, "alpha_only", "Alpha only") == "알파 전용 번역"
+
+
+@pytest.mark.asyncio
 async def test_old_modpack_zip_rejects_unsafe_nested_scanner_archive(
     tmp_path: Path,
 ) -> None:
@@ -671,3 +764,57 @@ async def test_wrong_previous_inputs_fall_back_to_normal_translation(
         "Same override",
         "New override",
     }
+
+
+@pytest.mark.asyncio
+async def test_pipeline_keeps_current_translation_over_migrated_value(
+    tmp_path: Path,
+) -> None:
+    old = tmp_path / "old"
+    current = tmp_path / "current"
+    resourcepack = tmp_path / "previous-resourcepack"
+    for root in (old, current):
+        _write_json(
+            root / "resourcepacks/base/assets/demo/lang/en_us.json",
+            {"kept": "Same kept", "fresh": "Same fresh"},
+        )
+    _write_json(
+        current / "resourcepacks/base/assets/demo/lang/ko_kr.json",
+        {"kept": "C가 배포한 번역"},
+    )
+    _write_json(
+        resourcepack / "assets/demo/lang/ko_kr.json",
+        {"kept": "예전 번역", "fresh": "예전 신규 번역"},
+    )
+
+    config = PipelineConfig(
+        modpack_path=current,
+        output_dir=tmp_path / "out",
+        use_tm=False,
+        use_user_glossary=False,
+        use_mod_translations=False,
+        previous_modpack_path=old,
+        previous_resourcepack_path=resourcepack,
+    )
+    translator = RecordingTranslator()
+    pipeline = TranslationPipeline(config, lm=dspy.utils.DummyLM([]))
+    pipeline.translator = translator
+    try:
+        result = await pipeline.run()
+    finally:
+        pipeline.close()
+
+    assert result.stats.migration_hits == 1
+    assert translator.sources == []
+    statuses = {entry.key: entry.status for entry in result.entries}
+    assert statuses == {"kept": EntryStatus.SKIPPED, "fresh": EntryStatus.MIGRATED}
+    kept = next(entry for entry in result.entries if entry.key == "kept")
+    assert kept.translated_text == "C가 배포한 번역"
+    # C already ships "kept", so only the migrated new key is overlaid and B's
+    # competing value for "kept" never reaches the output.
+    pack_lang = json.loads(
+        (tmp_path / "out/resourcepack/assets/demo/lang/ko_kr.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert pack_lang == {"fresh": "예전 신규 번역"}

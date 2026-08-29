@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from ..glossary.pair_harvester import is_untranslated_copy
 from ..handlers.base import HandlerRegistry, create_default_registry
 from ..scanner import ModpackScanner
+from ..scanner.modpack_scanner import LOCALE_CHUNK_RE
 
 if TYPE_CHECKING:
     from ..models import LanguageFilePair
@@ -35,7 +36,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Detection stays deliberately broad: a false locale only skips one B file,
+# while a missed one would index another language as the target translation.
 _LOCALE_TOKEN_RE = re.compile(r"(?i)(?<![a-z])([a-z]{2}_[a-z]{2})(?![a-z])")
+# Identity normalization instead reuses the scanner's locale-chunk boundary,
+# narrowed to Minecraft's shipped codes so an ordinary name like "to_do.json"
+# cannot collapse onto a sibling "en_us.json"/"ko_kr.json" and steal its reuse.
+_LOCALE_CODES = frozenset(
+    "af_za ar_sa az_az ba_ru be_by bg_bg br_fr bs_ba ca_es cs_cz cy_gb da_dk "
+    "de_at de_ch de_de el_gr en_au en_ca en_gb en_nz en_pt en_ud en_us eo_uy "
+    "es_ar es_cl es_ec es_es es_mx es_uy es_ve et_ee eu_es fa_ir fi_fi fo_fo "
+    "fr_ca fr_fr fy_nl ga_ie gd_gb gl_es he_il hi_in hn_no hr_hr hu_hu hy_am "
+    "id_id ig_ng io_en is_is it_it ja_jp ka_ge kk_kz kn_in ko_kr kw_gb la_la "
+    "lb_lu li_li lo_la lt_lt lv_lv mk_mk mn_mn ms_my mt_mt nl_be nl_nl nn_no "
+    "no_no oc_fr pl_pl pt_br pt_pt ro_ro ru_ru ry_ua se_no sk_sk sl_si so_so "
+    "sq_al sr_cs sr_sp sv_se ta_in th_th tl_ph tr_tr tt_ru uk_ua vi_vn vp_vl "
+    "yi_de yo_ng zh_cn zh_hk zh_tw".split()
+)
 _ARCHIVE_SUFFIXES = {".zip", ".jar"}
 _MAX_ARCHIVE_FILES = 1_000_000
 _MAX_ARCHIVE_BYTES = 20 * 1024 * 1024 * 1024
@@ -98,9 +115,14 @@ class MigrationCatalog:
         return translated
 
 
+def _locale_placeholder(match: re.Match[str]) -> str:
+    token = match.group()
+    return "{locale}" if token in _LOCALE_CODES else token
+
+
 def _normalized_locale_path(value: str) -> str:
     normalized = value.replace("\\", "/").strip("/").lower()
-    return _LOCALE_TOKEN_RE.sub("{locale}", normalized)
+    return LOCALE_CHUNK_RE.sub(_locale_placeholder, normalized)
 
 
 _OVERRIDE_ROOTS = {"config", "kubejs", "scripts", "patchouli_books"}
@@ -380,9 +402,8 @@ async def _index_tree(
     channel: str,
     target_locale: str,
     resourcepack_assets_dir: Path | None = None,
-) -> set[Path]:
+) -> None:
     """Index translated files plus translated files embedded in patch JARs."""
-    translated_paths: set[Path] = set()
     files = sorted(path for path in root.rglob("*") if path.is_file())
 
     async def ordinary(
@@ -401,9 +422,6 @@ async def _index_tree(
         handler = registry.get_handler(handler_path)
         if handler is None:
             return
-        # Even an empty or malformed legacy translation file must not be
-        # mistaken for a font/texture asset and copied into the new pack.
-        translated_paths.add(path.resolve())
         try:
             locale_path = path.resolve().relative_to(root_for_id.resolve()).as_posix()
         except ValueError:
@@ -444,7 +462,6 @@ async def _index_tree(
         except MigrationError:
             logger.warning("Skipping invalid previous patch archive: %s", archive)
             continue
-        before = len(translated_paths)
         embedded = [path for path in extract_dir.rglob("*") if path.is_file()]
         await asyncio.gather(
             *(
@@ -464,19 +481,19 @@ async def _index_tree(
                 extract_dir,
                 resourcepack_assets_dir,
             )
-        if len(translated_paths) > before:
-            translated_paths.add(archive.resolve())
-    return translated_paths
+        # Strings are indexed and fonts copied within this iteration. An
+        # overrides tree can ship every bundled mod JAR, and the per-archive
+        # size cap leaves the extractions unbounded in aggregate.
+        shutil.rmtree(extract_dir, ignore_errors=True)
 
 
 def _copy_resourcepack_assets(
     root: Path,
     destination: Path,
-) -> int:
+) -> None:
     if destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    copied = 0
     for source in root.rglob("*"):
         if not source.is_file() or source.is_symlink():
             continue
@@ -486,8 +503,6 @@ def _copy_resourcepack_assets(
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-        copied += 1
-    return copied
 
 
 def _copy_embedded_resourcepack_assets(
@@ -643,6 +658,13 @@ async def _augment_unchanged_manifest_addons(
     if not old_files or not current_archives:
         return
 
+    # Explicit payloads found while scanning A are authoritative, so the
+    # shortcut only fills coordinates A's export could not carry. The snapshot
+    # must predate the gather: two unchanged addons can share one logical id,
+    # and reading the live index would let whichever extraction finished first
+    # hide the other's conflicting source text instead of recording ambiguity.
+    scanned = {logical: set(entries) for logical, entries in destination.items()}
+
     async def one(pair: LanguageFilePair) -> None:
         archive = _source_archive_name(pair.source_path)
         ids = current_archives.get(archive.lower()) if archive else None
@@ -652,18 +674,12 @@ async def _augment_unchanged_manifest_addons(
         if logical not in translations:
             return
         entries = await _extract_entries(registry, pair.source_path)
-        if entries:
-            # Explicit payloads found while scanning A are authoritative. This
-            # manifest shortcut only fills coordinates A's export could not
-            # carry; it must never create an ambiguity against real A content.
-            missing = {
-                key: value
-                for key, value in entries.items()
-                if key not in destination.get(logical, {})
-                and (logical, key) not in ambiguous
-            }
-            if missing:
-                _merge_entries(destination, ambiguous, logical, missing)
+        known = scanned.get(logical, frozenset())
+        missing = {
+            key: value for key, value in entries.items() if key not in known
+        }
+        if missing:
+            _merge_entries(destination, ambiguous, logical, missing)
 
     await asyncio.gather(*(one(pair) for pair in current_scan.all_translation_pairs))
 
@@ -709,7 +725,7 @@ async def build_migration_catalog(
                 "resource",
                 target_locale,
             )
-            catalog.stats.preserved_resourcepack_assets = await asyncio.to_thread(
+            await asyncio.to_thread(
                 _copy_resourcepack_assets,
                 resource_root,
                 asset_cache_dir,

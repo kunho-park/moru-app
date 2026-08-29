@@ -44,6 +44,7 @@ from ..pipeline import (
     run_pipeline,
 )
 from ..scanner import ScanResult, scan_modpack
+from ..scanner.modpack_scanner import PACK_ROOTS
 from ..scanner.pack_identity import PackIdentity, detect_pack_identity
 from . import upload
 
@@ -82,17 +83,26 @@ _FINGERPRINT_IGNORED_DIRS = frozenset(
         "screenshots",
     }
 )
-_MODPACK_FINGERPRINT_DIRS = (
-    "config",
-    "datapacks",
-    "defaultconfigs",
-    "kubejs",
-    "mods",
-    "patchouli_books",
-    "resourcepacks",
-    "resources",
-    "scripts",
-    "serverconfig",
+#: Top-level pack directories folded into the migration freshness check.
+#: The scanner's own pack roots are derived rather than repeated, so adding a
+#: root there (OpenLoader/Paxi live at ``openloader/``, ``paxi/``) can never
+#: silently drop out of the check and let a stale index be reused.
+_MODPACK_FINGERPRINT_DIRS = tuple(
+    sorted(
+        {
+            "config",
+            "datapacks",
+            "defaultconfigs",
+            "kubejs",
+            "mods",
+            "patchouli_books",
+            "resourcepacks",
+            "resources",
+            "scripts",
+            "serverconfig",
+            *(root.split("/", 1)[0] for root, _ in PACK_ROOTS),
+        }
+    )
 )
 _MODPACK_FINGERPRINT_FILES = (
     "instance.cfg",
@@ -524,6 +534,38 @@ def _migration_scan_fingerprint(params: Mapping[str, Any]) -> str:
     )
 
 
+def _migration_assets_dir(params: Mapping[str, Any]) -> Path:
+    """Directory holding one W2 scan's preserved resource-pack assets.
+
+    A fixed path the next scan of the same inputs overwrites, mirroring the
+    pipeline's own ``.migration_assets`` fallback: migration scans bypass the
+    scan cache, so a fresh ``mkdtemp`` per scan would pile up a copy of the
+    preserved font files for every scan in a queue run and orphan all of them
+    in the temp dir if the app is force-quit. The digest separates two scans
+    of the same pack with *different* previous-translation artifacts, whose
+    catalogs each keep reading from their own directory.
+    """
+    digest = hashlib.sha256(
+        "\0".join(
+            (
+                str(params.get("previous_modpack_path") or ""),
+                str(params.get("previous_resourcepack_path") or ""),
+                str(params.get("previous_overrides_path") or ""),
+                str(params.get("target_locale", "ko_kr")),
+            )
+        ).encode("utf-8", errors="surrogatepass")
+    ).hexdigest()[:12]
+    root = output_root(
+        PipelineConfig(
+            modpack_path=Path(str(params["modpack_path"])),
+            output_dir=(
+                Path(str(params["output_dir"])) if params.get("output_dir") else None
+            ),
+        )
+    )
+    return root / f".migration_assets-{digest}"
+
+
 class JobManager:
     """Creates, runs, cancels, and streams jobs on the server event loop."""
 
@@ -548,6 +590,9 @@ class JobManager:
 
             session_store = _SessionStore()
         self._session_store: SessionStore = session_store
+        #: Scratch dirs this process owns, wiped on shutdown. The migration
+        #: asset paths are deterministic, so a re-scan re-registers the same
+        #: entry instead of adding one per scan.
         self._temporary_dirs: set[Path] = set()
 
     @property
@@ -589,6 +634,7 @@ class JobManager:
         runner: Coroutine[Any, Any, object]
         if job_type is JobType.SCAN:
             self._require_modpack_path(record.params)
+            self._require_migration_params(record.params)
             runner = self._run_scan(record)
         elif job_type is JobType.TRANSLATE:
             self._require_modpack_path(record.params)
@@ -634,6 +680,33 @@ class JobManager:
             raise JobParamsError("params.modpack_path is required")
         if not Path(str(path)).exists():
             raise JobParamsError(f"modpack_path does not exist: {path}")
+
+    @staticmethod
+    def _require_migration_params(params: Mapping[str, Any]) -> None:
+        """Validate the optional A/B inputs of a scan job.
+
+        Checked here rather than inside the scan coroutine so a malformed
+        request is a 422 from ``POST /jobs``, not a created job that fails
+        the moment its task runs.
+        """
+        requested = (
+            params.get("previous_modpack_path"),
+            params.get("previous_resourcepack_path"),
+            params.get("previous_overrides_path"),
+        )
+        if all(value is None for value in requested):
+            return
+        if not params.get("previous_modpack_path"):
+            raise JobParamsError(
+                "params.previous_modpack_path is required for translation migration"
+            )
+        if not (
+            params.get("previous_resourcepack_path")
+            or params.get("previous_overrides_path")
+        ):
+            raise JobParamsError(
+                "a previous resource pack or overrides artifact is required"
+            )
 
     def _resolve_job_id(self, params: Mapping[str, Any]) -> str:
         """Job id, taken from a caller-supplied ``session_id`` when present.
@@ -756,10 +829,24 @@ class JobManager:
         scan_job_id: object,
         config: PipelineConfig,
     ) -> JobRecord | None:
-        """Resolve a matching migration-enabled W2 scan for possible reuse."""
+        """Resolve a matching migration-enabled W2 scan for possible reuse.
+
+        A scan result is only an optimization. The renderer sends its last
+        scan id unconditionally and scan jobs are never persisted, so any
+        sidecar restart makes that id unresolvable; anything that does not
+        line up therefore degrades to a fresh scan (``None``) exactly like a
+        stale ``migration_input_fingerprint`` does, never to a failed Start.
+        """
         if scan_job_id is None:
             return None
-        source = self.get(str(scan_job_id))
+        try:
+            source = self.get(str(scan_job_id))
+        except UnknownJobError:
+            logger.info(
+                "Scan job %s is gone; rebuilding the W4 scan and A/B/C index",
+                scan_job_id,
+            )
+            return None
         if source.type is not JobType.SCAN:
             raise JobStateError(
                 f"job {source.id} is a {source.type.value} job, not scan"
@@ -767,10 +854,13 @@ class JobManager:
         if source.status is not JobStatus.DONE or not isinstance(
             source.result, EnrichedScanResult
         ):
-            raise JobStateError(
-                f"scan job {source.id} is {source.status.value}; "
-                "translate requires a completed scan job"
+            logger.info(
+                "Scan job %s is %s with no reusable result; rebuilding the W4 "
+                "scan and A/B/C index",
+                source.id,
+                source.status.value,
             )
+            return None
         expected = {
             "modpack_path": str(config.modpack_path),
             "source_locale": config.source_locale,
@@ -796,9 +886,13 @@ class JobManager:
             if key in {"source_locale", "target_locale"} and actual is None:
                 actual = "en_us" if key == "source_locale" else "ko_kr"
             if (str(actual) if actual is not None else None) != value:
-                raise JobParamsError(
-                    f"scan job {source.id} does not match translate param {key}"
+                logger.info(
+                    "Scan job %s does not match translate param %s; rebuilding "
+                    "the W4 scan and A/B/C index",
+                    source.id,
+                    key,
                 )
+                return None
         return source
 
     # -- cancellation ----------------------------------------------------------
@@ -1026,17 +1120,6 @@ class JobManager:
         migration_requested = any(value is not None for value in migration_inputs)
         migration_fingerprint_before: str | None = None
         if migration_requested:
-            if not params.get("previous_modpack_path"):
-                raise JobParamsError(
-                    "params.previous_modpack_path is required for translation migration"
-                )
-            if not (
-                params.get("previous_resourcepack_path")
-                or params.get("previous_overrides_path")
-            ):
-                raise JobParamsError(
-                    "a previous resource pack or overrides artifact is required"
-                )
             migration_fingerprint_before = await asyncio.to_thread(
                 _migration_scan_fingerprint, params
             )
@@ -1081,10 +1164,8 @@ class JobManager:
         pairs = scan.all_translation_pairs
         enriched = EnrichedScanResult(scan=scan, identity=identity)
         if migration_requested:
-            migration_root = Path(
-                tempfile.mkdtemp(prefix=f"moru-migration-{record.id}-")
-            )
-            self._temporary_dirs.add(migration_root)
+            migration_assets = _migration_assets_dir(params)
+            self._temporary_dirs.add(migration_assets)
             progress("migration", 0, 1, "이전 번역 비교 준비 중...")
             enriched.migration = await build_migration_catalog(
                 previous_modpack_path=Path(str(params["previous_modpack_path"])),
@@ -1102,7 +1183,7 @@ class JobManager:
                 current_scan=scan,
                 source_locale=str(params.get("source_locale", "en_us")),
                 target_locale=str(params.get("target_locale", "ko_kr")),
-                asset_cache_dir=migration_root / "resourcepack-assets",
+                asset_cache_dir=migration_assets,
             )
             progress("migration", 1, 1, "이전 번역 비교 준비 완료")
         semaphore = asyncio.Semaphore(PARSE_CONCURRENCY)

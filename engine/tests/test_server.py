@@ -420,6 +420,71 @@ def test_migration_scan_refreshes_when_launcher_metadata_changes(
     assert captured["migration"] is None
 
 
+def test_migration_scan_refreshes_when_an_openloader_pack_changes(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenLoader and Paxi mount packs from their own top-level folders, so
+    the scanner reads them like resourcepacks/ and the freshness check has to
+    cover them too."""
+    current = tmp_path / "current"
+    old = tmp_path / "old"
+    translated = tmp_path / "translated"
+    for root in (current, old, translated):
+        root.mkdir()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    scan = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(current),
+                "previous_modpack_path": str(old),
+                "previous_overrides_path": str(translated),
+            },
+        },
+    ).json()
+    assert _wait_for_job(client, scan["id"])["status"] == "done"
+
+    translate = {
+        "type": "translate",
+        "params": {
+            "modpack_path": str(current),
+            "scan_job_id": scan["id"],
+            "previous_modpack_path": str(old),
+            "previous_overrides_path": str(translated),
+            "use_tm": False,
+        },
+    }
+    response = client.post("/jobs", headers=AUTH, json=translate)
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    # Baseline: untouched inputs reuse the W2 scan and its A/B/C index, so the
+    # rebuild below can only come from the openloader pack.
+    stored = client.app.state.job_manager._jobs[scan["id"]].result
+    assert captured["scan_result"] is stored.scan
+    assert captured["migration"] is stored.migration
+
+    pack = current / "openloader" / "resources" / "extra" / "pack.mcmeta"
+    pack.parent.mkdir(parents=True, exist_ok=True)
+    pack.write_text('{"pack":{"pack_format":15}}', encoding="utf-8")
+    captured.clear()
+    response = client.post("/jobs", headers=AUTH, json=translate)
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
+
+
 def test_translate_without_migration_reuses_matching_v1_scan(
     client: TestClient,
     scan_job: dict[str, Any],
@@ -452,17 +517,26 @@ def test_translate_without_migration_reuses_matching_v1_scan(
     assert captured["migration"] is None
 
 
-def test_translate_rejects_mismatched_scan_job(
+def test_translate_falls_back_when_the_scan_job_does_not_match(
     client: TestClient,
     scan_job: dict[str, Any],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Param drift makes the scan unusable, not the run impossible."""
     different = tmp_path / "different"
     different.mkdir()
     old = tmp_path / "old-for-mismatch"
     translated = tmp_path / "translated-for-mismatch"
     old.mkdir()
     translated.mkdir()
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
     response = client.post(
         "/jobs",
         headers=AUTH,
@@ -473,11 +547,46 @@ def test_translate_rejects_mismatched_scan_job(
                 "scan_job_id": scan_job["id"],
                 "previous_modpack_path": str(old),
                 "previous_overrides_path": str(translated),
+                "use_tm": False,
             },
         },
     )
-    assert response.status_code == 422
-    assert "does not match translate param modpack_path" in response.json()["detail"]
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
+
+
+def test_translate_falls_back_when_the_scan_job_is_gone(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scan jobs are never persisted, so a sidecar restart under a live
+    renderer leaves every wizard holding an unresolvable scan id. Start must
+    re-scan instead of failing the run."""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+        captured.update(kwargs)
+        return PipelineResult(config=config)
+
+    monkeypatch.setattr("moru_engine.server.jobs.run_pipeline", fake_run_pipeline)
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "translate",
+            "params": {
+                "modpack_path": str(MODPACK),
+                "scan_job_id": str(uuid.uuid4()),
+                "use_tm": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert _wait_for_job(client, response.json()["id"])["status"] == "done"
+    assert captured["scan_result"] is None
+    assert captured["migration"] is None
 
 
 def test_scan_result_of_unknown_job_is_404(client: TestClient) -> None:
@@ -497,6 +606,38 @@ def test_scan_job_missing_modpack_path_is_422(client: TestClient) -> None:
         "/jobs", json={"type": "scan", "params": {}}, headers=AUTH
     )
     assert response.status_code == 422
+
+
+def test_scan_job_incomplete_migration_params_is_422(client: TestClient) -> None:
+    """Rejected by POST /jobs, not by a created job that immediately fails."""
+    # B without A.
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(MODPACK),
+                "previous_overrides_path": str(MODPACK),
+            },
+        },
+    )
+    assert response.status_code == 422
+    assert "previous_modpack_path" in response.json()["detail"]
+    # A with no previous translation artifact.
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(MODPACK),
+                "previous_modpack_path": str(MODPACK),
+            },
+        },
+    )
+    assert response.status_code == 422
+    assert "previous resource pack or overrides" in response.json()["detail"]
 
 
 def test_export_requires_completed_translate_job(

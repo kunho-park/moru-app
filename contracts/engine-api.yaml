@@ -86,8 +86,12 @@ paths:
         streams live JSON frames:
         progress {stage, file?, done, total} (scan progress uses
         {stage, current, total, message}; the scan job emits a second
-        "parse" stage while it counts entries per file),
-        entry_failed {key, errors},
+        "parse" stage while it counts entries per file, and a
+        "migration" stage with current 0 then 1 while it indexes a previous
+        translation; the translate job emits the same "migration" stage in
+        its own {stage, done, total} shape while it rebuilds that index),
+        entry_failed {key, file, errors} (file is the source file the key
+        belongs to, relative to the modpack root),
         entry_done {key, source, translated} (sampled every ~5th freshly
         translated entry, texts truncated to 120 chars - GUI live ticker),
         tokens {prompt_tokens, completion_tokens, total_tokens, cached_tokens}
@@ -573,7 +577,9 @@ components:
             include_categories?, scan_job_id?, previous_modpack_path?,
             previous_resourcepack_path?, previous_overrides_path?}.
             scan_job_id reuses a completed matching scan and its run-scoped
-            migration index. include_categories
+            migration index; it is only a hint - an unknown, unfinished or
+            non-matching id is ignored and the run scans afresh.
+            include_categories
             limits translation to the named scan categories (default all).
             export: {translate_job_id, output_zip?}; accepts a completed or
             user-cancelled translate job whose partial result is available.

@@ -51,7 +51,15 @@ from ..pipeline import (
     RetranslateError,
     TranslationPipeline,
 )
-from ..tm import LocalTM
+from ..models.glossary import Glossary
+from ..tm import MANUAL_ORIGIN, SHARED_GLOSSARY_VERSION, LocalTM
+from ..validator import TranslationValidator
+from .assist import (
+    build_entry_context,
+    glossary_from_store,
+    placeholder_patterns,
+    validate_pair,
+)
 from .jobs import (
     JobManager,
     JobParamsError,
@@ -62,6 +70,7 @@ from .jobs import (
     scan_result_payload,
 )
 from .live_models import LIVE_MODEL_PROVIDERS, fetch_live_models
+from .manual_state import EntryBucket, ManualStore
 from .sessions import SessionStore
 
 if TYPE_CHECKING:
@@ -167,16 +176,42 @@ class EntryPatch(BaseModel):
     #: Disambiguates a key that appears in more than one source file. Older
     #: clients omit it and keep the historical first-match behaviour.
     file: str | None = None
+    #: False records a durable `draft` journal line WITHOUT settling the
+    #: entry: in-progress text survives a crash but can never reach an
+    #: export. True settles the entry as before.
+    commit: bool = True
+    #: Who produced the text. A manual edit is `human`; the AI retranslate
+    #: path reports `machine`. Older clients omit it and are treated as human,
+    #: which is what a review-screen edit has always been.
+    origin: Literal["human", "machine"] = "human"
+    #: sha256(source_text)[:16] as the client saw it. Recorded so a later scan
+    #: that changes the source can mark this translation stale instead of
+    #: shipping it as though still valid. Omitted -> staleness is UNKNOWN,
+    #: which is deliberately not the same as clean.
+    src_sha: str | None = None
+    #: Set or clear the revisit bookmark. None leaves it unchanged.
+    flagged: bool | None = None
 
 
 class RetranslateRequest(BaseModel):
     file: str | None = None
 
 
+class ValidateRequest(BaseModel):
+    """Live validation of a candidate translation the user is still typing."""
+
+    key: str
+    file: str | None = None
+    translated_text: str
+
+
 class GlossaryTerm(BaseModel):
     source: str
     target: str
     origin: Literal["vanilla", "extracted", "manual", "community"] = "manual"
+    #: Lang keys the term applies to, as dotted globs (see TermRule). Empty
+    #: means every key, which is what every pre-scope row deserializes to.
+    key_scope: list[str] = Field(default_factory=list)
 
 
 class GlossaryDoc(BaseModel):
@@ -236,9 +271,7 @@ def _atomic_write_json(path: Path, data: object) -> None:
     """Write JSON via a sibling temp file + os.replace (atomic on POSIX/NTFS)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -318,6 +351,19 @@ def create_app(
             tm = LocalTM(tm_db_path)
             tm_holder["tm"] = tm
         return tm
+
+    #: Hand-translation editing state, replayed from each session's edit
+    #: journal. A cache, never the source of truth.
+    manual = ManualStore(session_store)
+    # A translate run started with seed_from_job_id needs the earlier session's
+    # committed hand translations; the journal that records them lives here.
+    manager.set_manual_resolver(manual.human_translations)
+
+    #: Aid-panel caches, keyed by locale pair. The validator's constructor
+    #: compiles one regex per glossary alias, so a live editor calling it per
+    #: keystroke must reuse the instance rather than rebuild it.
+    assist_holder: dict[str, Glossary] = {}
+    validator_holder: dict[str, TranslationValidator] = {}
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -509,10 +555,80 @@ def create_app(
             )
         return record, result  # type: ignore[return-value]
 
+    def _assist_glossary(result: PipelineResult) -> Glossary:
+        """Glossary for the aid panels, cached per locale pair.
+
+        The constructor cost is what matters: TranslationValidator compiles one
+        regex per alias, so a live editor must reuse it rather than rebuild it
+        per keystroke.
+        """
+        config = result.config
+        cache_key = f"{config.source_locale}\u0000{config.target_locale}"
+        cached = assist_holder.get(cache_key)
+        if cached is None:
+            cached = glossary_from_store(
+                glossary_dir, config.source_locale, config.target_locale
+            )
+            assist_holder[cache_key] = cached
+        return cached
+
+    def _assist_validator(result: PipelineResult) -> TranslationValidator:
+        config = result.config
+        cache_key = f"{config.source_locale}\u0000{config.target_locale}"
+        cached = validator_holder.get(cache_key)
+        if cached is None:
+            glossary = _assist_glossary(result)
+            cached = TranslationValidator(glossary if glossary.has_rules else None)
+            validator_holder[cache_key] = cached
+        return cached
+
+    @api.get("/translate/{job_id}/entries/{entry_key:path}/context")
+    async def entry_context(
+        job_id: str, entry_key: str, file: str | None = Query(None)
+    ) -> dict[str, Any]:
+        """Translation aids for one entry. Never touches a provider."""
+        _, result = _get_pipeline_result(job_id)
+        entry = _find_entry(result, entry_key, file)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"unknown entry: {entry_key}")
+        return build_entry_context(
+            entry,
+            result.entries,
+            glossary=_assist_glossary(result),
+            tm=get_tm() if result.config.use_tm else None,
+            target_lang=result.config.target_locale,
+            glossary_version=SHARED_GLOSSARY_VERSION,
+        )
+
+    @api.post("/translate/{job_id}/validate")
+    async def validate_entry(
+        job_id: str, body: ValidateRequest
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Validate a candidate translation. Pure, synchronous, no model."""
+        _, result = _get_pipeline_result(job_id)
+        entry = _find_entry(result, body.key, body.file)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"unknown entry: {body.key}")
+        return {
+            "issues": validate_pair(
+                _assist_validator(result), entry, body.translated_text
+            )
+        }
+
+    # Registered before the `{entry_key:path}` routes: a path converter would
+    # otherwise swallow "counts" as an entry key.
+    @api.get("/translate/{job_id}/entries/counts")
+    async def translate_entry_counts(
+        job_id: str, search: str = Query("", max_length=200)
+    ) -> dict[str, int]:
+        """Every bucket's size in one pass over the result."""
+        _, result = _get_pipeline_result(job_id)
+        return manual.counts(job_id, result.entries, search)
+
     @api.get("/translate/{job_id}/entries")
     async def translate_entries(
         job_id: str,
-        filter: Literal["all", "failed", "warning", "modified"] = "all",
+        filter: EntryBucket = "all",
         page: int = Query(1, ge=1),
         page_size: int = Query(100, ge=1, le=500),
         search: str = Query("", max_length=200),
@@ -524,24 +640,15 @@ def create_app(
         client-side filter would only ever see the 100 rows it fetched.
         """
         _, result = _get_pipeline_result(job_id)
-        entries = result.entries
-        if filter != "all":
-            entries = [e for e in entries if e.status.value == filter]
-        needle = search.strip().casefold()
-        if needle:
-            entries = [
-                e
-                for e in entries
-                if needle in e.key.casefold()
-                or needle in (e.source_text or "").casefold()
-                or needle in (e.translated_text or "").casefold()
-            ]
+        entries = manual.select(job_id, result.entries, filter, search)
         start = (page - 1) * page_size
-        page_entries = entries[start : start + page_size]
         return {
             "total": len(entries),
             "page": page,
-            "entries": [_entry_payload(e) for e in page_entries],
+            "entries": [
+                manual.enrich(_entry_payload(e), job_id, e)
+                for e in entries[start : start + page_size]
+            ],
         }
 
     @api.get("/translate/{job_id}/graph")
@@ -575,9 +682,7 @@ def create_app(
         else:
             _, result = _get_pipeline_result(job_id)
             if record.graph_cache is None:
-                record.graph_cache = TranslationGraph.from_entries(
-                    result.entries
-                )
+                record.graph_cache = TranslationGraph.from_entries(result.entries)
             graph = record.graph_cache
         if known_version is not None and known_version == graph.version:
             return {
@@ -602,9 +707,7 @@ def create_app(
         caller already applied in memory.
         """
         try:
-            await asyncio.to_thread(
-                manager.session_store.save_job_session, record
-            )
+            await asyncio.to_thread(manager.session_store.save_job_session, record)
         except Exception as exc:  # noqa: BLE001 — persistence is best-effort
             logger.warning("Failed to save session %s: %s", record.id, exc)
 
@@ -612,6 +715,14 @@ def create_app(
     async def patch_entry(
         job_id: str, entry_key: str, body: EntryPatch
     ) -> dict[str, Any]:
+        """Record one hand translation. No model, no provider, no network.
+
+        The durable write is an append to the session's edit journal, not a
+        rewrite of the whole session document: a translator saves constantly,
+        and re-serializing every entry per keystroke-level save is O(entries)
+        work for one changed string. The full snapshot is folded in only when
+        the journal grows past its compaction threshold.
+        """
         record, result = _get_pipeline_result(job_id)
         if not record.finished:
             raise HTTPException(
@@ -620,15 +731,47 @@ def create_app(
             )
         entry = _find_entry(result, entry_key, body.file)
         if entry is None:
-            raise HTTPException(
-                status_code=404, detail=f"unknown entry: {entry_key}"
-            )
+            raise HTTPException(status_code=404, detail=f"unknown entry: {entry_key}")
+        if body.flagged is not None:
+            await manual.record_flag(job_id, entry, body.flagged)
+
+        if not body.commit:
+            # Draft only: durable, but the entry is untouched so nothing
+            # half-written can reach an export.
+            await manual.record_draft(job_id, entry, body.translated_text, body.src_sha)
+            return manual.enrich(_entry_payload(entry), job_id, entry)
+
+        # The journal append is the durable write; the entry is settled only
+        # after it succeeds, so an edit that could not be recorded is never
+        # acknowledged as saved.
+        should_compact = await manual.record_commit(
+            job_id, entry, body.translated_text, body.src_sha, body.origin
+        )
         entry.translated_text = body.translated_text
         entry.status = EntryStatus.MODIFIED
         TranslationPipeline._refresh_stats(result)
+
+        # Propagate the decision. Without this a translator's terminology
+        # choices die with the session and every later run re-asks the model
+        # about strings a human already settled. `is_cacheable_pair` still
+        # applies and is deliberately NOT bypassed: a target equal to its
+        # source is kept in this entry's output but must not become a
+        # permanent global promise, because a TM row is keyed on source text
+        # alone and would suppress translation of that string everywhere.
+        if body.origin == "human" and result.config.use_tm:
+            await asyncio.to_thread(
+                get_tm().store,
+                entry.source_text,
+                result.config.target_locale,
+                SHARED_GLOSSARY_VERSION,
+                body.translated_text,
+                MANUAL_ORIGIN,
+            )
         manager.refresh_translate_stats(record)
-        await _persist_session(record)
-        return _entry_payload(entry)
+        if should_compact:
+            await _persist_session(record)
+            await manual.compacted(job_id)
+        return manual.enrich(_entry_payload(entry), job_id, entry)
 
     @api.post("/translate/{job_id}/entries/{entry_key:path}/retranslate")
     async def retranslate_entry(
@@ -649,9 +792,7 @@ def create_app(
             )
         target_file = body.file if body is not None else None
         if _find_entry(result, entry_key, target_file) is None:
-            raise HTTPException(
-                status_code=404, detail=f"unknown entry: {entry_key}"
-            )
+            raise HTTPException(status_code=404, detail=f"unknown entry: {entry_key}")
         try:
             pipeline = TranslationPipeline(result.config)
         except Exception as exc:  # noqa: BLE001 — bad model/key config
@@ -823,6 +964,17 @@ def create_app(
             "by_origin": stats.by_origin,
         }
 
+    @api.get("/placeholder/patterns")
+    async def placeholder_pattern_list() -> dict[str, list[dict[str, str]]]:
+        """The engine's placeholder patterns, in overlap-priority order.
+
+        Exists so a client tokenizes with the same definitions the validator
+        enforces. A hand-maintained copy in the renderer drifts, and the two
+        layers then disagree about what counts as a placeholder — which the
+        engine only catches after the fact.
+        """
+        return {"patterns": placeholder_patterns()}
+
     @api.get("/providers")
     async def providers() -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -835,13 +987,18 @@ def create_app(
             }
             if p["id"] in CLI_PROVIDER_IDS:
                 # No API key exists for these: "ready" means the user's own
-                # CLI is logged in and its grant is readable.
+                # CLI is logged in AND its grant can actually serve a
+                # request, which for Gemini CLI includes resolving a Cloud
+                # Code Assist project. `error` carries why it cannot, so
+                # the card stops telling a migrated or Workspace user to
+                # just log in again.
                 status = await asyncio.to_thread(provider_status, p["id"])
                 entry["auth"] = "cli"
                 entry["has_key"] = bool(status.get("connected"))
                 entry["connected"] = bool(status.get("connected"))
                 entry["login_hint"] = status.get("login_hint")
                 entry["account"] = status.get("email")
+                entry["error"] = status.get("error")
             out.append(entry)
         return out
 
@@ -890,15 +1047,23 @@ def create_app(
         # Desktop-saved key wins; otherwise fall back to the engine's env var
         # (matches has_key in GET /providers).
         env_name = entry["env"]
-        if body.provider in CLI_PROVIDER_IDS and body.provider not in LIVE_MODEL_PROVIDERS:
-            # Subscription surfaces with no /models endpoint to enumerate,
-            # so the catalog is authoritative. Codex does publish one and
-            # gates SKUs per plan, so it goes down the live path below.
+        if (
+            body.provider in CLI_PROVIDER_IDS
+            and body.provider not in LIVE_MODEL_PROVIDERS
+        ):
+            # Subscription surfaces with no /models endpoint to enumerate --
+            # Cloud Code Assist publishes none -- so the catalog is
+            # authoritative. Codex does publish one and gates SKUs per plan,
+            # so it goes down the live path below. The lineup is still only
+            # callable once the CLI's grant resolves, so the same auth probe
+            # the badge uses rides along: the models are always listed, and
+            # `error` says when they cannot actually be reached.
+            status = await asyncio.to_thread(provider_status, body.provider)
             return {
                 "provider": body.provider,
                 "models": provider_models(body.provider),
                 "source": "static",
-                "error": None,
+                "error": status.get("error"),
             }
         api_key = body.api_key or (os.environ.get(env_name) if env_name else None)
         try:

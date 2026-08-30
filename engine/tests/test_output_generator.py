@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from moru_engine.output import (
+    MINOR_VERSION_ERA_FORMAT,
+    RESOURCE_PACK_FORMATS,
     FileOutput,
     OutputConfig,
     OutputGenerator,
@@ -70,9 +72,62 @@ def test_route_for(path: str, expected: Route) -> None:
 @pytest.mark.parametrize(
     ("mc_version", "expected"),
     [
+        # Every release boundary in the resource-pack table.
+        ("1.8.9", 1),
+        ("1.9", 2),
+        ("1.10.2", 2),
+        ("1.11", 3),
         ("1.12.2", 3),
-        ("Minecraft 1.11.2 Forge", 3),
+        ("1.13", 4),
+        ("1.14.4", 4),
+        ("1.15", 5),
+        # 1.16.1 is still format 5; 6 starts at 1.16.2.
+        ("1.16.1", 5),
+        ("1.16.2", 6),
+        ("1.16.5", 6),
+        ("1.17", 7),
+        ("1.17.1", 7),
+        ("1.18", 8),
+        ("1.18.2", 8),
+        ("1.19", 9),
+        ("1.19.2", 9),
+        ("1.19.3", 12),
+        ("1.19.4", 13),
+        ("1.20", 15),
         ("1.20.1", 15),
+        ("1.20.2", 18),
+        ("1.20.3", 22),
+        ("1.20.4", 22),
+        ("1.20.5", 32),
+        ("1.20.6", 32),
+        ("1.21", 34),
+        ("1.21.1", 34),
+        ("1.21.2", 42),
+        ("1.21.3", 42),
+        ("1.21.4", 46),
+        ("1.21.5", 55),
+        ("1.21.6", 63),
+        ("1.21.7", 64),
+        ("1.21.8", 64),
+        ("1.21.9", 69),
+        ("1.21.10", 69),
+        ("1.21.11", 75),
+        # Numbering changed to YY.N after 1.21.11; naive string/semver
+        # comparison would sort these below 1.21.x.
+        ("26.1", 84),
+        ("26.1.2", 84),
+        ("26.2", 88),
+        # Embedded in prose (legacy launcher metadata shape).
+        ("Minecraft 1.11.2 Forge", 3),
+        ("v1.20.1", 15),
+        # Newer than the table: clamp DOWN to the newest known format —
+        # too-low warns but loads, too-high can be rejected.
+        ("26.3", 88),
+        ("27.1", 88),
+        # Predates pack_format, and unknown/unparseable input: fallback.
+        ("1.5.2", 15),
+        ("not-a-version", 15),
+        ("", 15),
         (None, 15),
     ],
 )
@@ -81,6 +136,56 @@ def test_pack_format_for_minecraft_version(
     expected: int,
 ) -> None:
     assert pack_format_for_minecraft_version(mc_version) == expected
+
+
+def test_pack_format_fallback_is_caller_supplied() -> None:
+    assert pack_format_for_minecraft_version(None, fallback=22) == 22
+    assert pack_format_for_minecraft_version("garbage", fallback=22) == 22
+    # A resolvable version ignores the fallback entirely.
+    assert pack_format_for_minecraft_version("1.12.2", fallback=22) == 3
+
+
+def test_pack_format_table_is_ordered_newest_first() -> None:
+    """The lookup takes the first entry <= target, so order is load-bearing."""
+    releases = [release for release, _ in RESOURCE_PACK_FORMATS]
+    assert releases == sorted(releases, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_mcmeta_uses_pack_format_before_the_minor_version_era(
+    tmp_path: Path,
+) -> None:
+    generator = OutputGenerator(
+        OutputConfig(
+            modpack_root=tmp_path / "modpack",
+            output_dir=tmp_path / "out",
+            pack_format=MINOR_VERSION_ERA_FORMAT - 1,
+        )
+    )
+    path = await generator._write_pack_mcmeta()
+    pack = json.loads(path.read_text(encoding="utf-8"))["pack"]
+    assert pack["pack_format"] == MINOR_VERSION_ERA_FORMAT - 1
+    assert "min_format" not in pack
+    assert "max_format" not in pack
+    assert "supported_formats" not in pack
+
+
+@pytest.mark.asyncio
+async def test_mcmeta_uses_min_max_format_from_1_21_9(tmp_path: Path) -> None:
+    """1.21.9+ requires min_format/max_format and disallows supported_formats."""
+    generator = OutputGenerator(
+        OutputConfig(
+            modpack_root=tmp_path / "modpack",
+            output_dir=tmp_path / "out",
+            pack_format=pack_format_for_minecraft_version("1.21.9"),
+        )
+    )
+    path = await generator._write_pack_mcmeta()
+    pack = json.loads(path.read_text(encoding="utf-8"))["pack"]
+    assert pack["min_format"] == 69
+    assert pack["max_format"] == 69
+    assert "pack_format" not in pack
+    assert "supported_formats" not in pack
 
 
 # -- resource pack -------------------------------------------------------------

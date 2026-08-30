@@ -5,8 +5,8 @@ the ``CloudCodeAssistRequest`` envelope, the Gemini CLI user-agent headers
 and the ``streamGenerateContent`` SSE shape.
 
 Talks to ``cloudcode-pa.googleapis.com`` with the OAuth grant the user's own
-``gemini`` CLI holds, so a Code Assist entitlement translates modpacks
-without an API key.
+CLI holds — ``agy`` (Antigravity) or the legacy ``gemini`` — so a Code
+Assist entitlement translates modpacks without an API key.
 """
 
 from __future__ import annotations
@@ -186,8 +186,8 @@ def _check_status(status: int, body: str) -> None:
     if status in (401, 403):
         GEMINI_CLI_STORE.invalidate()
         raise CliAuthError(
-            f"Gemini CLI 인증이 거부되었습니다. `gemini`를 실행해 다시 로그인해 "
-            f"주세요. ({status}) {body[:300]}"
+            f"Gemini CLI 인증이 거부되었습니다. `{GEMINI_CLI_STORE.login_hint}`를 실행해 "
+            f"다시 로그인해 주세요. ({status}) {body[:300]}"
         )
     if status == 429:
         raise RuntimeError(f"Gemini CLI 사용량 한도에 도달했습니다. ({status}) {body[:300]}")

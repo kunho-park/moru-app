@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from fastapi.testclient import TestClient
 from moru_engine import __version__
+from moru_engine.cli_providers.credentials import STORES
 from moru_engine.graph import TranslationGraph
 from moru_engine.pipeline import (
     EntryResult,
@@ -113,9 +114,7 @@ def test_missing_token_is_401(client: TestClient) -> None:
 
 
 def test_wrong_token_is_401(client: TestClient) -> None:
-    response = client.get(
-        "/providers", headers={"Authorization": "Bearer wrong-token"}
-    )
+    response = client.get("/providers", headers={"Authorization": "Bearer wrong-token"})
     assert response.status_code == 401
 
 
@@ -179,7 +178,9 @@ def test_scan_counts_only_entries_missing_target_locale(
     client: TestClient, scan_job: dict[str, Any]
 ) -> None:
     body = client.get(f"/scan/{scan_job['id']}/result", headers=AUTH).json()
-    kubejs = next(category for category in body["categories"] if category["name"] == "KubeJS")
+    kubejs = next(
+        category for category in body["categories"] if category["name"] == "KubeJS"
+    )
     file_info = next(
         file
         for file in kubejs["files"]
@@ -219,7 +220,10 @@ def test_scan_treats_source_copy_target_as_pending(
     )
     response = client.post(
         "/jobs",
-        json={"type": "scan", "params": {"modpack_path": str(tmp_path / "copy-target")}},
+        json={
+            "type": "scan",
+            "params": {"modpack_path": str(tmp_path / "copy-target")},
+        },
         headers=AUTH,
     )
     assert response.status_code == 201
@@ -252,9 +256,7 @@ def test_scan_ws_emits_parse_stage(
     client: TestClient, scan_job: dict[str, Any]
 ) -> None:
     frames: list[dict[str, Any]] = []
-    with client.websocket_connect(
-        f"/jobs/{scan_job['id']}/events?token={TOKEN}"
-    ) as ws:
+    with client.websocket_connect(f"/jobs/{scan_job['id']}/events?token={TOKEN}") as ws:
         while True:
             frame = ws.receive_json()
             frames.append(frame)
@@ -307,7 +309,9 @@ def test_scan_migration_counts_and_translate_reuses_scan_index(
 
     captured: dict[str, Any] = {}
 
-    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+    async def fake_run_pipeline(
+        config: PipelineConfig, **kwargs: Any
+    ) -> PipelineResult:
         captured.update(kwargs)
         return PipelineResult(config=config)
 
@@ -375,7 +379,9 @@ def test_migration_scan_refreshes_when_launcher_metadata_changes(
 
     captured: dict[str, Any] = {}
 
-    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+    async def fake_run_pipeline(
+        config: PipelineConfig, **kwargs: Any
+    ) -> PipelineResult:
         captured.update(kwargs)
         return PipelineResult(config=config)
 
@@ -436,7 +442,9 @@ def test_migration_scan_refreshes_when_an_openloader_pack_changes(
 
     captured: dict[str, Any] = {}
 
-    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+    async def fake_run_pipeline(
+        config: PipelineConfig, **kwargs: Any
+    ) -> PipelineResult:
         captured.update(kwargs)
         return PipelineResult(config=config)
 
@@ -492,7 +500,9 @@ def test_translate_without_migration_reuses_matching_v1_scan(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+    async def fake_run_pipeline(
+        config: PipelineConfig, **kwargs: Any
+    ) -> PipelineResult:
         captured.update(kwargs)
         return PipelineResult(config=config)
 
@@ -532,7 +542,9 @@ def test_translate_falls_back_when_the_scan_job_does_not_match(
     translated.mkdir()
     captured: dict[str, Any] = {}
 
-    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+    async def fake_run_pipeline(
+        config: PipelineConfig, **kwargs: Any
+    ) -> PipelineResult:
         captured.update(kwargs)
         return PipelineResult(config=config)
 
@@ -566,7 +578,9 @@ def test_translate_falls_back_when_the_scan_job_is_gone(
     re-scan instead of failing the run."""
     captured: dict[str, Any] = {}
 
-    async def fake_run_pipeline(config: PipelineConfig, **kwargs: Any) -> PipelineResult:
+    async def fake_run_pipeline(
+        config: PipelineConfig, **kwargs: Any
+    ) -> PipelineResult:
         captured.update(kwargs)
         return PipelineResult(config=config)
 
@@ -602,9 +616,7 @@ def test_cancel_unknown_job_is_404(client: TestClient) -> None:
 
 
 def test_scan_job_missing_modpack_path_is_422(client: TestClient) -> None:
-    response = client.post(
-        "/jobs", json={"type": "scan", "params": {}}, headers=AUTH
-    )
+    response = client.post("/jobs", json={"type": "scan", "params": {}}, headers=AUTH)
     assert response.status_code == 422
 
 
@@ -674,12 +686,7 @@ def _install_translate_record(
     output_files: list[Path] = []
     if include_pack:
         lang_file = (
-            output_dir
-            / "resourcepack"
-            / "assets"
-            / "somemod"
-            / "lang"
-            / "ko_kr.json"
+            output_dir / "resourcepack" / "assets" / "somemod" / "lang" / "ko_kr.json"
         )
         lang_file.parent.mkdir(parents=True)
         lang_file.write_text('{"key.hello": "안녕"}', encoding="utf-8")
@@ -774,9 +781,7 @@ def upload_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         }
         return {"pack_id": "pk_123", "url": f"{web_url}/packs/pk_123"}
 
-    monkeypatch.setattr(
-        "moru_engine.server.upload.request_upload_slots", fake_slots
-    )
+    monkeypatch.setattr("moru_engine.server.upload.request_upload_slots", fake_slots)
     monkeypatch.setattr("moru_engine.server.upload.put_archive", fake_put)
     monkeypatch.setattr("moru_engine.server.upload.register_pack", fake_register)
     return calls
@@ -785,9 +790,7 @@ def upload_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 def _start_upload(
     client: TestClient, params: dict[str, Any]
 ) -> "Any":  # httpx.Response
-    return client.post(
-        "/jobs", json={"type": "upload", "params": params}, headers=AUTH
-    )
+    return client.post("/jobs", json={"type": "upload", "params": params}, headers=AUTH)
 
 
 def _terminal_frame(client: TestClient, job_id: str) -> dict[str, Any]:
@@ -891,9 +894,7 @@ def test_upload_job_overrides_only_registers_single_file(
     final = _wait_for_job(client, response.json()["id"])
     assert final["status"] == "done", final["error"]
 
-    assert [spec["kind"] for spec in upload_stubs["slots"]["files"]] == [
-        "overrides"
-    ]
+    assert [spec["kind"] for spec in upload_stubs["slots"]["files"]] == ["overrides"]
     puts = {p["url"]: set(p["names"]) for p in upload_stubs["puts"]}
     assert puts == {
         "https://r2.test/put/overrides": {"kubejs/assets/test/lang/ko_kr.json"}
@@ -936,6 +937,72 @@ def test_export_job_builds_pack_and_overrides_zips(
     # Overrides zip mirrors the modpack root.
     with zipfile.ZipFile(overrides_zip) as zf:
         assert zf.namelist() == ["kubejs/assets/test/lang/ko_kr.json"]
+
+
+def test_source_text_export_runs_without_a_translate_job(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """W3's export path: a scan is all the user has — no translate job, no
+    API key, no provider call — and it must still produce both archives with
+    a translated export's exact layout (kunho-park/moru-app#3)."""
+    target = tmp_path / "exports" / "source.zip"
+    response = client.post(
+        "/jobs",
+        json={
+            "type": "export",
+            "params": {
+                "source_text": True,
+                "modpack_path": str(MODPACK),
+                "source_locale": "en_us",
+                "target_locale": "ko_kr",
+                "output_dir": str(tmp_path / "out"),
+                "output_zip": str(target),
+            },
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 201, response.text
+    job = response.json()
+    assert job["type"] == "export"
+    final = _wait_for_job(client, job["id"])
+    assert final["status"] == "done", final["error"]
+
+    frame = _terminal_frame(client, job["id"])
+    overrides_zip = target.with_name("source_overrides.zip")
+    assert frame["zip_path"] == str(target)
+    assert frame["overrides_zip_path"] == str(overrides_zip)
+
+    # Archive-internal layout is the W6 one: members are relative to the
+    # tree root, so the source_text working root never leaks into a zip.
+    with zipfile.ZipFile(target) as zf:
+        assert set(zf.namelist()) == {
+            "pack.mcmeta",
+            "pack.png",
+            "assets/testmod/lang/ko_kr.json",
+        }
+        # Target-locale filename with untranslated values: a key-for-key
+        # skeleton of a pack shared on moru.gg.
+        lang = json.loads(zf.read("assets/testmod/lang/ko_kr.json"))
+    assert lang["item.testmod.copper_wand"] == "Copper Wand"
+    with zipfile.ZipFile(overrides_zip) as zf:
+        assert "kubejs/assets/test/lang/ko_kr.json" in zf.namelist()
+
+    # Only translate jobs persist, so a source-text export leaves no row in
+    # the history the user browses.
+    sessions = client.get("/sessions", headers=AUTH).json()
+    assert all(session["id"] != job["id"] for session in sessions)
+
+
+def test_source_text_export_validates_its_own_params(client: TestClient) -> None:
+    """It needs no translate job, but it does need a real pack path."""
+    for params in (
+        {"source_text": True},
+        {"source_text": True, "modpack_path": "/nope/does-not-exist"},
+    ):
+        response = client.post(
+            "/jobs", json={"type": "export", "params": params}, headers=AUTH
+        )
+        assert response.status_code == 422, response.text
 
 
 def test_cancelled_translate_result_can_be_reviewed_and_exported(
@@ -1121,9 +1188,7 @@ def test_translate_job_rejects_a_non_uuid_session_id(client: TestClient) -> None
     assert "session_id" in response.json()["detail"]
 
 
-def test_entry_edits_address_the_named_file(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_entry_edits_address_the_named_file(client: TestClient, tmp_path: Path) -> None:
     """One key can live in two files; the edit lands on the named one."""
     manager = client.app.state.job_manager
     result = PipelineResult(
@@ -1270,9 +1335,7 @@ def test_upload_job_missing_params_is_422(client: TestClient) -> None:
 
 
 def test_upload_job_unknown_translate_job_is_404(client: TestClient) -> None:
-    response = _start_upload(
-        client, {"translate_job_id": "nope", "modpack_name": "X"}
-    )
+    response = _start_upload(client, {"translate_job_id": "nope", "modpack_name": "X"})
     assert response.status_code == 404
 
 
@@ -1308,13 +1371,9 @@ def test_upload_job_web_failure_marks_job_failed(
     async def failing_slots(
         web_url: str, api_token: str | None, files: list[dict[str, Any]]
     ) -> dict[str, dict[str, Any]]:
-        raise WebUploadError(
-            "upload slot request failed: HTTP 503 - storage down"
-        )
+        raise WebUploadError("upload slot request failed: HTTP 503 - storage down")
 
-    monkeypatch.setattr(
-        "moru_engine.server.upload.request_upload_slots", failing_slots
-    )
+    monkeypatch.setattr("moru_engine.server.upload.request_upload_slots", failing_slots)
     response = _start_upload(
         client,
         {"translate_job_id": done_translate_job.id, "modpack_name": "ATM 10"},
@@ -1333,9 +1392,7 @@ def test_ws_replays_history_for_finished_job(
     client: TestClient, scan_job: dict[str, Any]
 ) -> None:
     frames: list[dict[str, Any]] = []
-    with client.websocket_connect(
-        f"/jobs/{scan_job['id']}/events?token={TOKEN}"
-    ) as ws:
+    with client.websocket_connect(f"/jobs/{scan_job['id']}/events?token={TOKEN}") as ws:
         with pytest.raises(WebSocketDisconnect) as exc_info:
             while True:
                 frames.append(ws.receive_json())
@@ -1364,15 +1421,33 @@ def test_job_snapshot_compacts_history_and_cursor_replays_only_new_events(
     manager._jobs[record.id] = record
     manager._deliver(
         record,
-        {"type": "progress", "stage": "translate", "file": "a.json", "done": 1, "total": 5},
+        {
+            "type": "progress",
+            "stage": "translate",
+            "file": "a.json",
+            "done": 1,
+            "total": 5,
+        },
     )
     manager._deliver(
         record,
-        {"type": "progress", "stage": "translate", "file": "a.json", "done": 3, "total": 5},
+        {
+            "type": "progress",
+            "stage": "translate",
+            "file": "a.json",
+            "done": 3,
+            "total": 5,
+        },
     )
     manager._deliver(
         record,
-        {"type": "batch_started", "request_id": 7, "file": "a.json", "key": "k", "entries": 2},
+        {
+            "type": "batch_started",
+            "request_id": 7,
+            "file": "a.json",
+            "key": "k",
+            "entries": 2,
+        },
     )
     manager._deliver(
         record,
@@ -1392,7 +1467,13 @@ def test_job_snapshot_compacts_history_and_cursor_replays_only_new_events(
 
     manager._deliver(
         record,
-        {"type": "progress", "stage": "translate", "file": "a.json", "done": 5, "total": 5},
+        {
+            "type": "progress",
+            "stage": "translate",
+            "file": "a.json",
+            "done": 5,
+            "total": 5,
+        },
     )
     manager._deliver(record, {"type": "done", "status": "done"})
     record.status = JobStatus.DONE
@@ -1410,13 +1491,9 @@ def test_job_snapshot_unknown_job_is_404(client: TestClient) -> None:
     assert client.get("/jobs/nope/snapshot", headers=AUTH).status_code == 404
 
 
-def test_ws_rejects_bad_token(
-    client: TestClient, scan_job: dict[str, Any]
-) -> None:
+def test_ws_rejects_bad_token(client: TestClient, scan_job: dict[str, Any]) -> None:
     with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(
-            f"/jobs/{scan_job['id']}/events?token=wrong"
-        ):
+        with client.websocket_connect(f"/jobs/{scan_job['id']}/events?token=wrong"):
             pass
 
 
@@ -1483,9 +1560,7 @@ def test_patch_migrated_entry_refreshes_stats(
     )
     assert stats_response.status_code == 200
     assert stats_response.json()["migration_hits"] == 0
-    assert done_translate_job.done_payload == {
-        "stats": result.stats.model_dump()
-    }
+    assert done_translate_job.done_payload == {"stats": result.stats.model_dump()}
 
 
 def test_translate_stats_unknown_job_is_404(client: TestClient) -> None:
@@ -1614,9 +1689,7 @@ def test_entries_on_scan_job_is_404(
 
 
 def test_retranslate_unknown_job_is_404(client: TestClient) -> None:
-    response = client.post(
-        "/translate/nope/entries/some.key/retranslate", headers=AUTH
-    )
+    response = client.post("/translate/nope/entries/some.key/retranslate", headers=AUTH)
     assert response.status_code == 404
 
 
@@ -1646,7 +1719,15 @@ def test_glossary_empty_then_roundtrip(client: TestClient) -> None:
     doc = {
         "source_lang": "en_us",
         "target_lang": "ko_kr",
-        "terms": [{"source": "Creeper", "target": "크리퍼"}],
+        "terms": [
+            {"source": "Creeper", "target": "크리퍼"},
+            # Key-scoped row: the boss sense of an ambiguous term.
+            {
+                "source": "Wither",
+                "target": "시듦",
+                "key_scope": ["effect.*"],
+            },
+        ],
     }
     response = client.put("/glossary", json=doc, headers=AUTH)
     assert response.status_code == 200
@@ -1654,8 +1735,20 @@ def test_glossary_empty_then_roundtrip(client: TestClient) -> None:
     response = client.get("/glossary", params=params, headers=AUTH)
     assert response.status_code == 200
     body = response.json()
+    # key_scope survives the round trip; absent means "every key".
     assert body["terms"] == [
-        {"source": "Creeper", "target": "크리퍼", "origin": "manual"}
+        {
+            "source": "Creeper",
+            "target": "크리퍼",
+            "origin": "manual",
+            "key_scope": [],
+        },
+        {
+            "source": "Wither",
+            "target": "시듦",
+            "origin": "manual",
+            "key_scope": ["effect.*"],
+        },
     ]
 
 
@@ -1668,8 +1761,27 @@ def test_glossary_rejects_bad_locale(client: TestClient) -> None:
     assert response.status_code == 422
 
 
-def test_tm_stats_empty_db(client: TestClient) -> None:
-    response = client.get("/tm/stats", headers=AUTH)
+def test_tm_stats_empty_db(
+    tmp_path_factory: pytest.TempPathFactory, shutdown_flag: threading.Event
+) -> None:
+    """A fresh TM reports zeros.
+
+    Deliberately NOT the module-scoped `client`: that shares one TM database
+    across the whole file, and a manual entry commit now writes a
+    `manual`-origin row so a translator's decisions reach later runs. The
+    shared database is therefore no longer empty by the time this test runs,
+    which is correct behaviour — so this test brings its own.
+    """
+    root = tmp_path_factory.mktemp("tm-empty")
+    app = create_app(
+        token=TOKEN,
+        config_dir=root / "config",
+        tm_db_path=root / "tm.sqlite3",
+        shutdown_handler=shutdown_flag.set,
+        shutdown_delay=0.0,
+    )
+    with TestClient(app) as fresh:
+        response = fresh.get("/tm/stats", headers=AUTH)
     assert response.status_code == 200
     body = response.json()
     assert body["entries"] == 0
@@ -1703,20 +1815,23 @@ def test_providers_include_openrouter(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize(
-    ("provider_id", "prefix", "login_hint"),
+    ("provider_id", "prefix"),
     [
-        ("claude-code", "claude-code/", "claude login"),
-        ("codex", "codex/", "codex login"),
-        ("gemini-cli", "gemini-cli/", "gemini"),
+        ("claude-code", "claude-code/"),
+        ("codex", "codex/"),
+        ("gemini-cli", "gemini-cli/"),
     ],
 )
 def test_providers_expose_cli_subscriptions(
-    client: TestClient, provider_id: str, prefix: str, login_hint: str
+    client: TestClient, provider_id: str, prefix: str
 ) -> None:
     body = client.get("/providers", headers=AUTH).json()
     entry = next(p for p in body if p["id"] == provider_id)
     assert entry["auth"] == "cli"
-    assert entry["login_hint"] == login_hint
+    # The store is the only thing that knows which command owns the grant on
+    # this machine — Gemini CLI's is `agy` once Antigravity is installed —
+    # so the route must echo it rather than carry its own copy.
+    assert entry["login_hint"] == STORES[provider_id].login_hint
     assert entry["models"]
     assert all(m.startswith(prefix) for m in entry["models"])
     # has_key tracks the CLI login, not an env var, and the two agree.
@@ -1725,9 +1840,18 @@ def test_providers_expose_cli_subscriptions(
 
 @pytest.mark.parametrize("provider_id", ["claude-code", "gemini-cli"])
 def test_cli_providers_without_discovery_use_the_static_catalog(
-    client: TestClient, provider_id: str
+    client: TestClient,
+    provider_id: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """These subscription surfaces publish no model-list endpoint."""
+    # Empty config dirs: a logged-out store, so the listing never reaches
+    # the network and the lineup still comes back.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(tmp_path))
+    for store in STORES.values():
+        store.invalidate()
     response = client.post(
         "/providers/models", json={"provider": provider_id}, headers=AUTH
     )
@@ -1747,6 +1871,7 @@ def test_codex_models_fall_back_to_static_when_the_cli_is_logged_out(
     Without a CLI login the live call cannot run, so the route degrades to
     the static catalog and surfaces why — it must never invent a lineup.
     """
+
     async def logged_out(
         provider: str,
         *,
@@ -1773,9 +1898,7 @@ def test_provider_models_requires_token(client: TestClient) -> None:
 
 
 def test_provider_models_unknown_provider_is_404(client: TestClient) -> None:
-    response = client.post(
-        "/providers/models", headers=AUTH, json={"provider": "nope"}
-    )
+    response = client.post("/providers/models", headers=AUTH, json={"provider": "nope"})
     assert response.status_code == 404
 
 

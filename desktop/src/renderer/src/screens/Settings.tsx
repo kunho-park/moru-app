@@ -360,7 +360,12 @@ function CliProviderCard({ provider }: { provider: Provider }) {
         <div className="min-w-0 flex-1 font-mono text-[11px] text-text3">
           {connected
             ? t("settings.models.cliReady")
-            : t("settings.models.cliLoginHint", { cmd: provider.login_hint ?? "" })}
+            : /* A readable grant that still cannot serve a request (e.g. a
+                 Workspace account with no Cloud Code Assist project) must
+                 say so — telling the user to log in again never fixes it. */
+              provider.error !== null && provider.error !== undefined
+              ? t("settings.models.cliBlocked", { reason: provider.error })
+              : t("settings.models.cliLoginHint", { cmd: provider.login_hint ?? "" })}
         </div>
         <button
           className="shrink-0 border border-accent bg-transparent px-3 py-2 text-[11px] font-semibold text-accent hover:bg-[rgba(61,220,132,0.08)] disabled:cursor-not-allowed disabled:opacity-40"

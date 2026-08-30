@@ -3,6 +3,32 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+/**
+ * Mods excluded from translation out of the box: libraries, optimization
+ * mods and author tooling, whose strings only the modpack author ever
+ * reads. Entries are **declared mod ids** (`fabric.mod.json:id`,
+ * `mods.toml:modId`), the identifier that namespaces a mod's assets and
+ * therefore every translation key it owns — jar file names and display
+ * names both vary per build and per launcher. Every id below was read out
+ * of that mod's real published jar.
+ *
+ * The user owns this list: it is persisted, editable on W2, and matching
+ * ignores case and punctuation, so typing a display name ("Entity
+ * Culling") still hits the id ("entityculling").
+ */
+export const DEFAULT_MOD_BLACKLIST: readonly string[] = [
+  "jade", // Jade — in-world tooltip HUD
+  "modernfix", // ModernFix — startup/memory optimization
+  "craftpresence", // CraftPresence — Discord rich presence
+  "kiwi", // Kiwi (Library) — Snownee's shared code
+  "clumps", // Clumps — XP orb merging
+  "sodium", // Sodium — rendering engine
+  "entityculling", // Entity Culling — render culling
+  "fancymenu", // FancyMenu — the author's own menu editor
+  "chunky", // Chunky — chunk pregeneration command
+  "bookshelf", // Bookshelf — Darkhax's shared code
+];
+
 export type PresetId = "fast" | "balanced" | "best";
 
 /** Serializable translation inputs locked when an unattended queue starts. */
@@ -22,6 +48,9 @@ export interface TranslationRunSettings {
   ollamaBaseUrl: string;
   openaiCompatBaseUrl: string;
   targetLocale: string;
+  /** Frozen with the rest: a queued run must use the blacklist that was
+   *  in force when the queue started, not whatever it is edited to later. */
+  modBlacklist: string[];
 }
 
 interface SettingsStore {
@@ -51,6 +80,8 @@ interface SettingsStore {
   openaiCompatBaseUrl: string;
   targetLocale: string;
   recentFolders: string[];
+  /** Mod ids never translated; seeded from DEFAULT_MOD_BLACKLIST. */
+  modBlacklist: string[];
 
   set: (patch: Partial<SettingsStore>) => void;
   rememberFolder: (path: string) => void;
@@ -79,6 +110,7 @@ export const useSettings = create<SettingsStore>()(
       openaiCompatBaseUrl: "http://localhost:1234/v1",
       targetLocale: "ko_kr",
       recentFolders: [],
+      modBlacklist: [...DEFAULT_MOD_BLACKLIST],
 
       set: (patch) => set(patch),
       rememberFolder: (path) =>
@@ -109,5 +141,6 @@ export function snapshotTranslationSettings(): TranslationRunSettings {
     ollamaBaseUrl: state.ollamaBaseUrl,
     openaiCompatBaseUrl: state.openaiCompatBaseUrl,
     targetLocale: state.targetLocale,
+    modBlacklist: [...state.modBlacklist],
   };
 }

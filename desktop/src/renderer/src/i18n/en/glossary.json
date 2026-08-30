@@ -3,7 +3,7 @@
   "title": "Glossary",
   "subtitle": "Registered terms are applied consistently across every translation.",
   "importCsv": "Import CSV",
-  "importTooltip": "Pick a CSV file with a source,target header to import terms",
+  "importTooltip": "Pick a CSV file with a source,target[,key_scope] header to import terms",
   "exportCsv": "Export CSV",
   "exportTooltip": "Builds a CSV of all terms and copies it to the clipboard",
   "addTerm": "Add Term",
@@ -35,8 +35,11 @@
   "col": {
     "source": "Source (EN)",
     "target": "Target ({{lang}})",
+    "keyScope": "Key scope",
     "origin": "Origin"
   },
+  "keyScopePlaceholder": "effect.* (blank = all keys)",
+  "keyScopeAll": "all keys",
   "readonly": "read-only",
   "rowEdit": "Edit",
   "rowDelete": "Delete",

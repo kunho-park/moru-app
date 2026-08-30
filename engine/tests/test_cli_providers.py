@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 
 from moru_engine.cli_providers import claude_code, codex, credentials, gemini_cli
@@ -464,6 +465,459 @@ def test_missing_credentials_raise_an_actionable_error(tmp_path, monkeypatch) ->
     with pytest.raises(credentials.CliAuthError) as excinfo:
         credentials.CodexStore().credentials()
     assert "codex login" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# Gemini CLI / Antigravity CLI — install detection and project resolution
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gemini_home(tmp_path, monkeypatch):
+    """An isolated config root on a machine with neither CLI installed."""
+    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(tmp_path))
+    for name in ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID", "GEMINI_CLI_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    # ~/.env is a real avenue in the resolution chain: keep the host's out.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    # The binary probe walks absolute install paths that a dev machine may
+    # genuinely have; pin it so these assertions are about moru, not the host.
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: False)
+    return tmp_path
+
+
+def _write_grant(directory, **extra):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "oauth_creds.json").write_text(
+        json.dumps(
+            {
+                "access_token": "live-token",
+                "refresh_token": "r",
+                # Far future: never triggers a refresh mid-test.
+                "expiry_date": credentials._now_ms() + 24 * 60 * 60 * 1000,
+                **extra,
+            }
+        )
+    )
+
+
+def _response(status: int, payload: object) -> httpx.Response:
+    return httpx.Response(status, json=payload)
+
+
+class _Recorder:
+    """Stands in for the store's single HTTP seam."""
+
+    def __init__(self, *responses: httpx.Response) -> None:
+        self.responses = list(responses)
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def __call__(self, method, url, *, headers=None, form=None, json_body=None):
+        self.calls.append((method, url, json_body or {}))
+        if not self.responses:
+            raise AssertionError(f"unexpected extra request: {method} {url}")
+        return self.responses.pop(0)
+
+
+def test_gemini_store_reads_the_legacy_gemini_layout(gemini_home) -> None:
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    assert store.antigravity() is False
+    assert store.login_hint == "gemini"
+    assert store.path == gemini_home / "oauth_creds.json"
+    assert store.available() is True
+
+
+def test_gemini_store_prefers_the_antigravity_layout(gemini_home) -> None:
+    """A migrated machine keeps ~/.gemini but nests agy's config inside it."""
+    _write_grant(gemini_home)
+    _write_grant(gemini_home / "antigravity-cli")
+    store = credentials.GeminiCliStore()
+    assert store.antigravity() is True
+    assert store.login_hint == "agy"
+    assert store.path == gemini_home / "antigravity-cli" / "oauth_creds.json"
+
+
+def test_gemini_store_follows_an_installed_agy_with_no_config_dir_yet(
+    gemini_home, monkeypatch
+) -> None:
+    """agy keeps the session in the OS keyring, so the file can be absent."""
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: True)
+    store = credentials.GeminiCliStore()
+    assert store.antigravity() is True
+    assert store.login_hint == "agy"
+    # Nothing on disk yet: the reported path is the migrated CLI's.
+    assert store.path == gemini_home / "antigravity-cli" / "oauth_creds.json"
+
+
+def test_gemini_store_keeps_the_legacy_grant_readable_after_migration(
+    gemini_home, monkeypatch
+) -> None:
+    """agy installed, but only the old file has a grant — it must still load."""
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: True)
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    assert store.antigravity() is True
+    assert store.path == gemini_home / "oauth_creds.json"
+    assert store.credentials().access == "live-token"
+
+
+def test_gemini_store_reads_the_alternate_antigravity_directory(gemini_home) -> None:
+    """Installs carried over from the desktop build use `antigravity/`."""
+    _write_grant(gemini_home / "antigravity")
+    store = credentials.GeminiCliStore()
+    assert store.antigravity() is True
+    assert store.path == gemini_home / "antigravity" / "oauth_creds.json"
+
+
+def test_agy_is_found_off_path_at_its_documented_install_location(
+    tmp_path, monkeypatch
+) -> None:
+    """The installer writes ~/.local/bin/agy, which a sidecar's PATH omits."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(credentials.shutil, "which", lambda _cmd: None)
+    assert credentials._agy_installed() is False
+
+    binary = tmp_path / ".local" / "bin" / "agy"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    assert credentials._agy_installed() is True
+
+
+def test_agy_on_path_is_enough(monkeypatch) -> None:
+    monkeypatch.setattr(
+        credentials.shutil, "which", lambda cmd: "/usr/bin/agy" if cmd == "agy" else None
+    )
+    assert credentials._agy_installed() is True
+
+
+def test_gemini_home_follows_the_clis_own_relocation_switch(
+    tmp_path, monkeypatch
+) -> None:
+    """GEMINI_CLI_HOME is what the CLI itself reads its config root from."""
+    monkeypatch.delenv("GEMINI_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path / "relocated"))
+    assert credentials.GeminiCliStore().home == tmp_path / "relocated"
+
+
+def test_gemini_project_comes_from_the_environment(gemini_home, monkeypatch) -> None:
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "explicit-project")
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+
+    def _boom(*a, **kw):
+        raise AssertionError("an explicit project must not hit the network")
+
+    monkeypatch.setattr(store, "_send", _boom)
+    assert store.project() == "explicit-project"
+
+
+def test_gemini_project_comes_from_the_clis_own_env_file(gemini_home, monkeypatch) -> None:
+    """The CLI exports GOOGLE_CLOUD_PROJECT from <config>/.env; so does moru."""
+    _write_grant(gemini_home)
+    (gemini_home / ".env").write_text("GOOGLE_CLOUD_PROJECT=from-dotenv\n")
+    store = credentials.GeminiCliStore()
+
+    def _boom(*a, **kw):
+        raise AssertionError("a configured project must not hit the network")
+
+    monkeypatch.setattr(store, "_send", _boom)
+    assert store.project() == "from-dotenv"
+
+
+def test_gemini_project_is_discovered_for_an_account_that_already_has_one(
+    gemini_home, monkeypatch
+) -> None:
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    send = _Recorder(
+        _response(
+            200,
+            {
+                "currentTier": {"id": "free-tier"},
+                "cloudaicompanionProject": "managed-42",
+            },
+        )
+    )
+    monkeypatch.setattr(store, "_send", send)
+
+    assert store.project() == "managed-42"
+    # Persisted, so the next process resolves it without a round trip.
+    assert (gemini_home / "moru_project_id").read_text() == "managed-42"
+    assert credentials.GeminiCliStore()._cached_project() == "managed-42"
+
+
+def test_gemini_project_is_provisioned_by_onboarding_without_any_env_var(
+    gemini_home, monkeypatch
+) -> None:
+    """The regression: a personal account gets a project from onboardUser.
+
+    loadCodeAssist answers with no currentTier and no project at all, which
+    used to raise the GOOGLE_CLOUD_PROJECT error outright.
+    """
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    send = _Recorder(
+        _response(200, {"allowedTiers": [{"id": "free-tier", "isDefault": True}]}),
+        _response(
+            200,
+            {"done": True, "response": {"cloudaicompanionProject": {"id": "onboarded-7"}}},
+        ),
+    )
+    monkeypatch.setattr(store, "_send", send)
+
+    assert store.project() == "onboarded-7"
+    onboard = send.calls[1]
+    assert onboard[1].endswith(":onboardUser")
+    assert onboard[2]["tierId"] == "free-tier"
+    # The free tier runs on a managed project; naming one is a 412.
+    assert "cloudaicompanionProject" not in onboard[2]
+
+
+def test_gemini_onboards_an_unknown_tier_instead_of_refusing(
+    gemini_home, monkeypatch
+) -> None:
+    """No default tier means legacy-tier, which is NOT a reason to give up.
+
+    The CLI onboards with an undefined project and only fails if the
+    operation comes back without one; bailing here is what produced the
+    reported `credentials.py:619` hard failure.
+    """
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    send = _Recorder(
+        _response(200, {"allowedTiers": []}),
+        _response(
+            200,
+            {"done": True, "response": {"cloudaicompanionProject": {"id": "legacy-9"}}},
+        ),
+    )
+    monkeypatch.setattr(store, "_send", send)
+
+    assert store.project() == "legacy-9"
+    assert send.calls[1][2]["tierId"] == "legacy-tier"
+
+
+def test_gemini_project_polls_a_pending_onboarding_operation(
+    gemini_home, monkeypatch
+) -> None:
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    send = _Recorder(
+        _response(200, {"allowedTiers": [{"id": "free-tier", "isDefault": True}]}),
+        _response(200, {"done": False, "name": "operations/abc"}),
+        _response(
+            200,
+            {"done": True, "response": {"cloudaicompanionProject": {"id": "slow-1"}}},
+        ),
+    )
+    monkeypatch.setattr(store, "_send", send)
+
+    assert store.project() == "slow-1"
+    assert send.calls[2][0] == "GET"
+    assert send.calls[2][1].endswith("/v1internal/operations/abc")
+
+
+def test_gemini_project_error_only_when_every_avenue_is_exhausted(
+    gemini_home, monkeypatch
+) -> None:
+    """A Workspace/GCA account really does have to name its own project."""
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    send = _Recorder(
+        _response(200, {"allowedTiers": [{"id": "standard-tier", "isDefault": True}]}),
+        _response(200, {"done": True, "response": {}}),
+    )
+    monkeypatch.setattr(store, "_send", send)
+
+    with pytest.raises(credentials.CliAuthError) as excinfo:
+        store.project()
+    assert "GOOGLE_CLOUD_PROJECT" in str(excinfo.value)
+    # It exhausted the chain rather than refusing up front.
+    assert len(send.calls) == 2
+    assert not (gemini_home / "moru_project_id").exists()
+
+
+def test_gemini_project_honors_the_project_id_env_alias(gemini_home, monkeypatch) -> None:
+    """GOOGLE_CLOUD_PROJECT_ID is the CLI's second accepted spelling."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT_ID", "my-workspace-project")
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+
+    def _boom(*a, **kw):
+        raise AssertionError("an explicit project must not hit the network")
+
+    monkeypatch.setattr(store, "_send", _boom)
+    assert store.project() == "my-workspace-project"
+
+
+def test_gemini_onboarded_account_without_a_project_still_needs_one(
+    gemini_home, monkeypatch
+) -> None:
+    """currentTier but no project and nothing configured: genuinely stuck."""
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    send = _Recorder(_response(200, {"currentTier": {"id": "standard-tier"}}))
+    monkeypatch.setattr(store, "_send", send)
+
+    with pytest.raises(credentials.CliAuthError) as excinfo:
+        store.project()
+    assert "GOOGLE_CLOUD_PROJECT" in str(excinfo.value)
+    # Never onboards an account the server already placed on a tier.
+    assert len(send.calls) == 1
+
+
+def test_gemini_vpc_sc_denial_is_read_as_standard_tier(gemini_home, monkeypatch) -> None:
+    """VPC-SC users get a 403 from loadCodeAssist yet are standard-tier.
+
+    Treating it as a transport failure would hide the one message that
+    actually tells them what to do.
+    """
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    send = _Recorder(
+        _response(403, {"error": {"details": [{"reason": "SECURITY_POLICY_VIOLATED"}]}})
+    )
+    monkeypatch.setattr(store, "_send", send)
+
+    with pytest.raises(credentials.CliAuthError) as excinfo:
+        store.project()
+    assert "GOOGLE_CLOUD_PROJECT" in str(excinfo.value)
+    assert len(send.calls) == 1
+
+
+def test_gemini_load_failure_surfaces_in_korean(gemini_home, monkeypatch) -> None:
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    monkeypatch.setattr(store, "_send", _Recorder(_response(500, {"error": {}})))
+
+    with pytest.raises(credentials.CliAuthError) as excinfo:
+        store.project()
+    assert "계정 정보를 불러올 수 없습니다" in str(excinfo.value)
+
+
+def test_gemini_status_refuses_to_claim_connected_without_a_project(
+    gemini_home, monkeypatch
+) -> None:
+    """The badge and 연결 테스트 have to agree: both run this chain."""
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    send = _Recorder(
+        _response(200, {"allowedTiers": [{"id": "standard-tier", "isDefault": True}]}),
+        _response(200, {"done": True, "response": {}}),
+    )
+    monkeypatch.setattr(store, "_send", send)
+
+    status = store.status()
+    assert status["connected"] is False
+    assert "GOOGLE_CLOUD_PROJECT" in status["error"]
+
+
+def test_gemini_status_reports_the_resolved_project(gemini_home, monkeypatch) -> None:
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    send = _Recorder(
+        _response(200, {"currentTier": {"id": "free-tier"}, "cloudaicompanionProject": "p-1"})
+    )
+    monkeypatch.setattr(store, "_send", send)
+
+    status = store.status()
+    assert status["connected"] is True
+    assert status["project"] == "p-1"
+    assert status["error"] is None
+    assert status["antigravity"] is False
+
+
+def test_gemini_status_stays_disconnected_when_no_cli_is_logged_in(gemini_home) -> None:
+    status = credentials.GeminiCliStore().status()
+    assert status["connected"] is False
+    assert status["error"] is None
+
+
+class _FakeStream:
+    """The SSE response `GeminiCliLLM.completion` streams."""
+
+    status_code = 200
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+    def iter_lines(self):
+        return iter(self._lines)
+
+
+class _FakeClient:
+    def __init__(self, stream: _FakeStream, seen: dict) -> None:
+        self._stream = stream
+        self._seen = seen
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+    def stream(self, method, url, *, headers, json):
+        self._seen["headers"] = headers
+        self._seen["payload"] = json
+        return self._stream
+
+
+def test_gemini_completion_runs_for_an_account_with_no_project_env_var(
+    gemini_home, monkeypatch
+) -> None:
+    """The reported bug, end to end: 연결 테스트 died before the request.
+
+    `project()` raised GOOGLE_CLOUD_PROJECT for a personal account, so the
+    Cloud Code Assist call was never even attempted.
+    """
+    from litellm.types.utils import ModelResponse
+
+    _write_grant(gemini_home)
+    monkeypatch.setattr(
+        credentials.GEMINI_CLI_STORE,
+        "_send",
+        _Recorder(
+            _response(200, {"allowedTiers": [{"id": "free-tier", "isDefault": True}]}),
+            _response(
+                200,
+                {"done": True, "response": {"cloudaicompanionProject": {"id": "managed-3"}}},
+            ),
+        ),
+    )
+    credentials.GEMINI_CLI_STORE.invalidate()
+    seen: dict = {}
+    stream = _FakeStream(
+        [
+            'data: {"response":{"candidates":[{"content":{"parts":[{"text":"안녕"}]},'
+            '"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,'
+            '"candidatesTokenCount":1,"totalTokenCount":4}}}'
+        ]
+    )
+    monkeypatch.setattr(
+        gemini_cli.httpx, "Client", lambda **kwargs: _FakeClient(stream, seen)
+    )
+
+    response = gemini_cli.GeminiCliLLM().completion(
+        model="flash",
+        messages=[{"role": "user", "content": "hi"}],
+        optional_params={"max_tokens": 16},
+        model_response=ModelResponse(),
+    )
+
+    assert response.choices[0].message.content == "안녕"
+    # The project the chain provisioned is what the envelope carries.
+    assert seen["payload"]["project"] == "managed-3"
+    assert seen["headers"]["Authorization"] == "Bearer live-token"
+    credentials.GEMINI_CLI_STORE.invalidate()
 
 
 # --------------------------------------------------------------------------

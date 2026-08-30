@@ -143,12 +143,14 @@ class BatchTranslator(dspy.Module):
         context: str,
         glossary: str,
         entries: dict[str, str],
+        style_directives: str = "",
     ) -> dspy.Prediction:
         pred = self.translate(
             source_lang=source_lang,
             target_lang=target_lang,
             context=context,
             glossary=glossary,
+            style_directives=style_directives,
             entries=entries,
         )
         translations, failed = self._initial_state(entries, pred)
@@ -169,6 +171,7 @@ class BatchTranslator(dspy.Module):
                     target_lang=target_lang,
                     context=context,
                     glossary=glossary,
+                    style_directives=style_directives,
                     entries=missing,
                 )
                 retry_translations, retry_failed = self._initial_state(
@@ -202,12 +205,14 @@ class BatchTranslator(dspy.Module):
         context: str,
         glossary: str,
         entries: dict[str, str],
+        style_directives: str = "",
     ) -> dspy.Prediction:
         pred = await self.translate.acall(
             source_lang=source_lang,
             target_lang=target_lang,
             context=context,
             glossary=glossary,
+            style_directives=style_directives,
             entries=entries,
         )
         translations, failed = self._initial_state(entries, pred)
@@ -228,6 +233,7 @@ class BatchTranslator(dspy.Module):
                     target_lang=target_lang,
                     context=context,
                     glossary=glossary,
+                    style_directives=style_directives,
                     entries=missing,
                 )
                 retry_translations, retry_failed = self._initial_state(

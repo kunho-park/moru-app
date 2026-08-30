@@ -2,10 +2,63 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+
+#: Rank of a rule that carries no ``key_scope``: it applies to every key,
+#: and any scoped rule covering that key outranks it.
+UNSCOPED_RANK = (0, 0)
+
+
+def _pattern_rank(pattern: str, segments: list[str]) -> tuple[int, int] | None:
+    """Specificity of one ``key_scope`` pattern against a split lang key.
+
+    Args:
+        pattern: Dotted glob, e.g. ``effect.*`` or ``entity.minecraft.wither``.
+        segments: Lang key already split on ``.``.
+
+    Returns:
+        ``None`` when the pattern does not cover the key, otherwise
+        ``(literal segment count, pattern segment count)`` — the ordering
+        used to pick the most specific matching pattern.
+    """
+    parts = pattern.split(".")
+    if parts[-1] == "*":
+        # A trailing "*" absorbs every remaining key segment.
+        if len(parts) - 1 > len(segments):
+            return None
+    elif len(parts) != len(segments):
+        return None
+
+    literals = 0
+    for index, part in enumerate(parts):
+        if part == "*":
+            continue
+        if segments[index] != part:
+            return None
+        literals += 1
+    return literals, len(parts)
+
+
+def key_scope_covers(key_scope: Iterable[str], key: str) -> bool:
+    """Whether a ``key_scope`` glob list covers ``key``.
+
+    The membership half of :meth:`TermRule.scope_rank`, without a rule to
+    hang it on: the shared translation memory scopes its rows by the same
+    dotted globs but has no precedence contest to resolve, since one row
+    per source text can match at most once.
+
+    An empty list covers every key, exactly as an empty ``key_scope`` does
+    on a rule.
+    """
+    if not key_scope:
+        return True
+    segments = key.split(".")
+    return any(_pattern_rank(p, segments) is not None for p in key_scope)
 
 
 class TermRule(BaseModel):
@@ -13,6 +66,32 @@ class TermRule(BaseModel):
 
     Defines how a specific game term should be translated,
     including style preferences and alternative forms.
+
+    ``key_scope`` narrows a rule to the lang keys it may fire on, which is
+    what keeps homographs apart: vanilla "Wither" is the boss 위더 under
+    ``entity.*`` but the status effect 시듦 under ``effect.*``, so a single
+    unscoped rule corrupts one of the two senses.
+
+    Scope patterns are dotted lang-key globs. Every segment is either a
+    literal (matched exactly) or ``*`` (any one segment); a trailing ``*``
+    absorbs all remaining segments. So ``effect.minecraft.wither`` is an
+    exact key, ``effect.*`` is the whole ``effect`` namespace and
+    ``subtitles.*.wither`` wildcards one segment in the middle.
+
+    Precedence, resolved per key (see :meth:`scope_rank`):
+
+    1. A scoped rule covering the key beats every unscoped rule for the
+       same source term. An unscoped rule is the term's default reading and
+       keeps applying to every key that no scoped rule claims.
+    2. Between two covering scoped rules the more specific one wins, where
+       specificity is ``(literal segment count, pattern segment count)``
+       compared in that order: ``entity.minecraft.wither`` (3, 3) beats
+       ``entity.minecraft.*`` (2, 3) beats ``entity.*`` (1, 2).
+    3. On a full tie the rule listed first in ``Glossary.term_rules`` wins,
+       so resolution stays deterministic.
+
+    An empty ``key_scope`` is the pre-scope behaviour, unchanged: the rule
+    applies to every key.
     """
 
     term_ko: str = Field(
@@ -30,6 +109,15 @@ class TermRule(BaseModel):
         description="English aliases or original terms",
         examples=[["Enchanting Table"], ["Ingot", "ingots"]],
     )
+    key_scope: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Lang keys this rule applies to, as dotted globs (each segment "
+            "a literal or '*'; a trailing '*' absorbs the remaining "
+            "segments). Empty means the rule applies to every key."
+        ),
+        examples=[["effect.*"], ["entity.minecraft.wither"]],
+    )
     category: Literal["item", "block", "ui", "entity", "effect", "biome", "other"] = (
         Field(
             default="other",
@@ -46,6 +134,34 @@ class TermRule(BaseModel):
     def sort_aliases(cls, v: list[str]) -> list[str]:
         """Sort aliases for consistent deduplication."""
         return sorted(list(set(v)))
+
+    @field_validator("key_scope")
+    @classmethod
+    def sort_key_scope(cls, v: list[str]) -> list[str]:
+        """Drop blank patterns, then sort for consistent deduplication."""
+        return sorted({pattern.strip() for pattern in v} - {""})
+
+    def scope_rank(self, key: str) -> tuple[int, int] | None:
+        """Precedence rank of this rule for ``key``.
+
+        Args:
+            key: Lang key of the entry being translated.
+
+        Returns:
+            ``UNSCOPED_RANK`` when the rule carries no scope, the most
+            specific matching pattern's rank when it does, and ``None``
+            when the rule is scoped away from ``key``. Higher ranks win —
+            the class docstring carries the full precedence order.
+        """
+        if not self.key_scope:
+            return UNSCOPED_RANK
+        segments = key.split(".")
+        best: tuple[int, int] | None = None
+        for pattern in self.key_scope:
+            rank = _pattern_rank(pattern, segments)
+            if rank is not None and (best is None or rank > best):
+                best = rank
+        return best
 
 
 class ProperNounRule(BaseModel):
@@ -169,8 +285,13 @@ class Glossary(BaseModel):
         Returns:
             New merged glossary.
         """
-        # Create sets of existing items for deduplication
-        existing_terms = {(t.term_ko, tuple(t.aliases)) for t in self.term_rules}
+        # Create sets of existing items for deduplication. Two term rules
+        # that share a target and aliases but differ in key_scope are
+        # genuinely different rules (one sense per key space), so the scope
+        # is part of the identity.
+        existing_terms = {
+            (t.term_ko, tuple(t.aliases), tuple(t.key_scope)) for t in self.term_rules
+        }
         existing_nouns = {
             (n.source_like.lower(), n.preferred_ko) for n in self.proper_noun_rules
         }
@@ -183,7 +304,7 @@ class Glossary(BaseModel):
 
         # Add new items with deduplication
         for t in other.term_rules:
-            key = (t.term_ko, tuple(t.aliases))
+            key = (t.term_ko, tuple(t.aliases), tuple(t.key_scope))
             if key not in existing_terms:
                 existing_terms.add(key)
                 new_terms.append(t)
@@ -223,16 +344,29 @@ class Glossary(BaseModel):
     def to_context_string(self) -> str:
         """Convert glossary to a string for LLM context.
 
+        Scoped rules carry their key space on the line, and the section
+        header gains a one-line instruction so a mixed batch cannot have a
+        scoped rule applied to the wrong key. Output is unchanged for a
+        glossary whose rules are all unscoped.
+
         Returns:
             Human-readable glossary summary with full details.
         """
         lines: list[str] = []
 
         if self.term_rules:
-            lines.append("## Term Rules (MUST follow these translations)")
+            header = "## Term Rules (MUST follow these translations)"
+            if any(term.key_scope for term in self.term_rules):
+                header += (
+                    "\n(적용 키가 붙은 규칙은 그 키에만 적용하고, 나머지 키에는 "
+                    "적용 키 없는 규칙을 적용하세요)"
+                )
+            lines.append(header)
             for term in self.term_rules:
                 aliases = ", ".join(term.aliases) if term.aliases else "N/A"
                 line = f"- **{aliases}** → **{term.term_ko}**"
+                if term.key_scope:
+                    line += f" (적용 키: {', '.join(term.key_scope)})"
                 if term.preferred_style:
                     line += f" (스타일: {term.preferred_style})"
                 if term.notes:

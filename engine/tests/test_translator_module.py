@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import dspy
 from dspy.utils import DummyLM
 
-from moru_engine.dspy_modules import BatchTranslator
+from moru_engine.dspy_modules import BatchTranslator, render_style_directives
 from moru_engine.dspy_modules.lm import token_usage
 from moru_engine.dspy_modules.translator import check_protected
 
@@ -207,3 +207,83 @@ def test_token_usage_empty_history() -> None:
         "total_tokens": 0,
         "cached_tokens": 0,
     }
+
+
+# --- style directives ----------------------------------------------------
+
+
+def test_default_directives_only_enforce_register_consistency() -> None:
+    # Defaults must not add register or term-rendering mandates: the
+    # compiled instructions' own style guidance has to survive untouched.
+    rendered = render_style_directives("ko_kr")
+    assert "ONE register per speaker" in rendered
+    assert "하게체" not in rendered
+    assert "음차" not in rendered
+
+
+def test_each_speech_level_renders_its_own_endings() -> None:
+    polite = render_style_directives("ko_kr", "polite")
+    assert "존댓말" in polite
+    assert "하게체" not in polite
+
+    banmal = render_style_directives("ko_kr", "banmal")
+    assert "반말 (해체)" in banmal
+    assert "존댓말" not in banmal
+
+    hage = render_style_directives("ko_kr", "hage")
+    assert "하게체" in hage
+    assert "자네" in hage
+
+    # The consistency rule rides along with every explicit register.
+    assert all("ONE register per speaker" in r for r in (polite, banmal, hage))
+
+
+def test_term_style_picks_translation_or_transliteration() -> None:
+    assert "prefer translating its meaning" in render_style_directives(
+        "ko_kr", term_style="translate"
+    )
+    assert "prefer transliterating the source term" in render_style_directives(
+        "ko_kr", term_style="transliterate"
+    )
+
+
+def test_speech_level_is_korean_only_while_term_style_is_not() -> None:
+    # 하게체 has no meaning for a Japanese target; the term preference does.
+    rendered = render_style_directives("ja_jp", "hage", "translate")
+    assert "하게체" not in rendered
+    assert "prefer translating its meaning" in rendered
+
+
+def test_style_directives_reach_the_rendered_prompt() -> None:
+    directives = render_style_directives("ko_kr", "hage", "transliterate")
+    lm = DummyLM([{"translations": GOOD}], adapter=dspy.JSONAdapter())
+    with dspy.context(lm=lm, adapter=dspy.JSONAdapter()):
+        BatchTranslator(max_refine=0)(
+            source_lang="en_us",
+            target_lang="ko_kr",
+            context="test",
+            glossary="",
+            style_directives=directives,
+            entries=ENTRIES,
+        )
+    sent = "\n".join(
+        message["content"]
+        for message in lm.history[-1]["messages"]
+        if message["role"] == "user"
+    )
+    assert "[[ ## style_directives ## ]]" in sent
+    assert directives in sent
+
+
+def test_omitted_style_directives_default_to_empty() -> None:
+    # GEPA/evalset examples never supply the field; the module must not
+    # require it, and the batch must still translate.
+    lm = DummyLM([{"translations": GOOD}], adapter=dspy.JSONAdapter())
+    pred = _run(lm)
+    assert pred.translations == GOOD
+    sent = "\n".join(
+        message["content"]
+        for message in lm.history[-1]["messages"]
+        if message["role"] == "user"
+    )
+    assert "[[ ## style_directives ## ]]\n\n" in sent

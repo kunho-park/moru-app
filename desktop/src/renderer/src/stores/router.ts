@@ -10,13 +10,19 @@ export type Screen =
   | "w3"
   | "w4"
   | "w5"
+  | "w5m"
   | "w6"
   | "queue"
   | "history"
   | "glossary"
   | "settings";
 
-export const WIZARD_SCREENS: readonly Screen[] = ["w1", "w2", "w3", "w4", "w5", "w6"];
+/**
+ * `w5m` (hand translation) is an alternate route through step 05, not a
+ * seventh step: it shares the review step's position in the rail so the
+ * numbered progression stays 1..6.
+ */
+export const WIZARD_SCREENS: readonly Screen[] = ["w1", "w2", "w3", "w4", "w5", "w5m", "w6"];
 
 /** localStorage flag: present once the first-run onboarding was finished or skipped. */
 const ONBOARDED_KEY = "moru:onboarded";

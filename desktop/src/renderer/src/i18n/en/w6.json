@@ -12,6 +12,12 @@
     "cacheSaved": "▲ Cache hit {{percent}}% — saved {{saved}}",
     "cacheHit": "▲ Cache hit {{percent}}%"
   },
+  "undeliverable": {
+    "header": "Cannot be installed",
+    "summary": "{{files}} files · {{entries}} lines",
+    "body": "The translation succeeded, but this text is a guidebook definition stored inside the mod jar. Patchouli reads it straight out of the jar, so a resource pack cannot override it.",
+    "hint": "This is neither untranslated text nor hardcoded text — editing the jar directly makes the translation apply."
+  },
   "export": {
     "heading": "Export",
     "zipTitle": "Resource pack (.zip)",

@@ -19,6 +19,9 @@ import { providerIdOf } from "../lib/models";
 import { moru } from "../lib/bridge";
 import { WEB_URL } from "../lib/web";
 import { useSessions, type SessionScanTotals } from "./sessions";
+// Cycle-tolerant by construction: translationQueue imports this module too,
+// and both sides only dereference the other's store at call time.
+import { useTranslationQueue } from "./translationQueue";
 import {
   snapshotTranslationSettings,
   useSettings,
@@ -141,6 +144,15 @@ interface WizardStore {
   exportOverridesZipPath: string | null;
   exportError: string | null;
 
+  /* W3: export as source text. Its own slice, kept out of the W6 export
+     state above - a source-text export must not unlock the review/export
+     steps, nor overwrite the session's translated-export paths. */
+  sourceExportJobId: string | null;
+  sourceExportState: "idle" | "running" | "done" | "failed";
+  sourceExportZipPath: string | null;
+  sourceExportOverridesZipPath: string | null;
+  sourceExportError: string | null;
+
   /* actions */
   startSession: (path: string, probe: ModpackProbe, targetLocale?: string) => void;
   resumeSession: (sessionId: string) => boolean;
@@ -156,10 +168,19 @@ interface WizardStore {
   setCategories: (names: string[], included: boolean) => void;
   startScan: () => Promise<void>;
   startTranslate: (settingsOverride?: TranslationRunSettings) => Promise<void>;
+  /**
+   * Seed a hand-translation session: a translate job flagged `manual_seed`,
+   * which the engine settles as untranslated instead of calling a provider.
+   * Drives the same `runState` as an ordinary run, so W5/W5M/W6 and the
+   * history record need no special case.
+   */
+  startManualSeed: () => Promise<"started" | "busy">;
   handleTranslationFrame: (frame: JobEventFrame, sessionId: string) => void;
   cancelTranslate: () => Promise<void>;
   updateReviewStats: (stats: PipelineStats) => void;
   startExport: () => Promise<void>;
+  /** W3 source-text export: same engine export job, untranslated values. */
+  startSourceExport: () => Promise<void>;
   appendLog: (level: LogLine["level"], text: string) => void;
   reset: () => void;
 }
@@ -247,12 +268,10 @@ export function buildTranslateParams(
     use_vanilla_glossary: settings.useVanillaGlossary,
     extract_glossary: settings.extractGlossary,
     glossary_max_terms: settings.glossaryMaxTerms,
-    include_categories:
-      state.excludedCategories.length > 0 && state.scanResult !== null
-        ? state.scanResult.categories
-            .map((category) => category.name)
-            .filter((name) => !state.excludedCategories.includes(name))
-        : undefined,
+    include_categories: includedCategories(state),
+    // A per-mod axis, frozen with the rest of the run settings so a queued
+    // pack uses the blacklist that was in force when the queue started.
+    mod_blacklist: settings.modBlacklist,
     output_dir: settings.outputDir ?? undefined,
     // Reuse the completed W2 scan through the official v1.0 session pipeline.
     // Migration scans receive an additional A/B/C fingerprint check server-side.
@@ -269,9 +288,28 @@ export function buildTranslateParams(
   };
 }
 
+/**
+ * Scan categories still in translation scope, in the engine's param shape:
+ * undefined means "every category", which is what an untouched selection
+ * sends. Shared by the translate run and the source-text export so both
+ * cover exactly the categories picked on W2.
+ */
+export function includedCategories(state: {
+  scanResult: ScanResult | null;
+  excludedCategories: string[];
+}): string[] | undefined {
+  if (state.excludedCategories.length === 0 || state.scanResult === null) {
+    return undefined;
+  }
+  return state.scanResult.categories
+    .map((category) => category.name)
+    .filter((name) => !state.excludedCategories.includes(name));
+}
+
 let closeScanEvents: (() => void) | null = null;
 let closeTranslateEvents: (() => void) | null = null;
 let closeExportEvents: (() => void) | null = null;
+let closeSourceExportEvents: (() => void) | null = null;
 let lastSessionProgressPersistedAt = 0;
 
 const MAX_LOG_LINES = 500;
@@ -485,6 +523,11 @@ const initialJobState = {
   exportZipPath: null,
   exportOverridesZipPath: null,
   exportError: null,
+  sourceExportJobId: null,
+  sourceExportState: "idle" as const,
+  sourceExportZipPath: null,
+  sourceExportOverridesZipPath: null,
+  sourceExportError: null,
 };
 
 export const useWizard = create<WizardStore>((set, get) => ({
@@ -504,6 +547,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
+    closeSourceExportEvents?.();
     set({
       sessionId: crypto.randomUUID(),
       modpackPath: path,
@@ -548,6 +592,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
     if (
       state.scanState === "running" ||
       state.exportState === "running" ||
+      state.sourceExportState === "running" ||
       (state.sessionId !== sessionId && state.runState === "running")
     ) {
       return "busy";
@@ -620,6 +665,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
+    closeSourceExportEvents?.();
 
     const engineRunState =
       snapshot.job.status === "pending" ? "running" : snapshot.job.status;
@@ -734,6 +780,9 @@ export const useWizard = create<WizardStore>((set, get) => ({
         modpack_path: modpackPath,
         source_locale: sourceLocale,
         target_locale: targetLocale,
+        // The blacklist decides which mods the scan even opens, so it has
+        // to travel with the scan, not just with the translate run.
+        mod_blacklist: useSettings.getState().modBlacklist,
         ...(migrationEnabled && previousModpackPath !== null
           ? { previous_modpack_path: previousModpackPath }
           : {}),
@@ -825,6 +874,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
         apiKey,
       ),
       session_id: sessionId,
+
     };
 
     set({
@@ -1008,6 +1058,165 @@ export const useWizard = create<WizardStore>((set, get) => ({
     }
   },
 
+  /**
+   * Seed a hand-translation session (W3 "손으로 번역하기").
+   *
+   * An ordinary translate job in every respect the rest of the app can see —
+   * same `runState`, same history record, same W5/W6 — but flagged
+   * `manual_seed`, so the engine leaves every entry untranslated for a human
+   * instead of calling a provider. No model, api_key or api_base is sent, and
+   * none is required: this is the path for someone who has configured nothing.
+   *
+   * `use_tm` and the glossaries deliberately still apply. They are pure local
+   * lookups and are exactly the help a hand translator wants; only glossary
+   * curation needs a model, which is why `extract_glossary` is forced off
+   * here as well as engine-side.
+   *
+   * Returns "busy" rather than clobbering state: the queue drives this same
+   * single wizard session and reads a `sessionId` change as abandonment, so
+   * starting a manual session mid-drain would silently drop a queued pack.
+   */
+  startManualSeed: async () => {
+    const state = get();
+    if (state.modpackPath === null || state.runState === "running") return "busy";
+    // The queue drives this same single wizard session and reads a `sessionId`
+    // change as abandonment, so seeding a manual session mid-drain would
+    // silently drop a queued pack. (translationQueue imports this module, but
+    // the cycle is inert: both sides only dereference at call time.)
+    const queuePhase = useTranslationQueue.getState().phase;
+    if (queuePhase === "running" || queuePhase === "pausing") return "busy";
+
+    const settings = snapshotTranslationSettings();
+    const scanTotals = selectedScanTotals(state);
+    closeTranslateEvents?.();
+
+    const sessionId = state.sessionId ?? crypto.randomUUID();
+    const base = buildTranslateParams(
+      { ...state, modpackPath: state.modpackPath },
+      settings,
+    );
+    const params: TranslateParams = {
+      ...base,
+      session_id: sessionId,
+      manual_seed: true,
+      // Explicitly cleared rather than merely unused: a model recorded on a
+      // session no provider was asked about would misreport how the pack was
+      // translated.
+      model: undefined,
+      api_key: undefined,
+      api_base: undefined,
+      extract_glossary: false,
+    };
+
+    set({
+      runState: "running",
+      // No model was involved; the history row says so rather than naming one.
+      model: null,
+      runError: null,
+      startedAt: Date.now(),
+      translationStartedAt: null,
+      finishedAt: null,
+      doneEntries: 0,
+      scanTotals,
+      fileProgress: {},
+      glossaryProgress: null,
+      failedKeys: {},
+      failedEntryCount: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+      ticker: [],
+      activeBatches: {},
+      log: [],
+      stats: null,
+    });
+    get().appendLog(
+      "info",
+      `manual seed: ${state.modpackName} → ${state.targetLocale} (no provider)`,
+    );
+
+    useSessions.getState().upsert({
+      id: sessionId,
+      modpackPath: state.modpackPath,
+      modpackName: state.modpackName,
+      sourceLocale: state.sourceLocale,
+      targetLocale: state.targetLocale,
+      model: "",
+      status: "running",
+      createdAt: Date.now(),
+      finishedAt: null,
+      doneEntries: 0,
+      totalEntries: scanTotals.entries,
+      translateJobId: null,
+      scanTotals,
+      stats: null,
+      error: null,
+      exportZipPath: null,
+      exportOverridesZipPath: null,
+      sharedUrl: null,
+    });
+    set({ sessionId });
+
+    try {
+      const job = await api.startTranslate(params);
+      set({ translateJobId: job.id });
+      useSessionJobs.getState().register(sessionId, job.id);
+      closeTranslateEvents = openJobEvents(job.id, (frame: JobEventFrame) => {
+        get().handleTranslationFrame(frame, sessionId);
+      });
+      return "started";
+    } catch (error) {
+      set({ runState: "failed", runError: String(error) });
+      useSessions.getState().patch(sessionId, {
+        status: "failed",
+        finishedAt: Date.now(),
+        error: String(error),
+      });
+      return "busy";
+    }
+  },
+
+  /**
+   * Export the pack as source text (W3). Same engine export job W6 runs,
+   * flagged so the engine settles every entry to its own source string:
+   * no translate job, no model, and no API key is involved, so this works
+   * straight off a scan.
+   */
+  startSourceExport: async () => {
+    const state = get();
+    if (state.modpackPath === null || state.sourceExportState === "running") return;
+    closeSourceExportEvents?.();
+    set({ sourceExportState: "running", sourceExportError: null });
+    try {
+      const job = await api.startExport({
+        source_text: true,
+        modpack_path: state.modpackPath,
+        source_locale: state.sourceLocale,
+        target_locale: state.targetLocale,
+        include_categories: includedCategories(state),
+        mod_blacklist: useSettings.getState().modBlacklist,
+        output_dir: useSettings.getState().outputDir ?? undefined,
+      });
+      set({ sourceExportJobId: job.id });
+      closeSourceExportEvents = openJobEvents(job.id, (frame) => {
+        if (frame.type === "done") {
+          set({
+            sourceExportState: "done",
+            sourceExportZipPath: frame.zip_path ?? null,
+            sourceExportOverridesZipPath: frame.overrides_zip_path ?? null,
+          });
+        } else if (frame.type === "failed" || frame.type === "cancelled") {
+          set({
+            sourceExportState: "failed",
+            sourceExportError: frame.error ?? "source export failed",
+          });
+        }
+      });
+    } catch (error) {
+      set({ sourceExportState: "failed", sourceExportError: String(error) });
+    }
+  },
+
   appendLog: (level, text) =>
     set((prev) => ({
       log: [...prev.log.slice(-MAX_LOG_LINES + 1), { ts: Date.now(), level, text }],
@@ -1017,6 +1226,7 @@ export const useWizard = create<WizardStore>((set, get) => ({
     closeScanEvents?.();
     closeTranslateEvents?.();
     closeExportEvents?.();
+    closeSourceExportEvents?.();
     moru.setBusy(false);
     set({
       sessionId: null,

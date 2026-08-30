@@ -264,7 +264,9 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
                       ? t("onboarding.key.cliConnectedDetail", {
                           account: selected.account ?? selected.name,
                         })
-                      : t("onboarding.key.cliLoginDetail", { cmd: selected.login_hint ?? "" })}
+                      : selected.error !== null && selected.error !== undefined
+                        ? t("onboarding.key.cliBlockedDetail", { reason: selected.error })
+                        : t("onboarding.key.cliLoginDetail", { cmd: selected.login_hint ?? "" })}
                   </div>
                   <button
                     onClick={() => {

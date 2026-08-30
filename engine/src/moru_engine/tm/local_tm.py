@@ -4,6 +4,18 @@ Exact-match cache: a hit skips the LLM call entirely.
 The cache key is ``sha256(source_text, target_lang, glossary_version)`` so any
 glossary change naturally invalidates prior translations.
 
+Both directions pass ``is_cacheable_pair``: a pair that carries no
+translation (target equal to source, blank, or still holding protected
+tokens) is refused on write AND never served on read, so rows written
+before the gate existed are inert from the first run after upgrade
+instead of needing a migration scan. ``purge_degenerate`` reclaims their
+disk space when a caller asks for it.
+
+Row precedence, resolved per entry key in ``lookup_many``: a row stored
+under the run's own glossary fingerprint beats a community row stored
+under the ``shared`` sentinel, and a community row is served only to lang
+keys its ``key_scope`` covers.
+
 Thread-safety: a single connection is opened with ``check_same_thread=False``
 and every database access is serialized through an internal
 ``threading.Lock``. All methods are synchronous; the pipeline wraps calls with
@@ -24,6 +36,10 @@ from types import TracebackType
 from platformdirs import user_data_dir
 from pydantic import BaseModel, Field
 
+from ..glossary.pair_harvester import is_untranslated_copy
+from ..models.glossary import key_scope_covers
+from ..placeholder import TOKEN_RE
+
 logger = logging.getLogger(__name__)
 
 _KEY_SEPARATOR = "\x1f"
@@ -31,10 +47,35 @@ _KEY_SEPARATOR = "\x1f"
 #: ``tm_meta`` key holding the version of the last merged shared TM snapshot.
 META_LAST_SHARED_VERSION = "last_shared_version"
 
+#: ``key_scope`` patterns are stored joined by the ASCII unit separator: a
+#: dotted lang-key glob can never contain one, and "" means unscoped.
+_SCOPE_SEPARATOR = "\x1f"
+
 #: ``glossary_version`` sentinel for community rows: they are approved
 #: against no particular local glossary, so lookups probe this version in
 #: addition to the run's own fingerprint.
 SHARED_GLOSSARY_VERSION = "shared"
+
+#: ``origin`` for a row written from a hand translation. Stored under
+#: SHARED_GLOSSARY_VERSION because a human's decision does not depend on the
+#: glossary fingerprint that happened to be active — the translator read the
+#: string and chose. The commit path also cannot compute a run fingerprint:
+#: it may be serving a session restored from disk, whose effective glossary is
+#: not rebuilt.
+MANUAL_ORIGIN = "manual"
+
+#: Serving precedence when several rows match one entry. A human decided
+#: deliberately; a local row is a machine result valid under the user's own
+#: glossary; a community snapshot is approved against no local glossary at all.
+_ORIGIN_RANK: dict[str, int] = {
+    MANUAL_ORIGIN: 3,
+    "local": 2,
+    "community": 1,
+    "vanilla": 1,
+}
+#: An origin written by a future version: rank it with `local` rather than
+#: silently letting it outrank a human edit.
+_ORIGIN_RANK_DEFAULT = 2
 
 # Stay well below SQLite's host-parameter limit when binding IN (...) clauses.
 _MAX_BATCH_PARAMS = 500
@@ -48,7 +89,8 @@ CREATE TABLE IF NOT EXISTS tm_entries (
     translated_text TEXT NOT NULL,
     origin TEXT NOT NULL DEFAULT 'local',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    key_scope TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_tm_entries_target_lang ON tm_entries(target_lang);
 CREATE TABLE IF NOT EXISTS tm_meta (
@@ -60,13 +102,14 @@ CREATE TABLE IF NOT EXISTS tm_meta (
 _UPSERT_SQL = """
 INSERT INTO tm_entries (
     key_hash, source_text, target_lang, glossary_version,
-    translated_text, origin, created_at, updated_at
+    translated_text, origin, created_at, updated_at, key_scope
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(key_hash) DO UPDATE SET
     translated_text = excluded.translated_text,
     origin = excluded.origin,
-    updated_at = excluded.updated_at
+    updated_at = excluded.updated_at,
+    key_scope = excluded.key_scope
 """
 
 
@@ -83,6 +126,60 @@ def tm_key(source_text: str, target_lang: str, glossary_version: str) -> str:
 def default_db_path() -> Path:
     """Per-user default location of the local TM database."""
     return Path(user_data_dir("moru", "moru")) / "tm.sqlite3"
+
+
+def is_cacheable_pair(source_text: str, translated_text: str) -> bool:
+    """Whether a ``(source, translated)`` pair is usable as a cache entry.
+
+    A cache entry is a PERMANENT promise: it skips the model on every later
+    run under the same glossary fingerprint, so a pair that carries no
+    translation would pin that string to its degenerate form forever. The
+    validator deliberately reports ``UNTRANSLATED`` as a WARNING (a proper
+    noun, a mod name or a bare number that correctly reads the same in the
+    target language must not fail the entry and must still reach the
+    output), so severity alone cannot guard the cache. This predicate does.
+
+    It guards BOTH directions — refused on write, and never served on read.
+    Guarding the read too is what makes rows written before the gate
+    existed harmless immediately, with no migration scan blocking startup;
+    ``LocalTM.purge_degenerate`` then only has to reclaim their disk space.
+
+    Rejected:
+
+    * A target that is untranslated filler, decided by the SAME rule the
+      pipeline already uses to reject copied target-locale files
+      (``is_untranslated_copy``): empty/whitespace-only, or equal to the
+      source after formatting-code/placeholder cleanup and casefolding.
+      That single rule covers the poisoning case, the empty target, and
+      the "identical proper noun / bare number" case at once, and reusing
+      it keeps one definition of "this is not a translation" in the engine.
+    * A blank source: the row could only ever be hit by an empty string,
+      which the pipeline never sends to the model in the first place.
+    * A target still carrying protected tokens ("{{ARG}}", "{{COLOR1}}").
+      Restoration failed or was bypassed; serving it would print the token
+      into the game. The validator rates the same condition an ERROR, so
+      no such pair is legitimate.
+
+    Rejection is not failure: the entry keeps its translated value in the
+    output, it simply stays out of the cache and is re-decided next run.
+    """
+    if not source_text.strip():
+        return False
+    if is_untranslated_copy(source_text, translated_text):
+        return False
+    return not TOKEN_RE.search(translated_text)
+
+
+def _encode_scope(key_scope: Iterable[str]) -> str:
+    """Serialize ``key_scope`` for storage, normalized like ``TermRule``."""
+    return _SCOPE_SEPARATOR.join(
+        sorted({pattern.strip() for pattern in key_scope} - {""})
+    )
+
+
+def _decode_scope(stored: str) -> tuple[str, ...]:
+    """Read a stored ``key_scope`` back; "" is the unscoped row."""
+    return tuple(stored.split(_SCOPE_SEPARATOR)) if stored else ()
 
 
 class TMStats(BaseModel):
@@ -113,6 +210,19 @@ class LocalTM:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            # A database created before row scoping keeps its table, so the
+            # column is added in place. The default makes every existing
+            # row unscoped, which is the behavior they already had.
+            columns = {
+                row[1]
+                for row in self._conn.execute("PRAGMA table_info(tm_entries)")
+            }
+            if "key_scope" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE tm_entries "
+                    "ADD COLUMN key_scope TEXT NOT NULL DEFAULT ''"
+                )
+                logger.info("Added key_scope column to %s", self._db_path)
             self._conn.commit()
         logger.debug("LocalTM opened at %s", self._db_path)
 
@@ -121,15 +231,42 @@ class LocalTM:
         return self._db_path
 
     def lookup(
-        self, source_text: str, target_lang: str, glossary_version: str
+        self,
+        source_text: str,
+        target_lang: str,
+        glossary_version: str,
+        *,
+        key: str = "",
     ) -> str | None:
         """Cached translation for an exact match, else None.
 
-        Checks the run's own glossary fingerprint AND the community
-        ``shared`` sentinel; the shared row wins (human-approved).
+        Args:
+            source_text: Exact source string to probe.
+            target_lang: Target locale of the run.
+            glossary_version: The run's glossary fingerprint.
+            key: Lang key the hit would be applied to. A community row
+                scoped to a set of keys can only be judged against one, so
+                without it only unscoped rows can match.
         """
-        hits = self.lookup_many({"k": source_text}, target_lang, glossary_version)
-        return hits.get("k")
+        hits = self.lookup_many({key: source_text}, target_lang, glossary_version)
+        return hits.get(key)
+
+    def _rows_for(self, hashes: list[str]) -> list[tuple[str, str, str, str, str]]:
+        """``(key_hash, source_text, translated_text, key_scope, origin)`` rows."""
+        rows: list[tuple[str, str, str, str, str]] = []
+        with self._lock:
+            for start in range(0, len(hashes), _MAX_BATCH_PARAMS):
+                chunk = hashes[start : start + _MAX_BATCH_PARAMS]
+                marks = ",".join("?" * len(chunk))
+                rows.extend(
+                    self._conn.execute(
+                        "SELECT key_hash, source_text, translated_text, "
+                        "key_scope, origin "
+                        f"FROM tm_entries WHERE key_hash IN ({marks})",
+                        chunk,
+                    ).fetchall()
+                )
+        return rows
 
     def lookup_many(
         self,
@@ -140,10 +277,34 @@ class LocalTM:
         """Batch lookup: ``{entry_key: source_text}`` -> ``{entry_key: translated_text}``.
 
         Only hits appear in the result; misses are simply absent. Entry keys
-        sharing the same source text all receive the same hit. Every source
-        is probed under both the run's glossary fingerprint and the
-        community ``shared`` sentinel version; a shared hit overrides the
-        local one because community rows are human-approved corrections.
+        sharing the same source text all receive the same hit.
+
+        Every source is probed twice: under the run's glossary fingerprint,
+        and under the community ``shared`` sentinel. Two rules decide which
+        row an entry actually gets, and both exist because a ``shared`` row
+        is approved against NO glossary while its constant version makes it
+        visible on every run:
+
+        1. **The local row wins.** Its key carries the run's glossary
+           fingerprint, so a local hit certifies "produced under exactly
+           this glossary" — including each term's ``key_scope``, which the
+           fingerprint covers. A ``shared`` row certifies the opposite, and
+           a translation valid under no glossary cannot outrank one valid
+           under the user's own. Community corrections are not lost by
+           this: they arrive as scoped glossary terms too, and THAT channel
+           changes the fingerprint, which invalidates the stale local row
+           and re-decides every entry containing the term rather than only
+           those whose whole text matches.
+        2. **A row is served only to keys its ``key_scope`` covers.** One
+           full-text match can mean different things under different lang
+           keys — the homograph case ``TermRule.key_scope`` exists for —
+           so an unscoped community reading must not leak into a key space
+           it was never approved for. Local rows are written unscoped, so
+           in practice this only constrains ``shared`` rows.
+
+        Degenerate rows are additionally never served (see
+        ``is_cacheable_pair``), which is what neutralizes rows written
+        before the write gate existed.
         """
         if not entries:
             return {}
@@ -157,21 +318,25 @@ class LocalTM:
                 shared_hash_to_keys.setdefault(shared, []).append(entry_key)
 
         hits: dict[str, str] = {}
-        # Local first so shared rows overwrite on collision.
-        for hash_to_keys in (local_hash_to_keys, shared_hash_to_keys):
-            hashes = list(hash_to_keys)
-            with self._lock:
-                for start in range(0, len(hashes), _MAX_BATCH_PARAMS):
-                    chunk = hashes[start : start + _MAX_BATCH_PARAMS]
-                    marks = ",".join("?" * len(chunk))
-                    rows = self._conn.execute(
-                        "SELECT key_hash, translated_text FROM tm_entries "
-                        f"WHERE key_hash IN ({marks})",
-                        chunk,
-                    ).fetchall()
-                    for key_hash, translated_text in rows:
-                        for entry_key in hash_to_keys[key_hash]:
-                            hits[entry_key] = translated_text
+        ranks: dict[str, int] = {}
+        # Ranked by origin rather than by probe order, so precedence is stated
+        # once and does not depend on which loop runs last. A human's decision
+        # outranks a machine's cache, which outranks a community snapshot.
+        for hash_to_keys in (shared_hash_to_keys, local_hash_to_keys):
+            for key_hash, source_text, translated_text, scope, origin in self._rows_for(
+                list(hash_to_keys)
+            ):
+                if not is_cacheable_pair(source_text, translated_text):
+                    continue
+                rank = _ORIGIN_RANK.get(origin, _ORIGIN_RANK_DEFAULT)
+                covered = _decode_scope(scope)
+                for entry_key in hash_to_keys[key_hash]:
+                    if not key_scope_covers(covered, entry_key):
+                        continue
+                    if rank < ranks.get(entry_key, -1):
+                        continue
+                    hits[entry_key] = translated_text
+                    ranks[entry_key] = rank
         return hits
 
     def store(
@@ -181,8 +346,21 @@ class LocalTM:
         glossary_version: str,
         translated_text: str,
         origin: str = "local",
+        key_scope: Iterable[str] = (),
     ) -> None:
-        """Insert or update one entry; ``updated_at`` is bumped on conflict."""
+        """Insert or update one entry; ``updated_at`` is bumped on conflict.
+
+        A degenerate pair is dropped rather than stored — see
+        ``is_cacheable_pair`` for what that means and why. ``key_scope``
+        narrows which lang keys the row may be served to; the empty default
+        is the unscoped row every local write wants, since a local row's
+        key already carries the glossary it was produced under.
+        """
+        if not is_cacheable_pair(source_text, translated_text):
+            logger.debug(
+                "Refusing degenerate TM pair: %r -> %r", source_text, translated_text
+            )
+            return
         now = _utc_now_iso()
         key_hash = tm_key(source_text, target_lang, glossary_version)
         with self._lock:
@@ -197,6 +375,7 @@ class LocalTM:
                     origin,
                     now,
                     now,
+                    _encode_scope(key_scope),
                 ),
             )
             self._conn.commit()
@@ -207,12 +386,31 @@ class LocalTM:
         target_lang: str,
         glossary_version: str,
         origin: str = "local",
+        key_scope: Iterable[str] = (),
     ) -> None:
-        """Upsert ``(source_text, translated_text)`` pairs in one transaction."""
+        """Upsert ``(source_text, translated_text)`` pairs in one transaction.
+
+        Degenerate pairs are skipped (``is_cacheable_pair``) and repeated
+        sources collapse onto one parameter row carrying the last value,
+        which is exactly what the upsert would have left behind: a pack
+        repeats the same short string across mods, so the caller routinely
+        hands over the same source many times.
+
+        ``key_scope`` applies to every pair in the call, so a caller with
+        per-row scopes groups its rows by scope — the shared-snapshot merge
+        does exactly that, and the number of distinct scopes is small.
+        """
         now = _utc_now_iso()
-        params = [
-            (
-                tm_key(source_text, target_lang, glossary_version),
+        scope = _encode_scope(key_scope)
+        params: dict[str, tuple[str, ...]] = {}
+        skipped = 0
+        for source_text, translated_text in items:
+            if not is_cacheable_pair(source_text, translated_text):
+                skipped += 1
+                continue
+            key_hash = tm_key(source_text, target_lang, glossary_version)
+            params[key_hash] = (
+                key_hash,
                 source_text,
                 target_lang,
                 glossary_version,
@@ -220,14 +418,42 @@ class LocalTM:
                 origin,
                 now,
                 now,
+                scope,
             )
-            for source_text, translated_text in items
-        ]
+        if skipped:
+            logger.debug("Refused %d degenerate TM pair(s)", skipped)
         if not params:
             return
         with self._lock:
-            self._conn.executemany(_UPSERT_SQL, params)
+            self._conn.executemany(_UPSERT_SQL, list(params.values()))
             self._conn.commit()
+
+    def purge_degenerate(self) -> int:
+        """Delete stored rows that ``is_cacheable_pair`` would reject.
+
+        Correctness does not depend on this: such rows are already never
+        served (``lookup_many`` applies the same predicate), so this only
+        reclaims their disk space. It is an explicit maintenance call
+        rather than something the constructor does, because the scan is
+        O(rows) with a Python callback per row — measured 4.7 s for one
+        million rows — which would block app start and the first run of an
+        upgrade for no correctness gain.
+
+        The predicate is handed to SQLite as a function instead of being
+        restated in SQL, so the cleanup and the gates can never drift
+        apart. Returns the number of rows removed.
+        """
+        with self._lock:
+            self._conn.create_function(
+                "moru_is_cacheable", 2, is_cacheable_pair, deterministic=True
+            )
+            cursor = self._conn.execute(
+                "DELETE FROM tm_entries "
+                "WHERE NOT moru_is_cacheable(source_text, translated_text)"
+            )
+            removed = cursor.rowcount
+            self._conn.commit()
+        return removed
 
     def stats(self) -> TMStats:
         """Aggregate entry counts and the last merged shared snapshot version."""

@@ -12,6 +12,12 @@
     "cacheSaved": "▲ 캐시 적중 {{percent}}% — {{saved}} 절약",
     "cacheHit": "▲ 캐시 적중 {{percent}}%"
   },
+  "undeliverable": {
+    "header": "설치할 수 없는 번역",
+    "summary": "{{files}}개 파일 · {{entries}}줄",
+    "body": "번역은 성공했지만, 이 텍스트는 모드 jar 안에 들어있는 가이드북 정의 파일입니다. Patchouli가 jar에서 직접 읽어가기 때문에 리소스팩으로는 덮어쓸 수 없어요.",
+    "hint": "번역이 안 된 것도, 코드에 박힌 텍스트도 아닙니다 — jar을 직접 수정하면 번역이 적용됩니다."
+  },
   "export": {
     "heading": "내보내기",
     "zipTitle": "리소스팩 (.zip)",

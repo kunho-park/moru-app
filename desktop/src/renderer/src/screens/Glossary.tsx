@@ -35,7 +35,7 @@ const ORIGIN_STYLE: Record<GlossaryOrigin, string> = {
 
 const ORIGINS: GlossaryOrigin[] = ["vanilla", "extracted", "manual", "community"];
 
-const GRID = "grid grid-cols-[1.2fr_1.2fr_100px_90px] gap-3";
+const GRID = "grid grid-cols-[1.1fr_1.1fr_1fr_100px_90px] gap-3";
 
 /* Windowed list rendering: synced glossaries reach tens of thousands of
  * rows, which stalls the DOM if mounted at once. Rows are fixed-height so
@@ -87,6 +87,36 @@ function parseCsv(text: string): string[][] {
 
 function csvField(value: string): string {
   return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/**
+ * Parse the scope input into patterns. Split on commas and whitespace,
+ * drop blanks, deduplicate and sort — the same normalisation the engine's
+ * TermRule validator applies, so a saved row does not reorder itself.
+ */
+export function parseKeyScope(value: string): string[] {
+  return [...new Set(value.split(/[,\s]+/).filter((part) => part !== ""))].sort();
+}
+
+/**
+ * Replace the row with the same identity, else insert at `at`.
+ *
+ * Identity is source PLUS key scope: the whole point of scoping is that one
+ * source term carries several readings ("Wither" is 위더 under `entity.*`
+ * and 시듦 under `effect.*`), so matching on source alone would collapse
+ * them into a single row and lose one reading.
+ */
+export function upsertTerm(
+  terms: GlossaryTerm[],
+  entry: GlossaryTerm,
+  at: "start" | "end",
+): GlossaryTerm[] {
+  const identity = `${entry.source}\u001f${entry.key_scope.join(",")}`;
+  const existing = terms.findIndex(
+    (term) => `${term.source}\u001f${term.key_scope.join(",")}` === identity,
+  );
+  if (existing >= 0) return terms.map((term, i) => (i === existing ? entry : term));
+  return at === "start" ? [entry, ...terms] : [...terms, entry];
 }
 
 function OriginBadge({ origin }: { origin: GlossaryOrigin }) {
@@ -187,6 +217,7 @@ export function GlossaryScreen() {
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [draftSource, setDraftSource] = useState("");
   const [draftTarget, setDraftTarget] = useState("");
+  const [draftScope, setDraftScope] = useState("");
   const [toast, setToast] = useState<{ id: number; text: string; tone: "ok" | "err" } | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
 
@@ -283,7 +314,10 @@ export function GlossaryScreen() {
       .filter(({ term }) => originFilter === "all" || term.origin === originFilter)
       .filter(
         ({ term }) =>
-          q === "" || term.source.toLowerCase().includes(q) || term.target.toLowerCase().includes(q),
+          q === "" ||
+          term.source.toLowerCase().includes(q) ||
+          term.target.toLowerCase().includes(q) ||
+          term.key_scope.some((pattern) => pattern.toLowerCase().includes(q)),
       );
   }, [terms, originFilter, deferredSearch]);
 
@@ -299,12 +333,14 @@ export function GlossaryScreen() {
     setEditIndex(index);
     setDraftSource(terms[index].source);
     setDraftTarget(terms[index].target);
+    setDraftScope(terms[index].key_scope.join(", "));
   };
 
   const beginAdd = (): void => {
     setEditIndex(null);
     setDraftSource("");
     setDraftTarget("");
+    setDraftScope("");
     // The add row mounts at the top of the list; surface it.
     listRef.current?.scrollTo({ top: 0 });
     setScrollTop(0);
@@ -320,12 +356,15 @@ export function GlossaryScreen() {
     const source = draftSource.trim();
     const target = draftTarget.trim();
     if (!source || !target) return;
-    const next = [...terms];
-    const existing = next.findIndex((term) => term.source === source);
-    const entry: GlossaryTerm = { source, target, origin: "manual" };
-    if (existing >= 0) next[existing] = entry;
-    else next.unshift(entry);
-    saveMutation.mutate(next, { onSuccess: () => setAdding(false) });
+    const entry: GlossaryTerm = {
+      source,
+      target,
+      origin: "manual",
+      key_scope: parseKeyScope(draftScope),
+    };
+    saveMutation.mutate(upsertTerm(terms, entry, "start"), {
+      onSuccess: () => setAdding(false),
+    });
   };
 
   const commitEdit = (): void => {
@@ -333,7 +372,10 @@ export function GlossaryScreen() {
     const source = draftSource.trim();
     const target = draftTarget.trim();
     if (!source || !target) return;
-    const next = terms.map((term, i) => (i === editIndex ? { ...term, source, target } : term));
+    const key_scope = parseKeyScope(draftScope);
+    const next = terms.map((term, i) =>
+      i === editIndex ? { ...term, source, target, key_scope } : term,
+    );
     saveMutation.mutate(next, { onSuccess: () => setEditIndex(null) });
   };
 
@@ -363,8 +405,11 @@ export function GlossaryScreen() {
 
   const exportCsv = (): void => {
     const csv = [
-      "source,target",
-      ...terms.map((term) => `${csvField(term.source)},${csvField(term.target)}`),
+      "source,target,key_scope",
+      ...terms.map(
+        (term) =>
+          `${csvField(term.source)},${csvField(term.target)},${csvField(term.key_scope.join(", "))}`,
+      ),
     ].join("\n");
     navigator.clipboard
       .writeText(csv)
@@ -383,30 +428,36 @@ export function GlossaryScreen() {
       let start = 0;
       let si = 0;
       let ti = 1;
+      // Scope column is optional: a pre-scope CSV has two columns and
+      // every imported row is unscoped, exactly as before.
+      let ki = -1;
       const header = rows[0].map((c) => c.trim().toLowerCase());
       const hs = header.indexOf("source");
       const ht = header.indexOf("target");
       if (hs !== -1 && ht !== -1) {
         si = hs;
         ti = ht;
+        ki = header.indexOf("key_scope");
         start = 1;
       }
       const imported: GlossaryTerm[] = [];
       for (const row of rows.slice(start)) {
         const source = (row[si] ?? "").trim();
         const target = (row[ti] ?? "").trim();
-        if (source && target) imported.push({ source, target, origin: "manual" });
+        if (source && target)
+          imported.push({
+            source,
+            target,
+            origin: "manual",
+            key_scope: ki === -1 ? [] : parseKeyScope(row[ki] ?? ""),
+          });
       }
       if (imported.length === 0) {
         showToast(t("glossary.toast.importFailed"), "err");
         return;
       }
-      const merged = [...terms];
-      for (const entry of imported) {
-        const existing = merged.findIndex((term) => term.source === entry.source);
-        if (existing >= 0) merged[existing] = entry;
-        else merged.push(entry);
-      }
+      let merged = terms;
+      for (const entry of imported) merged = upsertTerm(merged, entry, "end");
       saveMutation.mutate(merged, {
         onSuccess: () => showToast(t("glossary.toast.imported", { count: imported.length })),
       });
@@ -579,6 +630,7 @@ export function GlossaryScreen() {
           >
             <div>{t("glossary.col.source")}</div>
             <div>{t("glossary.col.target", { lang: targetMeta.short })}</div>
+            <div>{t("glossary.col.keyScope")}</div>
             <div>{t("glossary.col.origin")}</div>
             <div />
           </div>
@@ -611,6 +663,14 @@ export function GlossaryScreen() {
                 onEnter={commitAdd}
                 onEscape={cancelRow}
               />
+              <RowInput
+                value={draftScope}
+                onChange={setDraftScope}
+                placeholder={t("glossary.keyScopePlaceholder")}
+                mono
+                onEnter={commitAdd}
+                onEscape={cancelRow}
+              />
               <div>
                 <OriginBadge origin="manual" />
               </div>
@@ -630,6 +690,7 @@ export function GlossaryScreen() {
               <div key={i} className={`${GRID} items-center border-b border-line px-3.5 py-3`}>
                 <div className="h-3 animate-pxpulse bg-line" style={{ width: `${55 + ((i * 17) % 35)}%` }} />
                 <div className="h-3 animate-pxpulse bg-line" style={{ width: `${40 + ((i * 23) % 40)}%` }} />
+                <div className="h-3 animate-pxpulse bg-line" style={{ width: `${35 + ((i * 13) % 30)}%` }} />
                 <div className="h-3 w-[52px] animate-pxpulse bg-line" />
                 <div />
               </div>
@@ -707,6 +768,14 @@ export function GlossaryScreen() {
                       onEnter={commitEdit}
                       onEscape={cancelRow}
                     />
+                    <RowInput
+                      value={draftScope}
+                      onChange={setDraftScope}
+                      placeholder={t("glossary.keyScopePlaceholder")}
+                      mono
+                      onEnter={commitEdit}
+                      onEscape={cancelRow}
+                    />
                     <div>
                       <OriginBadge origin={term.origin} />
                     </div>
@@ -729,6 +798,18 @@ export function GlossaryScreen() {
                     <div className="truncate text-[13px] text-text" title={term.target}>
                       {term.target}
                     </div>
+                    {term.key_scope.length > 0 ? (
+                      <div
+                        className="truncate font-mono text-[11px] text-purple"
+                        title={term.key_scope.join(", ")}
+                      >
+                        {term.key_scope.join(", ")}
+                      </div>
+                    ) : (
+                      <div className="truncate font-mono text-[11px] text-text4">
+                        {t("glossary.keyScopeAll")}
+                      </div>
+                    )}
                     <div>
                       <OriginBadge origin={term.origin} />
                     </div>

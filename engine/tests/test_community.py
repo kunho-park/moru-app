@@ -1,4 +1,4 @@
-"""Community snapshot sync (community.py): manifest, merge, no-op paths."""
+"""Community client (community.py): snapshot sync + translation discovery."""
 
 from __future__ import annotations
 
@@ -12,10 +12,12 @@ import pytest
 from aiohttp import web
 
 from moru_engine.community import (
+    find_translation,
     load_user_glossary_terms,
     merge_extracted_terms,
     sync_community,
 )
+from moru_engine.scanner.pack_identity import PackIdentity, VersionRange
 from moru_engine.tm import META_LAST_SHARED_VERSION, LocalTM
 
 
@@ -115,13 +117,18 @@ async def test_sync_merges_tm_and_glossary(
     # origins: scope=vanilla -> origin=vanilla, everything else community.
     terms = load_user_glossary_terms(store, "en_us", "ko_kr")
     assert terms == [
-        {"source": "Void Orb", "target": "공허 구슬", "origin": "community"},
-        {"source": "Creeper", "target": "크리퍼", "origin": "vanilla"},
+        {
+            "source": "Void Orb",
+            "target": "공허 구슬",
+            "origin": "community",
+            "key_scope": [],
+        },
+        {"source": "Creeper", "target": "크리퍼", "origin": "vanilla", "key_scope": []},
     ]
 
 
 @pytest.mark.asyncio
-async def test_shared_row_outranks_local_and_manual_rows_survive(
+async def test_local_row_outranks_shared_and_manual_rows_survive(
     aiohttp_server: Any, tm: LocalTM, tmp_path: Path
 ) -> None:
     # Machine-cached local row under the run fingerprint...
@@ -162,8 +169,17 @@ async def test_shared_row_outranks_local_and_manual_rows_survive(
 
     await sync_community(url, "en_us", "ko_kr", tm, store)
 
-    # Human-approved community row wins over the fingerprint-local row.
-    assert tm.lookup("Storm Hammer", "ko_kr", "fp1") == "폭풍 망치 (승인)"
+    # The local row was produced under exactly the glossary fingerprint the
+    # run is using; the shared row is approved against no glossary and its
+    # constant version never invalidates. So the local row wins — otherwise
+    # editing the glossary could never override a community row, because
+    # the edit invalidates only the local side. Community corrections still
+    # reach the run through the shared GLOSSARY snapshot merged above, which
+    # does change the fingerprint.
+    assert tm.lookup("Storm Hammer", "ko_kr", "fp1") == "기계 번역"
+    # The shared row remains the fallback wherever there is no local row,
+    # which is what the snapshot exists for.
+    assert tm.lookup("Storm Hammer", "ko_kr", "other-fp") == "폭풍 망치 (승인)"
     terms = load_user_glossary_terms(store, "en_us", "ko_kr")
     origins = {t["source"]: t["origin"] for t in terms}
     # Manual/extracted rows kept; stale community AND vanilla rows replaced.
@@ -248,3 +264,311 @@ def test_merge_extracted_terms_appends_without_shadowing(tmp_path: Path) -> None
 
     # Nothing new -> no rewrite, count 0.
     assert merge_extracted_terms(store, "en_us", "ko_kr", [("Mana", "마나")]) == 0
+
+
+# -- translation-pack discovery ------------------------------------------------
+
+
+class FakeIndex:
+    """Minimal moru.gg /api/translations/compatible index."""
+
+    def __init__(self, *candidates: dict[str, Any]) -> None:
+        self.candidates = list(candidates)
+        self.queries: list[dict[str, str]] = []
+        self.status = 200
+
+    def app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_get("/api/translations/compatible", self._list)
+        return app
+
+    async def _list(self, request: web.Request) -> web.Response:
+        self.queries.append(dict(request.query))
+        if self.status != 200:
+            return web.json_response({"error": "none"}, status=self.status)
+        return web.json_response({"candidates": self.candidates})
+
+
+def _candidate(version: str, **extra: Any) -> dict[str, Any]:
+    """A published pack for the sample modpack (MC 1.20.1)."""
+    return {
+        "pack_id": f"pack-{version}",
+        "modpack_version": version,
+        "mc_version": "1.20.1",
+        "target_lang": "ko_kr",
+        "compatible_versions": None,
+        "url": f"https://moru.gg/packs/pack-{version}",
+        **extra,
+    }
+
+
+def _identity(version: str | None = "4.1.2", **extra: Any) -> PackIdentity:
+    return PackIdentity(
+        name="Society Sunlit Valley",
+        version=version,
+        mc_version="1.20.1",
+        loader="forge",
+        source="curseforge_manifest",
+        confident=True,
+        **extra,
+    )
+
+
+async def _index(aiohttp_server: Any, fake: FakeIndex) -> str:
+    server = await aiohttp_server(fake.app())
+    return f"http://{server.host}:{server.port}"
+
+
+async def test_rangeless_pack_still_resolves_by_exact_version(
+    aiohttp_server: Any,
+) -> None:
+    """Back-compat: a pack published before ranges existed matches its own
+    modpack version and nothing else."""
+    fake = FakeIndex(_candidate("4.1.2"), _candidate("4.0.0"))
+    url = await _index(aiohttp_server, fake)
+
+    match = await find_translation(url, _identity("4.1.2"), "ko_kr")
+
+    assert match is not None
+    assert (match.pack_id, match.exact) == ("pack-4.1.2", True)
+    assert match.compatible_versions is None
+    assert match.note == "4.1.2 버전용으로 제작된 번역팩입니다."
+
+    # A minor bump finds nothing: no pack claimed anything about 4.1.3.
+    assert await find_translation(url, _identity("4.1.3"), "ko_kr") is None
+
+
+async def test_declared_range_covers_a_minor_modpack_bump(
+    aiohttp_server: Any,
+) -> None:
+    fake = FakeIndex(
+        _candidate("4.1.2", compatible_versions={"min": "4.1.2", "max": "4.2.0"})
+    )
+    url = await _index(aiohttp_server, fake)
+
+    match = await find_translation(url, _identity("4.1.5"), "ko_kr")
+
+    assert match is not None
+    assert (match.pack_id, match.exact) == ("pack-4.1.2", False)
+    assert match.compatible_versions == VersionRange(min="4.1.2", max="4.2.0")
+    assert match.note == (
+        "4.1.2 버전용 번역팩이지만 4.1.2~4.2.0 버전과 호환된다고 표시되어 있습니다."
+    )
+
+    # Outside the declared range -> nothing, however "close" it looks.
+    assert await find_translation(url, _identity("4.3.0"), "ko_kr") is None
+
+
+async def test_minecraft_version_is_a_hard_boundary(aiohttp_server: Any) -> None:
+    """pack_format and the vanilla lang-key set change between releases, so a
+    range never carries a pack across one."""
+    fake = FakeIndex(
+        _candidate(
+            "4.1.2",
+            mc_version="1.21.1",
+            compatible_versions={"min": "4.1.2", "max": "9.9.9"},
+        )
+    )
+    url = await _index(aiohttp_server, fake)
+
+    assert await find_translation(url, _identity("4.1.5"), "ko_kr") is None
+    # Not even the exact modpack version crosses it.
+    assert await find_translation(url, _identity("4.1.2"), "ko_kr") is None
+
+
+async def test_range_needs_the_boundary_known_on_both_sides(
+    aiohttp_server: Any,
+) -> None:
+    """An unknown Minecraft version is the folder-name fallback: nothing was
+    established, so only the exact version may match."""
+    fake = FakeIndex(
+        _candidate("4.1.2", compatible_versions={"min": "4.1.2", "max": "4.2.0"}),
+        _candidate("3.0.0", mc_version=None),
+    )
+    url = await _index(aiohttp_server, fake)
+
+    local = PackIdentity(name="Society Sunlit Valley", version="4.1.5")
+    assert await find_translation(url, local, "ko_kr") is None
+
+    # The candidate that carries no Minecraft version is capped the same way.
+    exact = await find_translation(url, _identity("3.0.0"), "ko_kr")
+    assert exact is not None
+    assert (exact.pack_id, exact.exact) == ("pack-3.0.0", True)
+
+
+async def test_unparseable_version_degrades_to_exact_match(
+    aiohttp_server: Any,
+) -> None:
+    fake = FakeIndex(
+        _candidate(
+            "6.5.4hotfix",
+            compatible_versions={"min": "6.5.4hotfix", "max": "6.6.0"},
+        )
+    )
+    url = await _index(aiohttp_server, fake)
+
+    # No ordering exists for "hotfix", so another version is never served.
+    assert await find_translation(url, _identity("6.5.5"), "ko_kr") is None
+    assert await find_translation(url, _identity("1.20.1-3.2b"), "ko_kr") is None
+
+    match = await find_translation(url, _identity("v6.5.4hotfix"), "ko_kr")
+    assert match is not None
+    assert (match.pack_id, match.exact) == ("pack-6.5.4hotfix", True)
+
+
+async def test_partial_match_reports_the_entries_it_does_not_cover(
+    aiohttp_server: Any,
+) -> None:
+    """The primary report: per category, so a shrunken category cannot mask a
+    grown one (the "they added a few optimization mods" case)."""
+    fake = FakeIndex(
+        _candidate(
+            "4.1.2",
+            compatible_versions={"min": "4.1.2", "max": "4.2.0"},
+            total_entries=41_588,
+            categories={"mods": 40_120, "quests": 1_468},
+        )
+    )
+    url = await _index(aiohttp_server, fake)
+    local = {"mods": 40_532, "quests": 1_300}
+
+    match = await find_translation(
+        url, _identity("4.2.0"), "ko_kr", local_categories=local
+    )
+
+    assert match is not None
+    # quests shrank by 168, mods grew by 412: only the growth is claimed.
+    assert match.uncovered_entries == 412
+    assert match.uncovered_by_category == {"mods": 412}
+    assert "최소 412개" in match.note
+
+    # Without the local side there is no coverage claim at all.
+    unmeasured = await find_translation(url, _identity("4.2.0"), "ko_kr")
+    assert unmeasured is not None
+    assert unmeasured.uncovered_entries is None
+    assert "412" not in unmeasured.note
+
+
+async def test_unaligned_category_names_compare_totals_not_partially(
+    aiohttp_server: Any,
+) -> None:
+    """A registered pack's stats.categories uses the pipeline's coarse
+    buckets ("scripts", "quests"), while the scan payload names categories
+    for display ("KubeJS", "FTB Quests"). With no key in common the two sides
+    collapse to totals - reporting each unmatched local category as fully
+    uncovered would invent thousands of missing entries."""
+    fake = FakeIndex(
+        _candidate(
+            "4.1.2",
+            total_entries=8_036,
+            categories={"quests": 1_657, "scripts": 5_688, "guidebook": 691},
+        )
+    )
+    url = await _index(aiohttp_server, fake)
+    scan_named = {"FTB Quests": 1_657, "KubeJS": 5_728, "Patchouli Books": 691}
+
+    match = await find_translation(
+        url, _identity("4.1.2"), "ko_kr", local_categories=scan_named
+    )
+
+    assert match is not None
+    assert match.uncovered_entries == 40  # 8076 local - 8036 covered
+    assert match.uncovered_by_category == {"": 40}
+
+
+async def test_coverage_falls_back_to_the_total_for_a_pack_without_categories(
+    aiohttp_server: Any,
+) -> None:
+    fake = FakeIndex(_candidate("4.1.2", total_entries=41_588))
+    url = await _index(aiohttp_server, fake)
+
+    match = await find_translation(
+        url,
+        _identity("4.1.2"),
+        "ko_kr",
+        local_categories={"mods": 40_532, "quests": 1_300},
+    )
+
+    assert match is not None
+    assert match.uncovered_entries == 244  # 41832 local - 41588 covered
+    assert match.uncovered_by_category == {"": 244}
+
+
+async def test_fully_covered_match_says_so_without_a_percentage(
+    aiohttp_server: Any,
+) -> None:
+    fake = FakeIndex(
+        _candidate("4.1.2", total_entries=41_588, categories={"mods": 41_588})
+    )
+    url = await _index(aiohttp_server, fake)
+
+    match = await find_translation(
+        url, _identity("4.1.2"), "ko_kr", local_categories={"mods": 41_000}
+    )
+
+    assert match is not None
+    assert (match.uncovered_entries, match.uncovered_by_category) == (0, {})
+    assert "빠진 항목은 확인되지 않았습니다" in match.note
+    assert "%" not in match.note
+
+
+async def test_best_match_prefers_exact_then_coverage_then_newest(
+    aiohttp_server: Any,
+) -> None:
+    ranged = {"min": "4.0.0", "max": "4.9.9"}
+    fake = FakeIndex(
+        _candidate("4.0.0", compatible_versions=ranged, categories={"mods": 42_000}),
+        _candidate("4.1.0", compatible_versions=ranged, categories={"mods": 100}),
+        _candidate("4.1.5", compatible_versions=ranged, categories={"mods": 90}),
+    )
+    url = await _index(aiohttp_server, fake)
+    local = {"mods": 41_000}
+
+    # Coverage outranks recency: the newest pack covers almost nothing.
+    covered = await find_translation(
+        url, _identity("4.2.0"), "ko_kr", local_categories=local
+    )
+    assert covered is not None
+    assert (covered.pack_id, covered.uncovered_entries) == ("pack-4.0.0", 0)
+
+    # Unmeasured, the newest compatible version wins instead.
+    newest = await find_translation(url, _identity("4.2.0"), "ko_kr")
+    assert newest is not None and newest.pack_id == "pack-4.1.5"
+
+    # An exact match outranks both.
+    exact = await find_translation(
+        url, _identity("4.1.0"), "ko_kr", local_categories=local
+    )
+    assert exact is not None
+    assert (exact.pack_id, exact.exact) == ("pack-4.1.0", True)
+
+
+async def test_nothing_published_is_a_clean_none(aiohttp_server: Any) -> None:
+    fake = FakeIndex()
+    url = await _index(aiohttp_server, fake)
+    assert await find_translation(url, _identity(), "ko_kr") is None
+
+    fake.status = 404
+    assert await find_translation(url, _identity(), "ko_kr") is None
+
+
+async def test_query_narrows_by_curseforge_id_and_skips_a_nameless_pack(
+    aiohttp_server: Any,
+) -> None:
+    fake = FakeIndex(_candidate("4.1.2"))
+    url = await _index(aiohttp_server, fake)
+
+    await find_translation(
+        url, _identity("4.1.2", curseforge_project_id=925200), "ko_kr"
+    )
+    assert fake.queries[-1] == {
+        "target_lang": "ko_kr",
+        "modpack_name": "Society Sunlit Valley",
+        "curseforge_id": "925200",
+        "modpack_version": "4.1.2",
+        "mc_version": "1.20.1",
+    }
+
+    # Nothing to narrow by -> no request at all.
+    assert await find_translation(url, PackIdentity(version="4.1.2"), "ko_kr") is None
+    assert len(fake.queries) == 1

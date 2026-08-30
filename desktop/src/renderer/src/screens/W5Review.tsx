@@ -16,6 +16,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { Entry, EntryStatus } from "../../../shared/engine";
+import {
+  McText,
+  STATUS_COLOR,
+  STATUS_LABEL_KEY,
+  StatusIcon,
+  TokenText,
+  tokenColorMap,
+  useTokenPatterns,
+} from "@/components/EntryText";
 import { TranslationGraphView } from "@/components/TranslationGraphView";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
@@ -33,209 +42,21 @@ interface EntryRef {
   file: string;
 }
 
-type EntryFilter = "all" | "failed" | "warning" | "modified";
-const FILTERS: readonly EntryFilter[] = ["all", "failed", "warning", "modified"];
+/**
+ * The review screen's chip set: a subset of the engine's `EntryFilter`
+ * buckets. Review triages a finished run, so it shows only the outcomes a
+ * run produces; `pending`/`flagged`/`stale_source` belong to hand
+ * translation and live on W5Manual.
+ */
+type ReviewFilter = "all" | "failed" | "warning" | "modified";
+const FILTERS: readonly ReviewFilter[] = ["all", "failed", "warning", "modified"];
 
-/* ---- status presentation -------------------------------------------- */
-
-const STATUS_COLOR: Record<EntryStatus, string> = {
-  passed: "#3DDC84",
-  warning: "#F5B454",
-  failed: "#F26B6B",
-  modified: "#6BB3F5",
-  // Reuse shares one hue across the app; the glyph tells TM from migrated.
-  tm_hit: "#A78BFA",
-  migrated: "#A78BFA",
-  skipped: "#6A7C74",
-};
-
-const FILTER_COLOR: Record<EntryFilter, string> = {
+const FILTER_COLOR: Record<ReviewFilter, string> = {
   all: "#3DDC84",
   failed: "#F26B6B",
   warning: "#F5B454",
   modified: "#6BB3F5",
 };
-
-function StatusIcon({ status, size = 12 }: { status: EntryStatus; size?: number }): ReactNode {
-  const s = size - 4;
-  let glyph: ReactNode;
-  switch (status) {
-    case "failed":
-      glyph = (
-        <svg width={s} height={s} viewBox="0 0 8 8" fill="none" stroke="#0A100D" strokeWidth="2">
-          <path d="M2 2 L6 6 M6 2 L2 6" />
-        </svg>
-      );
-      break;
-    case "warning":
-      glyph = (
-        <svg width={s} height={s} viewBox="0 0 8 8" shapeRendering="crispEdges">
-          <rect x="3" y="1" width="2" height="4" fill="#0A100D" />
-          <rect x="3" y="6" width="2" height="1" fill="#0A100D" />
-        </svg>
-      );
-      break;
-    case "modified":
-      glyph = (
-        <svg width={s} height={s} viewBox="0 0 8 8" fill="none" stroke="#0A100D" strokeWidth="1.5">
-          <path d="M1 6 L5 2 L7 4 L3 8 Z" fill="#0A100D" />
-        </svg>
-      );
-      break;
-    case "tm_hit":
-      glyph = (
-        <svg width={s} height={s} viewBox="0 0 8 8" shapeRendering="crispEdges">
-          <rect x="1" y="1" width="6" height="2" fill="#0A100D" />
-          <rect x="1" y="5" width="6" height="2" fill="#0A100D" />
-        </svg>
-      );
-      break;
-    case "migrated":
-      glyph = (
-        <svg width={s} height={s} viewBox="0 0 8 8" fill="none" stroke="#0A100D" strokeWidth="1.5">
-          <path d="M1 2 H5 V1 L7 3 L5 5 V4 H1 Z" fill="#0A100D" />
-          <path d="M7 6 H3 V7 L1 5 L3 3 V4 H7 Z" fill="#0A100D" />
-        </svg>
-      );
-      break;
-    case "skipped":
-      glyph = (
-        <svg width={s} height={s} viewBox="0 0 8 8" shapeRendering="crispEdges">
-          <rect x="1" y="3" width="6" height="2" fill="#0A100D" />
-        </svg>
-      );
-      break;
-    default:
-      glyph = (
-        <svg width={s} height={s} viewBox="0 0 8 8" fill="none" stroke="#0A100D" strokeWidth="2">
-          <path d="M1 4 L3 6 L7 2" />
-        </svg>
-      );
-  }
-  return (
-    <div
-      className="flex items-center justify-center"
-      style={{ width: size, height: size, background: STATUS_COLOR[status] }}
-    >
-      {glyph}
-    </div>
-  );
-}
-
-/* ---- placeholder token highlighting ---------------------------------- */
-
-const TOKEN_SRC = String.raw`\{\{[^{}]*\}\}|\{[^{}]*\}|<[^<>]+>|%(?:\d+\$)?[A-Za-z]|§.|\\n`;
-const TOKEN_SPLIT = new RegExp(`(${TOKEN_SRC})`, "g");
-const TOKEN_EXACT = new RegExp(`^(?:${TOKEN_SRC})$`);
-
-/** accent -> blue -> purple -> amber, cycling; same token = same color. */
-const TOKEN_PALETTE = [
-  { color: "#3DDC84", bg: "rgba(61,220,132,0.15)", border: "rgba(61,220,132,0.3)" },
-  { color: "#6BB3F5", bg: "rgba(107,179,245,0.15)", border: "rgba(107,179,245,0.3)" },
-  { color: "#A78BFA", bg: "rgba(167,139,250,0.15)", border: "rgba(167,139,250,0.3)" },
-  { color: "#F5B454", bg: "rgba(245,180,84,0.15)", border: "rgba(245,180,84,0.3)" },
-];
-
-function tokenColorMap(...texts: string[]): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const text of texts) {
-    for (const part of text.split(TOKEN_SPLIT)) {
-      if (part !== "" && TOKEN_EXACT.test(part) && !map.has(part)) {
-        map.set(part, map.size % TOKEN_PALETTE.length);
-      }
-    }
-  }
-  return map;
-}
-
-function TokenText({ text, colors }: { text: string; colors: Map<string, number> }): ReactNode {
-  const parts = text.split(TOKEN_SPLIT).filter((p) => p !== "");
-  return (
-    <>
-      {parts.map((part, i) => {
-        const idx = TOKEN_EXACT.test(part) ? colors.get(part) : undefined;
-        if (idx === undefined) return <span key={i}>{part}</span>;
-        const p = TOKEN_PALETTE[idx];
-        return (
-          <span
-            key={i}
-            className="border px-[3px] font-mono text-[11px]"
-            style={{ background: p.bg, color: p.color, borderColor: p.border }}
-          >
-            {part}
-          </span>
-        );
-      })}
-    </>
-  );
-}
-
-/* ---- Minecraft § color rendering -------------------------------------- */
-
-const MC_COLORS: Record<string, string> = {
-  "0": "#000000",
-  "1": "#0000AA",
-  "2": "#00AA00",
-  "3": "#00AAAA",
-  "4": "#AA0000",
-  "5": "#AA00AA",
-  "6": "#FFAA00",
-  "7": "#AAAAAA",
-  "8": "#555555",
-  "9": "#5555FF",
-  a: "#55FF55",
-  b: "#55FFFF",
-  c: "#FF5555",
-  d: "#FF55FF",
-  e: "#FFFF55",
-  f: "#FFFFFF",
-};
-
-/** Renders text split on §-codes with approximate Minecraft colors/styles. */
-function McText({ text }: { text: string }): ReactNode {
-  const parts = text.split(/(§.)/);
-  const spans: ReactNode[] = [];
-  let color: string | null = null;
-  let bold = false;
-  let italic = false;
-  let underline = false;
-  let strike = false;
-  parts.forEach((part, i) => {
-    if (part.length === 2 && part.startsWith("§")) {
-      const code = part[1].toLowerCase();
-      if (MC_COLORS[code] !== undefined) {
-        color = MC_COLORS[code];
-        bold = italic = underline = strike = false;
-      } else if (code === "l") bold = true;
-      else if (code === "o") italic = true;
-      else if (code === "n") underline = true;
-      else if (code === "m") strike = true;
-      else if (code === "r") {
-        color = null;
-        bold = italic = underline = strike = false;
-      }
-      return;
-    }
-    if (part === "") return;
-    const deco = [underline ? "underline" : null, strike ? "line-through" : null]
-      .filter((d) => d !== null)
-      .join(" ");
-    spans.push(
-      <span
-        key={i}
-        style={{
-          color: color ?? undefined,
-          fontWeight: bold ? 700 : undefined,
-          fontStyle: italic ? "italic" : undefined,
-          textDecoration: deco === "" ? undefined : deco,
-        }}
-      >
-        {part}
-      </span>,
-    );
-  });
-  return <>{spans}</>;
-}
 
 /* ---- small pieces ------------------------------------------------------ */
 
@@ -270,6 +91,9 @@ function errorText(err: unknown): string {
 
 export function W5Review() {
   const { t } = useTranslation();
+  // Shares the engine-installed placeholder grammar with the manual surface,
+  // so both screens agree with the validator about what a placeholder is.
+  useTokenPatterns();
   const go = useRouter((s) => s.go);
   const sessionId = useWizard((s) => s.sessionId);
   const modpackName = useWizard((s) => s.modpackName);
@@ -285,7 +109,7 @@ export function W5Review() {
   const model = useWizard((s) => s.model) ?? settingsModel;
   const queryClient = useQueryClient();
 
-  const [filter, setFilter] = useState<EntryFilter>("all");
+  const [filter, setFilter] = useState<ReviewFilter>("all");
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   // Debounced copy of `search`; drives the query so typing stays snappy.
@@ -331,7 +155,7 @@ export function W5Review() {
     })),
   });
   const counts = useMemo(() => {
-    const map = {} as Record<EntryFilter, number | null>;
+    const map = {} as Record<ReviewFilter, number | null>;
     FILTERS.forEach((f, i) => {
       map[f] = countQueries[i].data?.total ?? null;
     });
@@ -375,7 +199,7 @@ export function W5Review() {
   const patchMut = useMutation({
     mutationFn: async ({ key, file, text }: EntryRef & { text: string }) => {
       const jobId = translateJobId as string;
-      const entry = await api.patchEntry(jobId, key, text, file);
+      const entry = await api.commitEntry(jobId, key, text, { file });
       await refreshStats(jobId);
       return entry;
     },
@@ -484,24 +308,7 @@ export function W5Review() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const statusLabel = (s: EntryStatus): string => {
-    switch (s) {
-      case "passed":
-        return t("common.status.passed");
-      case "warning":
-        return t("common.status.warning");
-      case "failed":
-        return t("common.status.failed");
-      case "modified":
-        return t("common.status.modified");
-      case "tm_hit":
-        return t("common.status.tmHit");
-      case "migrated":
-        return t("common.status.migrated");
-      default:
-        return t("common.status.skipped");
-    }
-  };
+  const statusLabel = (s: EntryStatus): string => t(STATUS_LABEL_KEY[s]);
 
   const stepHeader = (
     <div className="mb-2 flex items-center gap-[10px] font-mono text-[11px] font-semibold tracking-[0.08em] text-text3 uppercase">
@@ -549,7 +356,7 @@ export function W5Review() {
       ? new Map<string, number>()
       : tokenColorMap(selected.source_text, selected.translated_text);
 
-  const chip = (f: EntryFilter): ReactNode => {
+  const chip = (f: ReviewFilter): ReactNode => {
     const c = FILTER_COLOR[f];
     const active = filter === f;
     const count = counts[f];
@@ -973,6 +780,15 @@ export function W5Review() {
               <path d="M2 10H10" />
             </svg>
             {t("w5.detail.exportSession")}
+          </button>
+          <button
+            onClick={() => go("w5m")}
+            className="flex items-center gap-[6px] border border-edge bg-card px-3.5 py-[8px] text-[12px] font-semibold text-text2 hover:border-accent hover:text-accent"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M2 10 L4 10 L10 4 L8 2 L2 8 Z" />
+            </svg>
+            {t("w5.handRefine")}
           </button>
         </div>
         <div className="flex items-center gap-3">

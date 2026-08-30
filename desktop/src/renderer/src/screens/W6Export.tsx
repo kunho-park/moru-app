@@ -10,7 +10,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { JobEventFrame, UploadParams } from "../../../shared/engine";
+import type { JobEventFrame, PipelineStats, UploadParams } from "../../../shared/engine";
 import { api, openJobEvents } from "@/lib/api";
 import { moru } from "@/lib/bridge";
 import { formatCompact, formatDuration, formatInt, formatUsd, packInitials } from "@/lib/format";
@@ -335,6 +335,8 @@ export function W6Export() {
           )}
         </div>
       </div>
+
+      <UndeliverableBand />
 
       {/* Export + Share */}
       <div className="mb-5 grid grid-cols-2 gap-4">
@@ -881,6 +883,84 @@ export function W6Export() {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * What the band should show, or null to render nothing.
+ *
+ * Split out from the component because the "nothing to show" decision is
+ * the load-bearing part: a jar file whose guidebook definition holds only
+ * lang keys produced no translation to lose, and the engine already
+ * refuses to count it, so a non-zero file count here always means real
+ * lost text. Zero must stay invisible.
+ */
+export function undeliverableSummary(
+  stats: PipelineStats | null | undefined,
+): { files: number; entries: number; mods: string[] } | null {
+  const files = stats?.undeliverable_jar_files ?? 0;
+  if (files <= 0) return null;
+  return {
+    files,
+    entries: stats?.undeliverable_jar_entries ?? 0,
+    mods: stats?.undeliverable_jar_mods ?? [],
+  };
+}
+
+/**
+ * Translations that succeeded but cannot be installed.
+ *
+ * A guidebook definition lives inside the mod jar's own `data/` tree, and
+ * Patchouli reads it straight out of the jar rather than through the
+ * resource-pack or data-pack stack — so nothing we ship can override it.
+ *
+ * Deliberately NOT the hardcoded-text band on W2Scan, in wording or in
+ * placement. That one means "we could not translate this" and the fix
+ * belongs to the mod author; this one means "we translated it but cannot
+ * install it" and the fix is repackaging the jar. Different next action,
+ * different phase, different screen.
+ *
+ * Renders nothing at zero, which is the normal case: a real 330-jar pack
+ * produced exactly one. An always-present empty warning would only teach
+ * users to ignore the panel beside it.
+ */
+function UndeliverableBand(): React.JSX.Element | null {
+  const { t } = useTranslation();
+  const found = undeliverableSummary(useWizard((s) => s.stats));
+  if (found === null) return null;
+  const { files, entries, mods } = found;
+
+  return (
+    <div className="mb-7 border border-amber/40 bg-[rgba(245,180,84,0.05)] px-5 py-4">
+      <div className="mb-1.5 flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-[0.06em] text-amber">
+        <div className="h-3 w-1 bg-amber" />
+        {t("w6.undeliverable.header")}
+        <span className="font-normal normal-case tracking-normal text-text3">
+          {t("w6.undeliverable.summary", {
+            files: formatInt(files),
+            entries: formatInt(entries),
+          })}
+        </span>
+      </div>
+      <p className="m-0 mb-2 text-[12px] leading-relaxed text-text2">
+        {t("w6.undeliverable.body")}
+      </p>
+      {mods.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1">
+          {mods.map((mod) => (
+            <span
+              key={mod}
+              className="border border-edge bg-bar px-[5px] py-[2px] font-mono text-[10px] text-text2"
+            >
+              {mod}
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="m-0 text-[11px] leading-relaxed text-text3">
+        {t("w6.undeliverable.hint")}
+      </p>
     </div>
   );
 }

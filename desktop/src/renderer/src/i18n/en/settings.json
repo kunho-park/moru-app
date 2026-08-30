@@ -41,9 +41,10 @@
     "empty": "No providers available",
     "cliSubscription": "Subscription",
     "cliConnected": "Connected",
-    "cliDisconnected": "Login needed",
+    "cliDisconnected": "Unavailable",
     "cliReady": "Runs on your installed CLI's existing login — no API key required.",
-    "cliLoginHint": "Run `{{cmd}}` in a terminal to connect."
+    "cliLoginHint": "Run `{{cmd}}` in a terminal to connect.",
+    "cliBlocked": "Signed in, but not usable yet: {{reason}}"
   },
   "general": {
     "title": "App preferences",

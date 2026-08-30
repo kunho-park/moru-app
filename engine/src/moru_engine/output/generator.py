@@ -26,7 +26,7 @@ import logging
 import re
 import shutil
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
@@ -35,30 +35,123 @@ import aiofiles
 from ..handlers.base import create_default_registry
 from ..parsers import BaseParser, LangParser, ParserError
 from ..utils.locale_helper import replace_locale_in_path
+from .bilingual import annotate_entries
+from .mcmeta_text import fit_description
 
 logger = logging.getLogger(__name__)
 
-#: MC 1.20-1.20.1 fallback. Known legacy versions are resolved from launcher
-#: metadata before generation so their packs load without a compatibility error.
+#: Used only when the modpack's Minecraft version cannot be determined at
+#: all. A resolved version always maps through :data:`RESOURCE_PACK_FORMATS`.
 DEFAULT_PACK_FORMAT = 15
+
+#: Resource-pack format from which ``pack.mcmeta`` swapped ``pack_format``
+#: for a required ``min_format``/``max_format`` pair and dropped
+#: ``supported_formats`` (MC 1.21.9, snapshot 25w31a). Emitting a single
+#: ``pack_format`` integer at or above this format is structurally wrong,
+#: not merely a stale number.
+MINOR_VERSION_ERA_FORMAT = 65
 
 RESOURCEPACK_DIRNAME = "resourcepack"
 OVERRIDES_DIRNAME = "overrides"
+
+#: Subdirectory holding the bilingual variant's own resourcepack/overrides
+#: pair, so both variants ship from one run without colliding.
+BILINGUAL_DIRNAME = "bilingual"
+#: Appended to the bilingual pack's description. The two packs are otherwise
+#: byte-identical in layout, so this is the only in-game way to tell them
+#: apart in the resource-pack list. Kept to 28px (a bracket form rather than
+#: a parenthesised phrase) so that even the longest realistic version prefix
+#: still leaves the whole description inside the two-visual-line budget —
+#: see output/mcmeta_text.py.
+BILINGUAL_DESCRIPTION_SUFFIX = " §8[병기]"
+
+#: First Minecraft release using each RESOURCE-pack ``pack_format``, newest
+#: first, so a lookup is "the first entry that is <= the target version".
+#:
+#: RESOURCE-pack values only. The data-pack line diverged at 1.18.2
+#: (resource 8 / data 9) and has never re-synced, so the two must never
+#: share a constant. Values 10, 23 and 27 never existed for resource packs;
+#: the remaining gaps are formats that only ever shipped in snapshots.
+#: Source: https://minecraft.wiki/w/Pack_format, resource-pack table.
+RESOURCE_PACK_FORMATS: tuple[tuple[tuple[int, ...], int], ...] = (
+    ((26, 2), 88),
+    ((26, 1), 84),
+    ((1, 21, 11), 75),
+    ((1, 21, 9), 69),
+    ((1, 21, 7), 64),
+    ((1, 21, 6), 63),
+    ((1, 21, 5), 55),
+    ((1, 21, 4), 46),
+    ((1, 21, 2), 42),
+    ((1, 21), 34),
+    ((1, 20, 5), 32),
+    ((1, 20, 3), 22),
+    ((1, 20, 2), 18),
+    ((1, 20), 15),
+    ((1, 19, 4), 13),
+    ((1, 19, 3), 12),
+    ((1, 19), 9),
+    ((1, 18), 8),
+    ((1, 17), 7),
+    ((1, 16, 2), 6),
+    ((1, 15), 5),
+    ((1, 13), 4),
+    ((1, 11), 3),
+    ((1, 9), 2),
+    ((1, 6, 1), 1),
+)
+
+#: A bare release number — "1.20.1", "1.21", "26.2". Anchored, because
+#: ``PackIdentity.mc_version`` comes from launcher metadata and is exactly
+#: this.
+_RELEASE_RE = re.compile(r"^v?(\d{1,4}(?:\.\d+){0,3})$")
+#: Fallback for a version embedded in prose ("Forge 1.12.2"). Restricted to
+#: the ``1.x`` scheme: an unanchored search for the post-1.21.11 ``YY.N``
+#: scheme would just as happily match a mod-loader version.
+_EMBEDDED_RELEASE_RE = re.compile(r"(?<!\d)(1\.\d+(?:\.\d+)?)(?!\d)")
+
+
+def _release_tuple(mc_version: str) -> tuple[int, ...] | None:
+    """Numeric release tuple, or None when there is no release number.
+
+    Comparable across the numbering change: Minecraft went ``1.21.11`` ->
+    ``26.1``, and ``(26, 1) > (1, 21, 11)`` holds, whereas naive string or
+    semver comparison misorders them.
+    """
+    stripped = mc_version.strip()
+    match = _RELEASE_RE.match(stripped) or _EMBEDDED_RELEASE_RE.search(stripped)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
 
 def pack_format_for_minecraft_version(
     mc_version: str | None,
     fallback: int = DEFAULT_PACK_FORMAT,
 ) -> int:
-    """Return the resource-pack format for legacy versions we can prove.
+    """Return the resource-pack format for a Minecraft version.
 
-    Forge 1.12 requires format 3 and lowercase asset names. Unknown/newer
-    versions retain the configured fallback rather than guessing.
+    A wrong ``pack_format`` can stop the generated pack from loading at
+    all, so every release from 1.6.1 onward is mapped explicitly instead of
+    guessed — the previous two-value approximation (3, else 15) was right
+    only for 1.11-1.12.2 and 1.20-1.20.1.
+
+    Unknown or unparseable versions keep ``fallback`` rather than guessing.
+    A version NEWER than the table resolves to the newest known format:
+    declaring a format older than the running game's yields a "made for an
+    older version" warning and the pack still loads, whereas fabricating a
+    higher number can be rejected outright, so clamping downward is the
+    safe direction.
     """
     if mc_version is None:
         return fallback
-    match = re.search(r"(?<!\d)1\.(\d+)(?:\.\d+)?", mc_version)
-    if match is not None and int(match.group(1)) in {11, 12}:
-        return 3
+    release = _release_tuple(mc_version)
+    if release is None:
+        return fallback
+    for first_release, pack_format in RESOURCE_PACK_FORMATS:
+        if first_release <= release:
+            return pack_format
+    # Older than 1.6.1, which predates pack_format entirely.
     return fallback
 
 #: Bundled moru anvil icon, shipped as ``pack.png`` so the generated pack
@@ -111,9 +204,42 @@ class OutputConfig:
     target_locale: str = "ko_kr"
     pack_format: int = DEFAULT_PACK_FORMAT
     description: str = "§a모루§7로 번역됨 — §amoru.gg"
+    #: Also render the bilingual display-name variant into
+    #: ``output_dir/bilingual``. Off by default: callers that never upload
+    #: it should not pay for the second tree.
+    bilingual_names: bool = False
     #: Optional previous font definitions/files/textures. The migration index
     #: has already removed translated files and pack metadata.
     resourcepack_seed_dir: Path | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class JarDataLoss:
+    """One translated file that no installable channel can deliver.
+
+    A mod JAR's own ``data/`` tree is the one place a translation cannot
+    reach. Patchouli proves why: ``BookRegistry.init`` walks each mod
+    container's files directly and opens the hit with
+    ``Files.newInputStream(mod.getPath(file))``, so ``book.json`` never
+    passes through the resource-pack OR data-pack stack and nothing
+    outside the JAR can shadow it. The resource pack carries ``assets/``,
+    the overrides tree carries modpack-root files, and neither is a
+    channel for this.
+
+    This is NOT hardcoded text. Hardcoded text has no lang key at all, so
+    it was never translatable and the mod author has to change the mod.
+    Here the string WAS extracted and translated successfully; only
+    delivery is impossible, and patching the JAR is the only fix. The two
+    must stay separate in any report, because the user's next action
+    differs: nothing versus repackage the JAR yourself.
+    """
+
+    #: Path as scanned, inside the extraction cache.
+    source_path: str
+    #: JAR the file came out of, for attribution. "" when unattributable.
+    mod: str
+    #: Translations produced for this file and then dropped.
+    entry_count: int
 
 
 @dataclass(slots=True)
@@ -126,9 +252,11 @@ class GenerationResult:
     pack_icon: Path | None = None
     #: Files skipped because every entry already had a translation.
     skipped_existing: int = 0
-    #: Files skipped because they would require .jar patching.
-    skipped_jar_data: int = 0
+    #: Files whose translations were produced and then had nowhere to go.
+    jar_data_losses: list[JarDataLoss] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    #: Bilingual-variant pass, when ``OutputConfig.bilingual_names`` is set.
+    bilingual: GenerationResult | None = None
 
     @property
     def all_files(self) -> list[Path]:
@@ -137,11 +265,42 @@ class GenerationResult:
             files.append(self.pack_mcmeta)
         if self.pack_icon is not None:
             files.append(self.pack_icon)
+        if self.bilingual is not None:
+            files.extend(self.bilingual.all_files)
         return files
+
+    @property
+    def skipped_jar_data(self) -> int:
+        """Translated files lost to a JAR's internal ``data/`` tree."""
+        return len(self.jar_data_losses)
+
+    @property
+    def jar_data_loss_mods(self) -> list[str]:
+        """JARs owning at least one lost file, in first-seen order."""
+        seen: dict[str, None] = {}
+        for loss in self.jar_data_losses:
+            if loss.mod:
+                seen.setdefault(loss.mod, None)
+        return list(seen)
 
 
 def _norm(path: Path | str) -> str:
     return str(path).replace("\\", "/").lower()
+
+
+def jar_name_for(source_path: Path | str) -> str:
+    """JAR a scanner-extracted path came out of, else ``""``.
+
+    The scanner unpacks each archive to
+    ``.mct_cache/extracted/<jar name>/...``, so the segment after
+    ``extracted`` is the JAR — the only attribution available once a file
+    has been lifted out of its archive.
+    """
+    parts = str(source_path).replace("\\", "/").split("/")
+    for index, part in enumerate(parts):
+        if part.lower() == "extracted" and index + 1 < len(parts):
+            return parts[index + 1]
+    return ""
 
 
 def create_zip_from_directory(source_dir: Path, zip_path: Path) -> None:
@@ -218,11 +377,29 @@ class OutputGenerator:
         for file in files:
             routed = route_for(file.source_path)
             if routed is Route.SKIP_JAR_DATA:
-                result.skipped_jar_data += 1
-                logger.info(
-                    "Skipping JAR-internal data file (needs .jar patching): %s",
-                    file.source_path,
-                )
+                # A loss only when this run actually produced something for
+                # the file. A mod's book.json routinely holds nothing but
+                # lang keys (Botania's "item.botania.lexicon"), which the
+                # handler skips, so it yields no entries at all — counting
+                # it would report a loss the user cannot act on and cannot
+                # even see, since that title IS translated through the
+                # JAR's own lang file.
+                if file.fresh:
+                    result.jar_data_losses.append(
+                        JarDataLoss(
+                            source_path=str(file.source_path),
+                            mod=jar_name_for(file.source_path),
+                            entry_count=len(file.fresh),
+                        )
+                    )
+                    logger.info(
+                        "Cannot install %d translated entr%s for %s: a JAR's "
+                        "own data/ tree is not reachable by a resource pack "
+                        "or a data pack",
+                        len(file.fresh),
+                        "y" if len(file.fresh) == 1 else "ies",
+                        file.source_path,
+                    )
                 continue
             if routed is Route.SKIP_EXTRACTED:
                 logger.debug(
@@ -283,17 +460,111 @@ class OutputGenerator:
             result.skipped_jar_data,
             len(result.errors),
         )
+
+        if self.config.bilingual_names:
+            result.bilingual = await self._generate_bilingual(files)
         return result
+
+    # -- bilingual variant ---------------------------------------------------
+
+    async def _generate_bilingual(
+        self, files: list[FileOutput]
+    ) -> GenerationResult:
+        """Render the same trees again with display names carrying the source.
+
+        Built from the SAME entries the plain pass used — one translation
+        run, two variants, no extra model cost. The only thing the plain
+        pass does not carry is the *source* text, so each source file is
+        re-read for its original strings; ``_write_override`` and
+        ``_write_structured_asset`` already re-read the original the same
+        way, so the keys line up by construction.
+
+        Routing and writing then go through the identical code path (a
+        sibling generator rooted at ``output_dir/bilingual``), which is what
+        guarantees the two trees are structurally identical and differ only
+        in the annotated values.
+        """
+        cache: dict[Path, dict[str, str]] = {}
+        annotated: list[FileOutput] = []
+        for file in files:
+            sources = await self._source_entries(file.source_path, cache)
+            annotated.append(
+                replace(
+                    file,
+                    fresh=annotate_entries(file.fresh, sources),
+                    full=annotate_entries(file.full, sources),
+                )
+            )
+
+        sibling = OutputGenerator(
+            replace(
+                self.config,
+                output_dir=self.config.output_dir / BILINGUAL_DIRNAME,
+                description=(
+                    self.config.description + BILINGUAL_DESCRIPTION_SUFFIX
+                ),
+                bilingual_names=False,
+            )
+        )
+        return await sibling.generate(annotated)
+
+    async def _source_entries(
+        self, source_path: Path, cache: dict[Path, dict[str, str]]
+    ) -> dict[str, str]:
+        """Original strings of one source file, memoized for this run.
+
+        A read failure degrades to "annotate nothing in this file" — the
+        bilingual tree then simply matches the plain one there — rather
+        than failing generation over a cosmetic variant.
+        """
+        cached = cache.get(source_path)
+        if cached is not None:
+            return cached
+
+        entries: dict[str, str] = {}
+        try:
+            handler = self.registry.get_handler(source_path)
+            if handler is not None:
+                entries = dict(await handler.extract(source_path))
+            else:
+                parser = BaseParser.create_parser(source_path)
+                if parser is not None:
+                    entries = dict(await parser.parse())
+        except (OSError, ValueError, TypeError, ParserError) as exc:
+            logger.warning(
+                "Bilingual pass: cannot read source strings from %s: %s",
+                source_path,
+                exc,
+            )
+        cache[source_path] = entries
+        return entries
 
     # -- resource pack -----------------------------------------------------
 
     async def _write_pack_mcmeta(self) -> Path:
-        mcmeta = {
-            "pack": {
-                "pack_format": self.config.pack_format,
-                "description": self.config.description,
-            }
-        }
+        """Write ``pack.mcmeta`` using the target version's field set.
+
+        MC 1.21.9 (resource format 65) replaced ``pack_format`` with a
+        required ``min_format``/``max_format`` pair and disallowed
+        ``supported_formats``. A single ``pack_format`` integer is therefore
+        not merely stale for those versions, it is the wrong schema, so the
+        two eras emit different keys.
+
+        A bare integer means ``[N, 0]`` for ``min_format`` but "major N,
+        any minor" for ``max_format`` — deliberately asymmetric upstream —
+        which is exactly "this one target version".
+        """
+        pack_format = self.config.pack_format
+        pack: dict[str, object] = (
+            {"min_format": pack_format, "max_format": pack_format}
+            if pack_format >= MINOR_VERSION_ERA_FORMAT
+            else {"pack_format": pack_format}
+        )
+        # The selection screen drops overflow from the END, which is exactly
+        # where our attribution URL sits, and offers no tooltip to recover
+        # it. Fitting trims from the front instead so moru.gg survives.
+        pack["description"] = fit_description(self.config.description)
+        mcmeta = {"pack": pack}
         path = self.resourcepack_dir / "pack.mcmeta"
         path.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(path, "w", encoding="utf-8") as f:

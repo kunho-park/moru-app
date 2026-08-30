@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import dspy
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .. import batching
 from ..community import (
@@ -29,7 +29,12 @@ from ..community import (
     merge_extracted_terms,
 )
 from ..dspy_modules import GlossaryExtractor, build_lm, load_translator
-from ..dspy_modules.lm import token_usage
+from ..dspy_modules.lm import context_window_filled, is_transport_error, token_usage
+from ..dspy_modules.signatures import (
+    SpeechLevel,
+    TermStyle,
+    render_style_directives,
+)
 from ..glossary.pair_harvester import (
     TranslatedTerm,
     build_term_rules,
@@ -67,6 +72,21 @@ logger = logging.getLogger(__name__)
 ENTRY_TICKER_INTERVAL = 5
 #: Ticker frames truncate source/translated text to this many characters.
 TICKER_TEXT_LIMIT = 120
+
+#: Provider-request admission starts here for a locally hosted runtime.
+#: Ollama serves OLLAMA_NUM_PARALLEL (default 1) requests at a time and
+#: queues the rest with no queue-wait timeout, so the hosted default of 15
+#: buys no throughput there — it only inflates queue latency until it
+#: crosses the request timeout. The limiter grows back toward
+#: ``max_concurrent`` once the server proves it can take it.
+OLLAMA_START_CONCURRENT = 2
+#: Retries of the SAME batch after a transport failure before its entries
+#: are failed. Deliberately small: a saturated server needs less load, and
+#: a user-initiated "retry failed" is the right place for another attempt.
+MAX_TRANSPORT_RETRIES = 2
+#: First backoff after a transport failure; doubles per consecutive one.
+TRANSPORT_BACKOFF_BASE = 2.0
+TRANSPORT_BACKOFF_MAX = 60.0
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_./:-]+")
 _DOTTED_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
@@ -129,6 +149,10 @@ class EntryStatus(str, Enum):
     MIGRATED = "migrated"
     SKIPPED = "skipped"
     MODIFIED = "modified"
+    #: Seeded by a manual-seed run and not yet touched by a human. Deliberately
+    #: absent from _FRESH_STATUSES: an untranslated entry must never reach the
+    #: resource pack, so this is the one status that carries no output.
+    PENDING = "pending"
 
 
 class EntryResult(BaseModel):
@@ -157,6 +181,13 @@ class PipelineStats(BaseModel):
     duration_seconds: float = 0.0
     coverage_percent: float = 0.0
     quality_score: float = 0.0
+    #: Translated files a mod JAR's own data/ tree swallowed: Patchouli
+    #: reads book.json straight out of the JAR, so no resource pack or
+    #: data pack can carry our translation. NOT hardcoded text — that is
+    #: reported at scan time and was never translatable.
+    undeliverable_jar_files: int = 0
+    undeliverable_jar_entries: int = 0
+    undeliverable_jar_mods: list[str] = Field(default_factory=list)
 
     def finalize(self) -> None:
         done = self.translated_entries + self.tm_hits + self.migration_hits
@@ -176,6 +207,17 @@ class PipelineConfig(BaseModel):
     #: pack.mcmeta pack_format for the generated resource pack.
     pack_format: int = DEFAULT_PACK_FORMAT
 
+    #: Emit every entry's own source text instead of a translation. The run
+    #: makes no provider call at all (the W3 "export as source text" path):
+    #: extraction, routing and output generation are untouched, so the
+    #: generated trees hold the same files and keys as a translated run,
+    #: carrying the untranslated strings as their values.
+    source_text_only: bool = False
+
+    #: Also emit the bilingual display-name variant (resourcepack/overrides
+    #: rendered with the original in parentheses on short display names).
+    bilingual_names: bool = False
+
     model: str = "openai/gpt-5.6-luna"
     api_key: str | None = None
     api_base: str | None = None
@@ -183,6 +225,15 @@ class PipelineConfig(BaseModel):
     #: LiteLLM reasoning_effort passthrough for reasoning-capable providers;
     #: an explicit value overrides build_lm's Ollama auto-disable.
     reasoning_effort: str | None = None
+    #: Target speech level (말투) written into the prompt's style
+    #: directives. "auto" keeps the compiled instructions' own
+    #: per-surface register; "polite"/"banmal"/"hage" force one register
+    #: across the whole pack. Korean targets only.
+    speech_level: SpeechLevel = "auto"
+    #: Preference for terms with no established target-language name,
+    #: where both a meaning translation and a transliteration (음차) read
+    #: acceptably. "auto" keeps today's behavior.
+    term_style: TermStyle = "auto"
 
     batch_size: int = batching.DEFAULT_BATCH_SIZE
     max_batch_chars: int = batching.DEFAULT_MAX_BATCH_CHARS
@@ -232,12 +283,74 @@ class PipelineConfig(BaseModel):
     #: payload convention: TranslationFile.category or file_type fallback.
     include_categories: list[str] | None = None
 
+    #: Mods excluded from translation (None = none). A per-mod axis,
+    #: independent of include_categories' category axis.
+    mod_blacklist: list[str] | None = None
+
     #: Optional A/B inputs for run-scoped previous-version migration.  A is a
     #: previous original modpack folder or CurseForge export ZIP.  B can have
     #: either or both of the normal Moru output channels.
     previous_modpack_path: Path | None = None
     previous_resourcepack_path: Path | None = None
     previous_overrides_path: Path | None = None
+
+    #: Seed a hand-translation session. Like ``source_text_only`` the run makes
+    #: no provider call and needs no api_key, but every entry it would
+    #: otherwise translate is left UNTRANSLATED (``EntryStatus.PENDING``) so
+    #: the manual surface can tell "not yet touched" from "translated".
+    #:
+    #: Unlike a source-text run it deliberately keeps the LLM-FREE helper
+    #: stages on: TM, the vanilla and user glossaries, mod-translation harvest,
+    #: previous-version migration and the sibling graph. Only glossary
+    #: curation reaches a provider, so only that is switched off. Those stages
+    #: are exactly the help a hand translator wants, and turning them off
+    #: "for symmetry" with source_text_only would strip the feature for no
+    #: gain.
+    manual_seed: bool = False
+
+    #: Adopt an earlier job's human translations as already-settled, so an
+    #: automatic run over a partially hand-translated pack neither re-sends
+    #: nor overwrites the human's work. Resolved by the caller into
+    #: ``human_translations``; this field only records provenance for the
+    #: session payload.
+    seed_from_job_id: str | None = None
+
+    @model_validator(mode="after")
+    def _disable_provider_stages(self) -> PipelineConfig:
+        """A run that must not need a model or an API key: enforce it here.
+
+        Switching the provider-bound stages off here instead of at each
+        call site means no caller can assemble a source-text config that
+        still reaches an LLM (glossary curation) or writes a real
+        translation over the source text (TM, mod-translation harvest,
+        user glossary, name-binding graph waves).
+
+        It also settles the two output-shape flags' interaction: a
+        source-text run's values ARE the source, so every entry would trip
+        the bilingual transform's ``translation == source`` guard and the
+        variant tree would come out identical to the plain one. Correct
+        output, wasted work — so disable it here rather than at one call
+        site, and the rule holds for every future caller too.
+
+        A manual seed shares the "no provider" requirement but NOT the rest.
+        Only ``extract_glossary`` reaches a model; TM, both glossaries, the
+        mod-translation harvest, migration and the sibling graph are pure
+        local work and are precisely the aids a hand translator needs, so
+        they stay on. ``bilingual_names`` also stays: it is an output-shape
+        choice about the eventual export, orthogonal to who produced the
+        translation, and a hand-translated pack may well want it.
+        """
+        if self.source_text_only:
+            self.use_tm = False
+            self.use_translation_graph = False
+            self.use_vanilla_glossary = False
+            self.use_user_glossary = False
+            self.use_mod_translations = False
+            self.extract_glossary = False
+            self.bilingual_names = False
+        elif self.manual_seed:
+            self.extract_glossary = False
+        return self
 
 
 class PipelineResult(BaseModel):
@@ -259,6 +372,13 @@ class PipelineResult(BaseModel):
     #: Run-scoped A/B index. It also owns the preserved resource-pack asset
     #: directory needed when review edits regenerate the output trees.
     migration: MigrationCatalog | None = None
+    #: Resource-pack namespace per absolute source path, as a FALLBACK for a
+    #: session restored from disk. ``scan_result`` is not rebuilt on restore, so
+    #: without this ``write_outputs`` would find an empty namespace map and
+    #: handler-extracted files with no ``assets/`` segment in their path would
+    #: silently land under ``minecraft``. Populated from ``scan_result`` when
+    #: one exists, and persisted alongside the entries.
+    namespaces: dict[str, str] = Field(default_factory=dict)
 
     @property
     def failed(self) -> list[EntryResult]:
@@ -319,6 +439,73 @@ class _PreparedFile:
     was_cancelled: bool = False
 
 
+class _AdaptiveLimiter:
+    """Provider-request admission that sheds concurrency under overload.
+
+    A plain semaphore cannot shrink, and a fixed limit is precisely what
+    turns one slow provider into a congestion collapse: every request that
+    times out becomes more concurrent load, which makes the next timeout
+    more likely. This starts at ``start`` permits, halves toward ``floor``
+    whenever the caller reports a transport failure, and earns one permit
+    back per ``_GROW_AFTER`` consecutive successes until ``maximum``.
+
+    Growth matters as much as shrinking: it means a conservative start for
+    a local runtime costs nothing on a server that can actually keep up.
+    """
+
+    #: Consecutive successes that earn one permit back.
+    _GROW_AFTER = 8
+
+    def __init__(self, start: int, maximum: int, *, floor: int = 1) -> None:
+        self._maximum = max(1, maximum)
+        self._floor = max(1, min(floor, self._maximum))
+        self._limit = max(self._floor, min(start, self._maximum))
+        self._active = 0
+        self._successes = 0
+        self._failures = 0
+        self._cond = asyncio.Condition()
+
+    @property
+    def limit(self) -> int:
+        """Permits currently admitted concurrently."""
+        return self._limit
+
+    async def __aenter__(self) -> None:
+        async with self._cond:
+            while self._active >= self._limit:
+                await self._cond.wait()
+            self._active += 1
+
+    async def __aexit__(self, *_exc: object) -> None:
+        async with self._cond:
+            self._active -= 1
+            self._cond.notify()
+
+    async def record_success(self) -> None:
+        async with self._cond:
+            self._failures = 0
+            if self._limit >= self._maximum:
+                return
+            self._successes += 1
+            if self._successes >= self._GROW_AFTER:
+                self._successes = 0
+                self._limit += 1
+                # A raised ceiling has to wake a waiter itself: __aexit__
+                # only ever notifies for a permit it released.
+                self._cond.notify()
+
+    async def record_transport_failure(self) -> float:
+        """Halve admission; return the seconds the caller must back off."""
+        async with self._cond:
+            self._successes = 0
+            self._failures += 1
+            self._limit = max(self._floor, self._limit // 2)
+            return min(
+                TRANSPORT_BACKOFF_BASE * 2 ** (self._failures - 1),
+                TRANSPORT_BACKOFF_MAX,
+            )
+
+
 class TranslationPipeline:
     """Orchestrates one translation session over a scanned modpack."""
 
@@ -329,31 +516,56 @@ class TranslationPipeline:
         on_event: Callable[[str, dict[str, object]], None] | None = None,
         cancel_check: Callable[[], bool] | None = None,
         lm: object | None = None,
+        human_translations: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self.config = config
         self.on_event = on_event
         self.cancel_check = cancel_check
+        #: rel file path -> {entry key: text} committed by a human in an
+        #: earlier session (``seed_from_job_id``). Adopted as already-settled
+        #: by provenance, so these keys never reach the model and can never be
+        #: overwritten by it. Resolved by the caller, which owns the journal.
+        self.human_translations = human_translations or {}
         self.registry = create_default_registry()
-        # `lm` injection is a test/embedding seam; production builds from config.
         lm_extra: dict[str, object] = {}
         if config.reasoning_effort is not None:
             lm_extra["reasoning_effort"] = config.reasoning_effort
-        self.lm = lm if lm is not None else build_lm(
-            config.model,
-            api_key=config.api_key,
-            api_base=config.api_base,
-            temperature=config.temperature,
-            **lm_extra,
-        )
-        self.translator, self.artifact_id = load_translator(
-            config.model,
-            config.source_locale,
-            config.target_locale,
-            max_refine=config.max_refine,
-            base_dir=config.artifacts_dir,
-        )
+        # `lm` injection is a test/embedding seam; production builds from
+        # config. Neither a source-text run nor a manual seed calls a provider,
+        # so both build neither an LM (no api_key required) nor a translator
+        # (no compiled artifact to load); token_usage() reports zeros for a
+        # None LM.
+        if config.source_text_only or config.manual_seed:
+            self.lm = lm
+            self.translator = None
+            self.artifact_id = None
+        else:
+            self.lm = lm if lm is not None else build_lm(
+                config.model,
+                api_key=config.api_key,
+                api_base=config.api_base,
+                temperature=config.temperature,
+                **lm_extra,
+            )
+            self.translator, self.artifact_id = load_translator(
+                config.model,
+                config.source_locale,
+                config.target_locale,
+                max_refine=config.max_refine,
+                base_dir=config.artifacts_dir,
+            )
         self.tm = LocalTM(config.tm_db_path) if config.use_tm else None
-        self._llm_semaphore = asyncio.Semaphore(config.max_concurrent)
+        # A locally hosted runtime starts conservatively: Ollama serves
+        # OLLAMA_NUM_PARALLEL (default 1) requests at a time, so opening 15
+        # in parallel buys nothing and only queues them until they cross
+        # the request timeout. Hosted providers start at the configured
+        # value, so their behaviour is unchanged.
+        self._llm_limiter = _AdaptiveLimiter(
+            OLLAMA_START_CONCURRENT
+            if config.model.startswith("ollama")
+            else config.max_concurrent,
+            config.max_concurrent,
+        )
         self._file_semaphore = asyncio.Semaphore(
             config.file_workers
             if config.file_workers is not None
@@ -364,9 +576,20 @@ class TranslationPipeline:
         self._entry_counter = 0
         #: Monotonic provider-request id for live concurrent-work events.
         self._request_counter = 0
+        #: One-shot latch for the context-overflow warning: ollama truncates
+        #: an oversized prompt silently, so this warning is the only signal
+        #: a user gets that the window cannot hold the compiled prompt.
+        self._context_warned = False
         #: Entry relationship graph of the current run (built after the
         #: prepare phase; rebuilt from entries for post-run paths).
         self._graph: TranslationGraph | None = None
+        #: Prompt style directives for this run — rendered once from the
+        #: signature-owned rule text, identical for every batch.
+        self._style_directives = render_style_directives(
+            config.target_locale,
+            config.speech_level,
+            config.term_style,
+        )
         #: Built only when previous-version inputs are supplied; the default
         #: path pays no scan/index cost and follows the existing pipeline.
         self.migration: MigrationCatalog | None = None
@@ -531,7 +754,8 @@ class TranslationPipeline:
         fingerprint = hashlib.sha256(
             "\x1e".join(
                 sorted(
-                    f"{'|'.join(t.aliases)}={t.term_ko}" for t in glossary.term_rules
+                    f"{'|'.join(t.aliases)}@{','.join(t.key_scope)}={t.term_ko}"
+                    for t in glossary.term_rules
                 )
             ).encode("utf-8")
         ).hexdigest()[:12]
@@ -623,6 +847,7 @@ class TranslationPipeline:
                     preferred_style="용어 고정",
                     aliases=[source],
                     notes=f"user glossary ({origin})",
+                    key_scope=[str(s) for s in (term.get("key_scope") or [])],
                 )
             )
         if rules:
@@ -650,7 +875,7 @@ class TranslationPipeline:
         for attempt in range(1, self.config.glossary_max_retries + 2):
             self._check_cancelled()
             try:
-                async with self._llm_semaphore:
+                async with self._llm_limiter:
                     self._check_cancelled()
                     with dspy.context(lm=self.lm, adapter=dspy.JSONAdapter()):
                         pred = await extractor.acall(
@@ -708,6 +933,27 @@ class TranslationPipeline:
             max_batch_chars=self.config.max_batch_chars,
         )
 
+    def _warn_on_context_overflow(self) -> None:
+        """Warn once when served prompts are filling the context window.
+
+        Ollama truncates an oversized prompt instead of rejecting it, so a
+        window too small for the compiled instructions silently degrades
+        every translation. Nothing else in the stack surfaces that.
+        """
+        if self._context_warned or self.lm is None:
+            return
+        filled = context_window_filled(self.lm)
+        if not filled:
+            return
+        self._context_warned = True
+        logger.warning(
+            "Prompt filled the model's context window (%d tokens, num_ctx=%s). "
+            "Ollama truncates silently, so the compiled instructions may be "
+            "cut: raise num_ctx or lower batch_size/max_batch_chars.",
+            filled,
+            self.lm.kwargs.get("num_ctx"),
+        )
+
     async def _translate_batch(
         self,
         batch: dict[str, str],
@@ -716,40 +962,87 @@ class TranslationPipeline:
         *,
         file: str | None = None,
     ) -> tuple[dict[str, str], dict[str, list[str]]]:
-        """One guarded module call; on adapter/parse failure split and retry."""
-        async with self._llm_semaphore:
-            self._check_cancelled()
-            self._request_counter += 1
-            request_id = self._request_counter
-            self._emit(
-                "batch_started",
-                {
-                    "request_id": request_id,
-                    "file": file or context,
-                    "key": next(iter(batch)),
-                    "entries": len(batch),
-                },
+        """One guarded module call, with the two failure families separated.
+
+        An output-shaped failure (unparseable JSON, schema violation) is a
+        property of THIS batch, so splitting it and asking again is the
+        right response and is what happens below. A transport failure
+        (timeout, dropped connection, 429/503) is a property of the SERVER:
+        splitting would double the concurrent load that caused it, which is
+        how one slow provider becomes a congestion collapse. So admission
+        shrinks, the caller backs off, and the SAME batch is retried a
+        bounded number of times instead.
+        """
+        transport_error: Exception | None = None
+        output_error: Exception | None = None
+        for attempt in range(MAX_TRANSPORT_RETRIES + 1):
+            async with self._llm_limiter:
+                self._check_cancelled()
+                self._request_counter += 1
+                request_id = self._request_counter
+                self._emit(
+                    "batch_started",
+                    {
+                        "request_id": request_id,
+                        "file": file or context,
+                        "key": next(iter(batch)),
+                        "entries": len(batch),
+                    },
+                )
+                try:
+                    # Task-local LM binding: dspy.configure() is single-task
+                    # only, and server jobs run in separate asyncio tasks.
+                    with dspy.context(lm=self.lm, adapter=dspy.JSONAdapter()):
+                        pred = await self.translator.acall(
+                            source_lang=self.config.source_locale,
+                            target_lang=self.config.target_locale,
+                            context=context,
+                            glossary=glossary_text,
+                            style_directives=self._style_directives,
+                            entries=batch,
+                        )
+                except Exception as exc:  # noqa: BLE001 — LLM/adapter errors
+                    if is_transport_error(exc):
+                        transport_error = exc
+                    else:
+                        transport_error = None
+                        output_error = exc
+                else:
+                    await self._llm_limiter.record_success()
+                    self._warn_on_context_overflow()
+                    return dict(pred.translations), dict(pred.failed)
+                finally:
+                    self._emit("batch_finished", {"request_id": request_id})
+            if transport_error is None:
+                break
+            delay = await self._llm_limiter.record_transport_failure()
+            if attempt == MAX_TRANSPORT_RETRIES:
+                break
+            logger.warning(
+                "Provider unavailable (%s); admission now %d, retrying "
+                "%d entries in %.1fs",
+                transport_error,
+                self._llm_limiter.limit,
+                len(batch),
+                delay,
             )
-            try:
-                # Task-local LM binding: dspy.configure() is single-task only,
-                # and server jobs run in separate asyncio tasks.
-                with dspy.context(lm=self.lm, adapter=dspy.JSONAdapter()):
-                    pred = await self.translator.acall(
-                        source_lang=self.config.source_locale,
-                        target_lang=self.config.target_locale,
-                        context=context,
-                        glossary=glossary_text,
-                        entries=batch,
-                    )
-                return dict(pred.translations), dict(pred.failed)
-            except Exception as exc:  # noqa: BLE001 — LLM/adapter errors
-                if len(batch) == 1:
-                    key = next(iter(batch))
-                    logger.error("Translation failed for %s: %s", key, exc)
-                    return {}, {key: [f"llm call failed: {exc}"]}
-            finally:
-                self._emit("batch_finished", {"request_id": request_id})
-        # Split outside the semaphore to avoid deadlock.
+            # Back off outside the limiter so the permit is free meanwhile.
+            await asyncio.sleep(delay)
+        if transport_error is not None:
+            # Never split a saturated server's work: that is the amplifier.
+            logger.error(
+                "Provider unavailable for %d entries after %d retries: %s",
+                len(batch),
+                MAX_TRANSPORT_RETRIES,
+                transport_error,
+            )
+            reason = f"provider unavailable: {transport_error}"
+            return {}, {key: [reason] for key in batch}
+        if len(batch) == 1:
+            key = next(iter(batch))
+            logger.error("Translation failed for %s: %s", key, output_error)
+            return {}, {key: [f"llm call failed: {output_error}"]}
+        # Split outside the limiter to avoid deadlock.
         items = list(batch.items())
         mid = len(items) // 2
         left, right = dict(items[:mid]), dict(items[mid:])
@@ -810,7 +1103,7 @@ class TranslationPipeline:
 
         I/O bound, so the file semaphore only covers this phase; LLM
         concurrency during the translation waves stays bounded by
-        ``_llm_semaphore`` alone.
+        ``_llm_limiter`` alone.
         """
         async with self._file_semaphore:
             self._check_cancelled()
@@ -835,6 +1128,20 @@ class TranslationPipeline:
                 for key, text in source_data.items()
                 if not is_untranslated_copy(text, existing.get(key, ""))
             }
+            # Hand translations adopted from an earlier session are decided by
+            # PROVENANCE, never by content: "did a human decide this" is not a
+            # question about the bytes, so it must not be asked of a byte
+            # predicate. Merging them into `existing` above would route them
+            # through is_untranslated_copy, and a translator who deliberately
+            # kept a proper noun in English would have that decision read as
+            # untranslated filler and silently sent to the model.
+            human = self.human_translations.get(rel)
+            if human:
+                for key, text in human.items():
+                    if key not in source_data:
+                        continue
+                    existing[key] = text
+                    existing_keys.add(key)
             prepared = _PreparedFile(
                 pair=pair,
                 rel=rel,
@@ -875,6 +1182,8 @@ class TranslationPipeline:
                 prepared.protected_map[key] = protected
                 prepared.to_translate[key] = protected.protected
 
+            if self.config.source_text_only:
+                self._settle_as_source_text(prepared)
             # Previous-version A/B/C match is deliberately stricter than the
             # global source-text TM: file identity + entry key + exact A/C
             # source equality.  It is run-scoped and never stored globally.
@@ -925,6 +1234,13 @@ class TranslationPipeline:
                         )
                     )
 
+            # Last, deliberately: migration and the TM get first refusal, so a
+            # translator is handed a remembered translation to confirm rather
+            # than a blank box. Whatever is still unclaimed is genuinely theirs
+            # to write.
+            if self.config.manual_seed:
+                self._settle_as_manual_pending(prepared)
+
             if prepared.work_total > 0:
                 self._emit(
                     "progress",
@@ -936,6 +1252,60 @@ class TranslationPipeline:
                     },
                 )
             return prepared
+
+    def _settle_as_source_text(self, prepared: _PreparedFile) -> None:
+        """Settle every still-pending entry to its own source text.
+
+        The source-text export's stand-in for the translation waves: it
+        leaves ``final`` and ``file_entries`` in exactly the shape a fully
+        successful run does — PASSED is the "fresh" status the output
+        generator writes into the resource pack — so the generated trees
+        carry the same files and keys as a translated run, with the
+        untranslated strings as their values. Entries the pack already
+        translated keep that translation (SKIPPED, settled by the caller):
+        moru would not have touched them either.
+        """
+        for key in prepared.to_translate:
+            text = prepared.source_data[key]
+            prepared.final[key] = text
+            prepared.file_entries.append(
+                EntryResult(
+                    key=key,
+                    file=prepared.rel,
+                    source_text=text,
+                    translated_text=text,
+                    status=EntryStatus.PASSED,
+                )
+            )
+        prepared.to_translate.clear()
+        prepared.protected_map.clear()
+
+    def _settle_as_manual_pending(self, prepared: _PreparedFile) -> None:
+        """Leave every still-pending entry untranslated, for a human.
+
+        The manual-seed counterpart to :meth:`_settle_as_source_text`, and the
+        one place the two differ: this writes no translation at all. ``final``
+        is deliberately NOT populated, because a seed run produces a work queue
+        rather than an output tree — PENDING is outside ``_FRESH_STATUSES`` and
+        carries no text, so nothing here could reach a resource pack even if
+        the output stage ran.
+
+        Entries the pack already translated keep that translation (SKIPPED),
+        and anything migration or the TM settled keeps its own status: those
+        are answers a translator confirms, not work they still owe.
+        """
+        for key in prepared.to_translate:
+            prepared.file_entries.append(
+                EntryResult(
+                    key=key,
+                    file=prepared.rel,
+                    source_text=prepared.source_data[key],
+                    translated_text=None,
+                    status=EntryStatus.PENDING,
+                )
+            )
+        prepared.to_translate.clear()
+        prepared.protected_map.clear()
 
     async def _translate_wave(
         self,
@@ -961,6 +1331,12 @@ class TranslationPipeline:
         }
         if not pending:
             return
+        # Repeated texts within THIS file's wave share one model call: the
+        # dispatched (protected) text plus the wave's fixed context is
+        # exactly the scope in which two occurrences are interchangeable.
+        # Aliases are expanded back before the loop below, so every key
+        # still gets a terminal outcome.
+        unique, aliases = batching.dedup_entries(pending)
         rel = prepared.rel
         source_data = prepared.source_data
         base_context = f"file: {rel}; handler: {prepared.handler.name}"
@@ -996,11 +1372,14 @@ class TranslationPipeline:
 
         batch_tasks = [
             asyncio.create_task(translate_one(batch))
-            for batch in self._make_batches(pending)
+            for batch in self._make_batches(unique)
         ]
         try:
             for completed in asyncio.as_completed(batch_tasks):
                 batch, translations, failed = await completed
+                batch = batching.expand_aliases(batch, aliases)
+                translations = batching.expand_aliases(translations, aliases)
+                failed = batching.expand_aliases(failed, aliases)
                 for key in batch:
                     prepared.to_translate.pop(key, None)
                     protected = prepared.protected_map[key]
@@ -1370,6 +1749,7 @@ class TranslationPipeline:
                 scanner = ModpackScanner(
                     source_locale=self.config.source_locale,
                     target_locale=self.config.target_locale,
+                    mod_blacklist=self.config.mod_blacklist,
                 )
                 scan_result = await scanner.scan(self.config.modpack_path)
             result.scan_result = scan_result
@@ -1608,7 +1988,11 @@ class TranslationPipeline:
             result.migration is not None
             and result.migration.stats.preserved_resourcepack_assets > 0
         )
-        if result.entries or has_migrated_assets:
+        # A manual seed produces a work queue, not an artifact: every entry it
+        # created is PENDING with no text, so the only thing an output pass
+        # could emit is the pack's own pre-existing translations. Export runs
+        # later, from the reviewed entries, via apply_entry_edits.
+        if (result.entries or has_migrated_assets) and not self.config.manual_seed:
             self._emit("progress", self._stage_frame(0))
             try:
                 await write_outputs(result)
@@ -1676,16 +2060,31 @@ class TranslationPipeline:
         for rel, entries in by_file.items():
             protector = PlaceholderProtector()
             protected = {e.key: protector.protect(e.source_text) for e in entries}
-            batch = {e.key: protected[e.key].protected for e in entries}
-            batch_glossary = GlossaryFilter.filter_for_texts(
-                glossary, {e.key: e.source_text for e in entries}
-            ).to_context_string()
-            context = self._with_sibling_context(
-                f"retry; file: {rel}", graph, rel, batch
-            )
-            translations, failures = await self._translate_batch(
-                batch, batch_glossary, context
-            )
+            pending = {e.key: protected[e.key].protected for e in entries}
+            source_by_key = {e.key: e.source_text for e in entries}
+            # Same budget as every other dispatch. An unbounded per-file
+            # prompt on top of the ~36-41k-character compiled instructions
+            # overflows the context window, and that failure is
+            # OUTPUT-shaped, so it feeds the split path below — a second
+            # amplification loop, on a path that exists because these
+            # entries already failed once.
+            unique, aliases = batching.dedup_entries(pending)
+            translations: dict[str, str] = {}
+            failures: dict[str, list[str]] = {}
+            for chunk in self._make_batches(unique):
+                chunk_glossary = GlossaryFilter.filter_for_texts(
+                    glossary, {key: source_by_key[key] for key in chunk}
+                ).to_context_string()
+                context = self._with_sibling_context(
+                    f"retry; file: {rel}", graph, rel, chunk
+                )
+                chunk_translations, chunk_failures = await self._translate_batch(
+                    chunk, chunk_glossary, context
+                )
+                translations.update(
+                    batching.expand_aliases(chunk_translations, aliases)
+                )
+                failures.update(batching.expand_aliases(chunk_failures, aliases))
             for entry in entries:
                 out = translations.get(entry.key)
                 if out is None:
@@ -1819,15 +2218,23 @@ async def run_pipeline(
     on_pipeline: Callable[[TranslationPipeline], None] | None = None,
     scan_result: ScanResult | None = None,
     migration: MigrationCatalog | None = None,
+    human_translations: dict[str, dict[str, str]] | None = None,
 ) -> PipelineResult:
     """Convenience wrapper: build, run, close.
 
     ``on_pipeline`` receives the pipeline instance before the run starts —
     the server uses it to expose the live translation graph while the job
     is running.
+
+    ``human_translations`` carries an earlier session's committed hand
+    translations (``config.seed_from_job_id``). The caller resolves them,
+    because the caller owns the edit journal that records who wrote what.
     """
     pipeline = TranslationPipeline(
-        config, on_event=on_event, cancel_check=cancel_check
+        config,
+        on_event=on_event,
+        cancel_check=cancel_check,
+        human_translations=human_translations,
     )
     if on_pipeline is not None:
         on_pipeline(pipeline)
@@ -1837,9 +2244,17 @@ async def run_pipeline(
         pipeline.close()
 
 
+#: Sub-root for a source-text run's output trees. OutputGenerator wipes and
+#: regenerates resourcepack/ and overrides/ on every run, so sharing one
+#: root would let a W3 source-text export destroy the translated trees a
+#: finished run left behind (and the other way round).
+SOURCE_TEXT_DIRNAME = "source_text"
+
+
 def output_root(config: PipelineConfig) -> Path:
     """Root directory holding the generated output trees."""
-    return config.output_dir or (config.modpack_path / "moru_output")
+    root = config.output_dir or (config.modpack_path / "moru_output")
+    return root / SOURCE_TEXT_DIRNAME if config.source_text_only else root
 
 
 #: Statuses whose translation was produced by THIS run (vs. pre-existing).
@@ -1861,14 +2276,25 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
     they replace whole files. Idempotent — wipes and rewrites the trees.
     """
     config = result.config
-    namespaces: dict[str, str] = {}
+    # A restored session has no scan_result, so fall back to the map persisted
+    # with it. Without that, a handler-extracted file whose path carries no
+    # `assets/` segment loses its namespace and lands under `minecraft`.
+    namespaces: dict[str, str] = dict(result.namespaces)
     if result.scan_result is not None:
         for pair in result.scan_result.all_translation_pairs:
             namespaces[pair.source_path.resolve().as_posix()] = pair.namespace
+        result.namespaces = dict(namespaces)
 
     outputs: dict[str, FileOutput] = {}
     for entry in result.entries:
-        if entry.status is EntryStatus.FAILED or not entry.translated_text:
+        # PENDING is stated rather than left to the empty-text check: an
+        # untranslated entry must never reach output, and that should not
+        # depend on a second condition happening to also be true.
+        if (
+            entry.status is EntryStatus.FAILED
+            or entry.status is EntryStatus.PENDING
+            or not entry.translated_text
+        ):
             continue
         file_output = outputs.get(entry.file)
         if file_output is None:
@@ -1887,10 +2313,26 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
     # The description shows under the moru icon in the resource-pack UI.
     # The pack list already displays the pack's name, so the description
     # carries only the translated version + attribution, e.g.
-    # "v6.5.4hotfix / §a모루§7로 한국어로 번역됨 — §amoru.gg".
+    # "v6.5.4hotfix / §a모루§7로 번역됨 — §amoru.gg". A source-text pack has
+    # the translated one's exact layout, so this line is the only in-game
+    # way to tell the two apart.
     # (identity versions are pre-stripped of any leading "v" marker.)
+    #
+    # Kept deliberately short. That screen wraps the description to 157px
+    # (151px once the list scrolls) and renders only the first TWO VISUAL
+    # lines, dropping the rest — and the URL sits at the far end, so length
+    # costs attribution. At 107px the translated note leaves room for even a
+    # 22-character version prefix without spilling past two lines; the older
+    # 143px wording ("한국어로" was redundant, the target locale is already in
+    # the pack name) did not. output/mcmeta_text.py enforces the budget as a
+    # backstop, but not needing the backstop keeps the version visible too.
     identity = detect_pack_identity(config.modpack_path)
     version_prefix = f"v{identity.version} / " if identity.version else ""
+    note = (
+        "§7원문 그대로 — §amoru.gg"
+        if config.source_text_only
+        else "§a모루§7로 번역됨 — §amoru.gg"
+    )
     pack_format = pack_format_for_minecraft_version(
         identity.mc_version,
         config.pack_format,
@@ -1902,7 +2344,8 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
             source_locale=config.source_locale,
             target_locale=config.target_locale,
             pack_format=pack_format,
-            description=f"{version_prefix}§a모루§7로 한국어로 번역됨 — §amoru.gg",
+            description=f"{version_prefix}{note}",
+            bilingual_names=config.bilingual_names,
             resourcepack_seed_dir=(
                 result.migration.resourcepack_assets_dir
                 if result.migration is not None
@@ -1911,6 +2354,13 @@ async def write_outputs(result: PipelineResult) -> GenerationResult:
         )
     )
     generation = await generator.generate(list(outputs.values()))
+    # Surface the one loss the installable outputs cannot absorb, so it
+    # reaches the completion screen instead of dying in a log line.
+    result.stats.undeliverable_jar_files = generation.skipped_jar_data
+    result.stats.undeliverable_jar_entries = sum(
+        loss.entry_count for loss in generation.jar_data_losses
+    )
+    result.stats.undeliverable_jar_mods = generation.jar_data_loss_mods
     result.output_files = generation.all_files
     return generation
 

@@ -4,17 +4,17 @@
  * on top. Three states off wizard.scanState: running / failed / done.
  */
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 
-import type { ScanCategory, ScanFile } from "../../../shared/engine";
+import type { HardcodedMod, ScanCategory, ScanFile } from "../../../shared/engine";
 import { api } from "@/lib/api";
 import { formatCompact, formatInt, formatUsd } from "@/lib/format";
 import { RECOMMENDED_MODEL, estimateUsage, modelDisplayName } from "@/lib/models";
 import { costUsd, estimatePriceForModel, usePricingTable } from "@/lib/pricing";
 import { useRouter } from "@/stores/router";
-import { useSettings } from "@/stores/settings";
+import { DEFAULT_MOD_BLACKLIST, useSettings } from "@/stores/settings";
 import { selectedScanTotals, useWizard } from "@/stores/wizard";
 
 /* ---- screen-local helpers ---- */
@@ -294,6 +294,326 @@ function EmptyState() {
         </button>
       </div>
     </div>
+  );
+}
+
+/* ---- mod blacklist / source overrides ---- */
+
+/** Comparison form of a mod id — mirrors the engine's `normalize_mod_id`,
+ * so the id the scan reports maps back onto the list entry the user typed
+ * ("Entity Culling" -> "entityculling"). */
+function normalizeModId(text: string): string {
+  return text.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function FilterBand({
+  header,
+  summary,
+  expandable = false,
+  expanded = false,
+  onToggle,
+  children,
+}: {
+  header: string;
+  summary: string;
+  expandable?: boolean;
+  expanded?: boolean;
+  onToggle?: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="-mt-4 mb-6 border border-line2 bg-raised">
+      <div
+        onClick={onToggle}
+        className={`flex items-center gap-2 px-3.5 py-2 font-mono text-[11px] text-text2 ${
+          expandable ? "cursor-pointer hover:bg-raised-hover" : ""
+        }`}
+      >
+        <span className="font-semibold tracking-[0.06em] text-text3 uppercase">
+          {header}
+        </span>
+        <div className="h-px flex-1" style={DASH_LINE} />
+        <span>{summary}</span>
+        {expandable && (
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            className={expanded ? "rotate-180" : undefined}
+          >
+            <path d="M1 3 L5 7 L9 3" />
+          </svg>
+        )}
+      </div>
+      {expanded && children !== undefined && (
+        <div className="border-t border-line2 px-3.5 py-3">{children}</div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Mod blacklist band: what this scan dropped, what else is on the list,
+ * and the controls to change it. Editing the list restarts the scan,
+ * because the engine decides which JARs to even open from it.
+ */
+function BlacklistBand() {
+  const { t } = useTranslation();
+  const blacklist = useSettings((s) => s.modBlacklist);
+  const setSettings = useSettings((s) => s.set);
+  const scanResult = useWizard((s) => s.scanResult);
+  const scanState = useWizard((s) => s.scanState);
+  const startScan = useWizard((s) => s.startScan);
+  const [expanded, setExpanded] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const excluded = scanResult?.excluded_mods ?? [];
+  // An entry is "listed only" when this pack ships no JAR matching it.
+  const hitIds = new Set(excluded.map((mod) => normalizeModId(mod.mod_id)));
+  const listedOnly = blacklist.filter((entry) => !hitIds.has(normalizeModId(entry)));
+
+  const apply = (next: string[]): void => {
+    setSettings({ modBlacklist: next });
+    void startScan();
+  };
+  const drop = (id: string): void =>
+    apply(blacklist.filter((entry) => normalizeModId(entry) !== normalizeModId(id)));
+  const add = (): void => {
+    const entry = draft.trim();
+    if (entry === "") return;
+    setDraft("");
+    if (blacklist.some((e) => normalizeModId(e) === normalizeModId(entry))) return;
+    apply([...blacklist, entry]);
+  };
+
+  return (
+    <FilterBand
+      header={t("w2.blacklist.header")}
+      summary={
+        scanState === "running"
+          ? t("w2.blacklist.rescanning")
+          : excluded.length > 0
+            ? t("w2.blacklist.summary", { excluded: excluded.length })
+            : t("w2.blacklist.summaryNone", { listed: blacklist.length })
+      }
+      expandable
+      expanded={expanded}
+      onToggle={() => setExpanded((prev) => !prev)}
+    >
+      <p className="m-0 mb-3 text-[11px] leading-relaxed text-text3">
+        {t("w2.blacklist.hint")}
+      </p>
+
+      {excluded.length > 0 && (
+        <>
+          <div className="mb-1.5 font-mono text-[10px] font-semibold tracking-[0.06em] text-text3 uppercase">
+            {t("w2.blacklist.excludedHeader")}
+          </div>
+          <div className="mb-3 flex flex-col gap-1">
+            {excluded.map((mod) => (
+              <div
+                key={`${mod.mod_id}:${mod.jar_name}`}
+                className="flex items-center gap-2 bg-hover px-2.5 py-1.5"
+              >
+                <span className="font-mono text-[11px] font-bold text-text">
+                  {mod.mod_id}
+                </span>
+                <span className="truncate font-mono text-[10px] text-text3">
+                  {mod.jar_name}
+                </span>
+                <button
+                  onClick={() => drop(mod.mod_id)}
+                  className="ml-auto shrink-0 px-1.5 font-mono text-[10px] text-accent uppercase hover:underline"
+                >
+                  {t("w2.blacklist.include")}
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {listedOnly.length > 0 && (
+        <>
+          <div className="mb-1.5 font-mono text-[10px] font-semibold tracking-[0.06em] text-text3 uppercase">
+            {t("w2.blacklist.listedHeader")}
+          </div>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {listedOnly.map((entry) => (
+              <span
+                key={entry}
+                className="flex items-center gap-1.5 border border-edge px-2 py-[3px] font-mono text-[10px] text-text2"
+              >
+                {entry}
+                <button
+                  onClick={() => drop(entry)}
+                  aria-label={t("w2.blacklist.include")}
+                  className="text-text3 hover:text-text"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="flex items-center gap-2">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") add();
+          }}
+          placeholder={t("w2.blacklist.addPlaceholder")}
+          className="min-w-0 flex-1 border border-edge bg-bar px-2 py-1.5 font-mono text-[11px] text-text placeholder:text-text3"
+        />
+        <button
+          onClick={add}
+          className="shrink-0 border border-edge px-2.5 py-1.5 font-mono text-[10px] text-text2 uppercase hover:text-text"
+        >
+          {t("w2.blacklist.add")}
+        </button>
+        <button
+          onClick={() => apply([...DEFAULT_MOD_BLACKLIST])}
+          className="shrink-0 px-1.5 font-mono text-[10px] text-text3 uppercase hover:text-text2"
+        >
+          {t("w2.blacklist.reset")}
+        </button>
+      </div>
+    </FilterBand>
+  );
+}
+
+/** Which enabled resource packs supplied the source text, and how much. */
+function SourceOverrideBand() {
+  const { t } = useTranslation();
+  const overrides = useWizard((s) => s.scanResult?.source_overrides) ?? [];
+  const total = overrides.reduce((sum, o) => sum + o.keys, 0);
+  if (total === 0) return null;
+
+  return (
+    <FilterBand
+      header={t("w2.overrides.header")}
+      summary={t("w2.overrides.summary", { keys: formatInt(total) })}
+      expandable
+      expanded
+    >
+      <div className="flex flex-col gap-1">
+        {overrides.map((o) => (
+          <div key={o.pack} className="font-mono text-[11px] text-text2">
+            {t("w2.overrides.packLine", { pack: o.pack, keys: formatInt(o.keys) })}
+          </div>
+        ))}
+      </div>
+    </FilterBand>
+  );
+}
+
+/** CSV of every hardcoded string, for whoever builds the Mixin or
+ * resource-pack workaround the language file cannot provide. Built in the
+ * renderer because the data is already here — no round trip to the engine. */
+function hardcodedCsv(mods: HardcodedMod[]): string {
+  const cell = (value: string): string => `"${value.replace(/"/g, '""')}"`;
+  const rows = [["mod_id", "jar", "class", "kind", "source", "translation"]];
+  for (const mod of mods) {
+    for (const s of mod.strings) {
+      rows.push([mod.mod_id, mod.jar_name, s.class_name, s.kind, s.text, ""]);
+    }
+  }
+  // BOM: Excel reads a bare UTF-8 CSV as the local codepage and mangles
+  // every non-ASCII source string.
+  return "\uFEFF" + rows.map((r) => r.map(cell).join(",")).join("\r\n");
+}
+
+function downloadCsv(filename: string, body: string): void {
+  const url = URL.createObjectURL(new Blob([body], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Mods whose display text is compiled into Java, where no language file
+ * reaches it. This band exists to end a specific wrong conclusion: the
+ * user sees English in game, assumes the translation failed, and goes
+ * looking for a bug on our side. Naming the mod, the count and the exact
+ * strings makes the cause attributable and the hunt unnecessary.
+ */
+function HardcodedBand() {
+  const { t } = useTranslation();
+  const mods = useWizard((s) => s.scanResult?.hardcoded_mods) ?? [];
+  const [expanded, setExpanded] = useState(false);
+  const [openMod, setOpenMod] = useState<string | null>(null);
+  if (mods.length === 0) return null;
+
+  const strings = mods.reduce((sum, m) => sum + m.strings.length, 0);
+
+  return (
+    <FilterBand
+      header={t("w2.hardcoded.header")}
+      summary={t("w2.hardcoded.summary", {
+        mods: formatInt(mods.length),
+        strings: formatInt(strings),
+      })}
+      expandable
+      expanded={expanded}
+      onToggle={() => setExpanded((prev) => !prev)}
+    >
+      <p className="m-0 mb-3 text-[11px] leading-relaxed text-text3">
+        {t("w2.hardcoded.hint")}
+      </p>
+
+      <div className="mb-3 flex flex-col gap-1">
+        {mods.map((mod) => {
+          const open = openMod === mod.jar_name;
+          return (
+            <div key={mod.jar_name} className="border border-line2 bg-bar">
+              <button
+                onClick={() => setOpenMod(open ? null : mod.jar_name)}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left font-mono text-[11px] text-text2 hover:bg-raised-hover"
+              >
+                <span className="font-semibold text-text">{mod.mod_id}</span>
+                <span className="truncate text-text3">{mod.jar_name}</span>
+                <div className="h-px flex-1" style={DASH_LINE} />
+                <span className="shrink-0">
+                  {t("w2.hardcoded.stringCount", {
+                    count: mod.strings.length,
+                  })}
+                </span>
+              </button>
+              {open && (
+                <div className="flex flex-col gap-1.5 border-t border-line2 px-2.5 py-2">
+                  {mod.strings.map((s) => (
+                    <div key={`${s.class_name}:${s.text}`}>
+                      <div className="font-mono text-[10px] text-text3">
+                        {s.class_name.split("/").pop()}
+                        {s.kind === "associated" && ` · ${t("w2.hardcoded.associated")}`}
+                      </div>
+                      <div className="font-mono text-[11px] whitespace-pre-wrap text-text2">
+                        {s.text}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <button
+        onClick={() => downloadCsv("moru-hardcoded-strings.csv", hardcodedCsv(mods))}
+        className="border border-edge px-2.5 py-1.5 font-mono text-[11px] text-text2 hover:text-text"
+      >
+        {t("w2.hardcoded.exportCsv")}
+      </button>
+    </FilterBand>
   );
 }
 
@@ -637,9 +957,15 @@ function DoneState() {
       : (activeCat?.handler ?? "");
 
   if (categories.length === 0) {
+    // The blacklist band renders here too: a list broad enough to empty the
+    // scan is exactly when the user needs to see it and put a mod back.
     return (
       <div className="animate-fade-in-up px-10 py-8">
         <StepHeader label={t("w2.stepLabel")} />
+        <div className="mt-4">
+          <HardcodedBand />
+          <BlacklistBand />
+        </div>
         <EmptyState />
       </div>
     );
@@ -747,6 +1073,11 @@ function DoneState() {
           </span>
         </div>
       )}
+
+      {/* What the scan filtered, rewrote, or cannot reach at all */}
+      <SourceOverrideBand />
+      <HardcodedBand />
+      <BlacklistBand />
 
       {/* 2-column: tree + preview */}
       <div className="grid grid-cols-[340px_1fr] gap-3">

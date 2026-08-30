@@ -1,0 +1,78 @@
+{
+  "stepLabel": "Review · By hand",
+  "title": "Translate by hand",
+  "subtitle": "One entry at a time. Nothing is filled in for you, and nothing is sent anywhere.",
+  "colorPreview": "§ color preview",
+  "backToReview": "Back to review table",
+  "next": "Next: Export",
+  "empty": {
+    "title": "Nothing to translate yet",
+    "desc": "Hand translation works on a scanned modpack's entries. Scan a modpack first, then come back here to work through it entry by entry.",
+    "cta": "Select a modpack"
+  },
+  "filter": {
+    "all": "All",
+    "failed": "Failed",
+    "warning": "Warning",
+    "modified": "Done",
+    "flagged": "Flagged"
+  },
+  "queue": {
+    "searchPlaceholder": "Search key · source · translation...",
+    "empty": "No entries match this view",
+    "noFlagged": "No flagged entries yet — press Ctrl+B to mark one",
+    "loadMore": "↓ Load more",
+    "loading": "Loading...",
+    "loaded": "{{loaded}} of {{total}} loaded",
+    "hasDraft": "Unsaved draft"
+  },
+  "focus": {
+    "none": "Select an entry from the queue",
+    "source": "Source ({{lang}})",
+    "target": "Your translation ({{lang}})",
+    "preview": "§ preview",
+    "unsaved": "● unsaved",
+    "flagged": "FLAGGED",
+    "commitNext": "Save & next",
+    "commitStay": "Save & stay",
+    "flagNext": "Flag & skip"
+  },
+  "context": {
+    "origin": "Where this is from",
+    "mod": "Mod",
+    "kind": "Kind",
+    "tokens": "Placeholders",
+    "insertToken": "Insert this placeholder at the cursor",
+    "sectionCodes": "§ codes: {{draft}} of {{source}}",
+    "siblings": "Continues across",
+    "siblingsHint": "These lines are numbered parts of one string. Read them together — a sentence often runs from one into the next.",
+    "glossary": "Glossary",
+    "insertTerm": "Insert at the cursor",
+    "keyScope": "applies to: {{scope}}",
+    "memory": "Translation memory",
+    "tmExact": "Exact match · {{origin}}",
+    "sameSourceAgrees": "Same source elsewhere · matches",
+    "sameSourceDiffers": "Same source elsewhere · DIFFERS",
+    "checks": "Checks"
+  },
+  "hint": {
+    "commit": "⌃↵ save & next",
+    "move": "⌥↑↓ move",
+    "copySource": "⌃D copy source",
+    "flag": "⌃B flag",
+    "token": "⌃1-9 placeholder",
+    "revert": "esc revert"
+  },
+  "issue": {
+    "key_mismatch": "Key mismatch",
+    "empty_translation": "Translation is empty",
+    "untranslated": "Looks untranslated",
+    "placeholder_count": "Placeholder count does not match",
+    "placeholder_order": "Placeholder order differs",
+    "color_code": "Colour code count does not match",
+    "length_ratio": "Unusual length compared to the source",
+    "glossary_term_mismatch": "Glossary term not used",
+    "glossary_noun_mismatch": "Proper noun not used",
+    "format_string": "Format string problem"
+  }
+}

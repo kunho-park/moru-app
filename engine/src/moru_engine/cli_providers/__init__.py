@@ -36,14 +36,14 @@ __all__ = [
 ]
 
 #: Catalog entries in the same shape as the engine's hosted-provider table.
-#: ``env`` is None: these never take an API key.
+#: ``env`` is None: these never take an API key, and the login command is
+#: the store's to report — it depends on which CLI the machine has.
 CLI_PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
     {
         "id": "claude-code",
         "name": "Claude Code (구독)",
         "env": None,
         "auth": "cli",
-        "login_hint": "claude login",
         "models": [
             "claude-code/claude-sonnet-4-6",
             "claude-code/claude-haiku-4-5",
@@ -55,7 +55,6 @@ CLI_PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "OpenAI Codex (구독)",
         "env": None,
         "auth": "cli",
-        "login_hint": "codex login",
         # Static fallback only — POST /providers/models asks the backend,
         # which is the sole authority on what a given plan may call.
         "models": [
@@ -69,7 +68,6 @@ CLI_PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "Gemini CLI (구독)",
         "env": None,
         "auth": "cli",
-        "login_hint": "gemini",
         "models": [
             "gemini-cli/gemini-3.5-flash",
             "gemini-cli/gemini-3.1-pro-preview",

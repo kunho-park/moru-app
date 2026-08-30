@@ -5,8 +5,10 @@ file types in Minecraft modpacks. Handlers extract translatable
 content and apply translations back to files.
 """
 
-from .base import ContentHandler, HandlerRegistry
+from .base import ContentHandler, HandlerRegistry, is_translation_key_reference
+from .betterquesting import BetterQuestingHandler
 from .ftbquests import FTBQuestsHandler
+from .heracles import HeraclesHandler
 from .kubejs_display_name import KubeJSDisplayNameHandler
 from .language import LanguageHandler
 from .origins import OriginsHandler
@@ -16,9 +18,11 @@ from .tconstruct import TConstructHandler
 from .the_vault_quest import TheVaultQuestHandler
 
 __all__ = [
+    "BetterQuestingHandler",
     "ContentHandler",
     "FTBQuestsHandler",
     "HandlerRegistry",
+    "HeraclesHandler",
     "KubeJSDisplayNameHandler",
     "LanguageHandler",
     "OriginsHandler",
@@ -26,4 +30,5 @@ __all__ = [
     "PuffishSkillsHandler",
     "TConstructHandler",
     "TheVaultQuestHandler",
+    "is_translation_key_reference",
 ]

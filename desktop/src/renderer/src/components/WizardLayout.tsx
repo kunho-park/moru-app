@@ -38,12 +38,17 @@ export function WizardLayout({ children }: { children: React.ReactNode }) {
       ? modelDisplayName(settings.model)
       : `${t(`common.preset.${settings.preset}`)} · ${modelDisplayName(settings.model)}`;
 
+  // `w5m` (hand translation) is an alternate route through step 05, so it
+  // shares the review step's rail entry rather than adding a seventh number.
+  const onReviewStep = screen === "w5" || screen === "w5m";
+
   const stepDone: Record<Screen, boolean> = {
     w1: wizard.modpackPath !== null,
     w2: wizard.scanState === "done",
     w3: wizard.runState !== "idle",
     w4: wizard.runState === "done" || wizard.runState === "cancelled",
-    w5: wizard.runState === "done" && screen !== "w5" && wizard.exportState !== "idle",
+    w5: wizard.runState === "done" && !onReviewStep && wizard.exportState !== "idle",
+    w5m: false,
     w6: wizard.exportState === "done",
     home: false,
     queue: false,
@@ -58,6 +63,7 @@ export function WizardLayout({ children }: { children: React.ReactNode }) {
     w3: wizard.scanState === "done",
     w4: wizard.runState !== "idle",
     w5: wizard.runState === "done" || wizard.runState === "cancelled",
+    w5m: wizard.runState === "done" || wizard.runState === "cancelled",
     w6: wizard.runState === "done" || wizard.runState === "cancelled",
   };
   const doneCount = STEPS.filter((s) => stepDone[s.screen]).length;
@@ -67,7 +73,7 @@ export function WizardLayout({ children }: { children: React.ReactNode }) {
     w2: wizard.scanState === "done" ? t("common.unit.files", { count: totals.files }) : null,
     w3: presetLabel,
     w4: null,
-    w5: null,
+    w5: screen === "w5m" ? t("common.wizard.step5Manual") : null,
     w6: null,
   };
 
@@ -91,7 +97,7 @@ export function WizardLayout({ children }: { children: React.ReactNode }) {
 
         <div className="flex flex-col gap-0.5">
           {STEPS.map((step) => {
-            const active = screen === step.screen;
+            const active = screen === step.screen || (step.screen === "w5" && screen === "w5m");
             const done = stepDone[step.screen];
             const enabled = reachable[step.screen];
             return (

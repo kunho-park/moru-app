@@ -21,6 +21,7 @@ import { W2Scan } from "@/screens/W2Scan";
 import { W3Settings } from "@/screens/W3Settings";
 import { W4Progress } from "@/screens/W4Progress";
 import { W5Review } from "@/screens/W5Review";
+import { W5Manual } from "@/screens/W5Manual";
 import { W6Export } from "@/screens/W6Export";
 import { WIZARD_SCREENS, useRouter } from "@/stores/router";
 
@@ -30,6 +31,7 @@ const WIZARD_BODIES = {
   w3: W3Settings,
   w4: W4Progress,
   w5: W5Review,
+  w5m: W5Manual,
   w6: W6Export,
 } as const;
 

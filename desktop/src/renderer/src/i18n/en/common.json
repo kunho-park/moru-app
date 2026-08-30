@@ -44,6 +44,7 @@
     "step3": "Settings",
     "step4": "Progress",
     "step5": "Review",
+    "step5Manual": "By hand",
     "step6": "Export · Share",
     "eta": "Estimated completion",
     "stepsDone": "{{done}} / 6 steps done"
@@ -60,6 +61,7 @@
     "tmHit": "TM reuse",
     "migrated": "Previous translation",
     "skipped": "Skipped",
+    "untranslated": "Untranslated",
     "shared": "Shared"
   },
   "action": {

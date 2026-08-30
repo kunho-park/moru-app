@@ -38,9 +38,15 @@ class GlossaryFilter:
 
         word_set = set(re.findall(r"\w+", combined_text))
 
-        filtered_terms = GlossaryFilter._filter_term_rules(
+        matched_terms = GlossaryFilter._filter_term_rules(
             glossary.term_rules, combined_text, word_set
         )
+        filtered_terms = [
+            glossary.term_rules[index]
+            for index in GlossaryFilter._resolve_key_scopes(
+                glossary.term_rules, matched_terms, texts
+            )
+        ]
 
         filtered_nouns = GlossaryFilter._filter_proper_noun_rules(
             glossary.proper_noun_rules, combined_text, word_set
@@ -73,17 +79,22 @@ class GlossaryFilter:
         term_rules: list[TermRule],
         combined_text: str,
         word_set: set[str],
-    ) -> list[TermRule]:
+    ) -> dict[int, list[str]]:
         """Filter term rules using word-set lookup + single combined regex.
 
         Single-word aliases are checked via O(1) set membership.
         Multi-word aliases that pass a cheap substring pre-filter are
         verified in a single compiled regex scan.
+
+        Returns:
+            Matched rule index -> the lowercased aliases it matched on,
+            which is what ``_resolve_key_scopes`` needs to know which rules
+            compete for the same source surface.
         """
         if not term_rules:
-            return []
+            return {}
 
-        matched_indices: set[int] = set()
+        matched: dict[int, list[str]] = {}
         multi_word_map: dict[str, list[int]] = {}
 
         for i, term in enumerate(term_rules):
@@ -95,8 +106,7 @@ class GlossaryFilter:
 
                 if _SINGLE_WORD_RE.fullmatch(lowered):
                     if lowered in word_set:
-                        matched_indices.add(i)
-                        break
+                        matched.setdefault(i, []).append(lowered)
                 else:
                     if lowered in combined_text:
                         multi_word_map.setdefault(lowered, []).append(i)
@@ -108,10 +118,82 @@ class GlossaryFilter:
             )
             for m in pattern.finditer(combined_text):
                 hit = m.group()
-                if hit in multi_word_map:
-                    matched_indices.update(multi_word_map[hit])
+                if hit not in multi_word_map:
+                    continue
+                for i in multi_word_map[hit]:
+                    aliases = matched.setdefault(i, [])
+                    if hit not in aliases:
+                        aliases.append(hit)
 
-        return [term_rules[i] for i in sorted(matched_indices)]
+        return matched
+
+    @staticmethod
+    def _resolve_key_scopes(
+        term_rules: list[TermRule],
+        matched: dict[int, list[str]],
+        texts: dict[str, str],
+    ) -> list[int]:
+        """Apply per-key ``key_scope`` precedence to the text-matched rules.
+
+        A rule survives when it wins the precedence contest documented on
+        ``TermRule`` for at least one batch key whose source text actually
+        contains one of the aliases it matched on. That keeps a scoped rule
+        away from keys it does not cover, and drops an unscoped rule whose
+        every candidate key is claimed by a more specific scoped rule.
+
+        Rules competing for no scoped surface are returned untouched, so a
+        glossary without scopes takes the same path (and gets the same
+        result) as it did before scopes existed.
+
+        Returns:
+            Surviving rule indices, ascending.
+        """
+        indices = sorted(matched)
+
+        #: lowercased alias -> matched rules declaring it, ascending index.
+        groups: dict[str, list[int]] = {}
+        for index in indices:
+            for alias in matched[index]:
+                groups.setdefault(alias, []).append(index)
+
+        scoped_aliases = [
+            alias
+            for alias, members in groups.items()
+            if any(term_rules[i].key_scope for i in members)
+        ]
+        if not scoped_aliases:
+            return indices
+
+        # A rule keeps matching on text alone as long as one of the aliases
+        # it matched is on no scoped surface; on a scoped surface it has to
+        # win a key below.
+        scoped = set(scoped_aliases)
+        survivors = {
+            index
+            for index in indices
+            if any(alias not in scoped for alias in matched[index])
+        }
+        lowered_texts = {key: text.lower() for key, text in texts.items()}
+
+        for alias in scoped_aliases:
+            members = groups[alias]
+            alias_re = re.compile(r"\b" + re.escape(alias) + r"\b")
+            for key, text in lowered_texts.items():
+                if not alias_re.search(text):
+                    continue
+                best_rank: tuple[int, int] | None = None
+                best_index: int | None = None
+                for index in members:
+                    rank = term_rules[index].scope_rank(key)
+                    # Strict >: on a tie the earlier rule wins, keeping
+                    # resolution deterministic.
+                    if rank is not None and (best_rank is None or rank > best_rank):
+                        best_rank = rank
+                        best_index = index
+                if best_index is not None:
+                    survivors.add(best_index)
+
+        return sorted(survivors)
 
     @staticmethod
     def _filter_proper_noun_rules(

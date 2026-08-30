@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import platform
+import shutil
 import subprocess
 import threading
 import time
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import dotenv_values
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,13 @@ def _atomic_write_json(path: Path, data: object, *, private: bool) -> None:
         except OSError:  # pragma: no cover - Windows/ACL filesystems
             pass
     os.replace(tmp, path)
+
+
+def _refreshed(resp: httpx.Response) -> dict[str, Any]:
+    """Parsed body of a token-refresh response, or the failure it reports."""
+    if resp.status_code != 200:
+        raise CliAuthError(f"token refresh failed ({resp.status_code}): {resp.text[:300]}")
+    return resp.json()
 
 
 @dataclass
@@ -200,21 +209,35 @@ class CliCredentialStore(ABC):
             return None
         return data if isinstance(data, dict) else None
 
-    @staticmethod
-    def _post_form(url: str, form: dict[str, str], headers: dict[str, str] | None = None) -> dict[str, Any]:
-        with httpx.Client(timeout=_TIMEOUT) as client:
-            resp = client.post(url, data=form, headers=headers or {})
-        if resp.status_code != 200:
-            raise CliAuthError(f"token refresh failed ({resp.status_code}): {resp.text[:300]}")
-        return resp.json()
+    def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        form: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """The one HTTP call every store makes.
 
-    @staticmethod
-    def _post_json(url: str, body: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+        Returns the raw response instead of a parsed body: provisioning
+        flows have to read a 4xx (Cloud Code Assist answers VPC-SC users
+        with one), and a single seam is what the tests patch.
+        """
         with httpx.Client(timeout=_TIMEOUT) as client:
-            resp = client.post(url, json=body, headers=headers or {})
-        if resp.status_code != 200:
-            raise CliAuthError(f"token refresh failed ({resp.status_code}): {resp.text[:300]}")
-        return resp.json()
+            return client.request(
+                method, url, headers=headers or {}, data=form, json=json_body
+            )
+
+    def _post_form(
+        self, url: str, form: dict[str, str], headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        return _refreshed(self._send("POST", url, headers=headers, form=form))
+
+    def _post_json(
+        self, url: str, body: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        return _refreshed(self._send("POST", url, headers=headers, json_body=body))
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +473,7 @@ class CodexStore(CliCredentialStore):
 
 
 # ---------------------------------------------------------------------------
-# Gemini CLI — ~/.gemini/oauth_creds.json + Cloud Code Assist project
+# Gemini CLI / Antigravity CLI — oauth_creds.json + Cloud Code Assist project
 # ---------------------------------------------------------------------------
 
 # The Gemini CLI's own installed-app OAuth client, the same pair the
@@ -475,6 +498,45 @@ _TIER_FREE = "free-tier"
 _TIER_LEGACY = "legacy-tier"
 _TIER_STANDARD = "standard-tier"
 
+#: Commands that own this grant. Google replaced the `gemini` CLI with
+#: Antigravity CLI, whose binary is `agy`; both are live in the wild, so the
+#: store reports whichever one this machine actually has.
+_AGY_COMMAND = "agy"
+_GEMINI_COMMAND = "gemini"
+
+#: Antigravity nests its config inside the legacy home instead of taking a
+#: new one, so a migrated machine has both layouts side by side and the
+#: newer one wins. `antigravity-cli` is the documented directory; installs
+#: carried over from the 1.x desktop build also keep an `antigravity` one.
+#: https://antigravity.google/docs/cli/using/
+_ANTIGRAVITY_SUBDIRS = ("antigravity-cli", "antigravity")
+_CREDENTIAL_FILE = "oauth_creds.json"
+
+#: Project env vars the CLI itself honors (setup.ts, `setupUser`).
+_PROJECT_ENV_VARS = ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID")
+
+
+def _agy_installed() -> bool:
+    """Whether the Antigravity binary is on this machine.
+
+    PATH alone is not enough: the installer drops `agy` in ~/.local/bin,
+    which a GUI-spawned sidecar's environment routinely omits, so the
+    documented install locations are probed too.
+    https://antigravity.google/docs/cli/install/
+    """
+    if shutil.which(_AGY_COMMAND) is not None:
+        return True
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    candidates = [
+        Path.home() / ".local" / "bin" / _AGY_COMMAND,
+        Path("/opt/homebrew/bin") / _AGY_COMMAND,
+        Path("/usr/local/bin") / _AGY_COMMAND,
+        Path(r"C:\Program Files\Google\antigravity-cli") / f"{_AGY_COMMAND}.exe",
+    ]
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "agy" / "bin" / f"{_AGY_COMMAND}.exe")
+    return any(path.is_file() for path in candidates)
+
 
 def gemini_cli_headers(model_id: str = "gemini-3.1-pro-preview") -> dict[str, str]:
     """User-Agent/metadata the real Gemini CLI sends (unlocks its rate limits)."""
@@ -492,24 +554,92 @@ def gemini_cli_headers(model_id: str = "gemini-3.1-pro-preview") -> dict[str, st
 class GeminiCliStore(CliCredentialStore):
     id = "gemini-cli"
     label = "Gemini CLI"
-    login_hint = "gemini"
+
+    @property
+    def home(self) -> Path:
+        """Config root both CLIs share — Antigravity kept the legacy one.
+
+        GEMINI_CLI_HOME is the CLI's own relocation switch (its settings
+        path is read straight off it), so a user who moved their config
+        does not have to tell moru about it a second time.
+        """
+        override = os.environ.get("GEMINI_CONFIG_DIR") or os.environ.get("GEMINI_CLI_HOME")
+        return Path(override) if override else Path.home() / ".gemini"
+
+    def _antigravity_dirs(self) -> list[Path]:
+        home = self.home
+        return [home / name for name in _ANTIGRAVITY_SUBDIRS]
+
+    def antigravity(self) -> bool:
+        """True when this machine runs the migrated CLI (`agy`).
+
+        A config directory is the stronger signal — an `agy` that has run
+        even once has one — but the binary counts too, so a fresh install
+        already names the right command to log in with.
+        """
+        if any(directory.is_dir() for directory in self._antigravity_dirs()):
+            return True
+        return _agy_installed()
+
+    @property
+    def login_hint(self) -> str:
+        return _AGY_COMMAND if self.antigravity() else _GEMINI_COMMAND
 
     @property
     def path(self) -> Path:
-        override = os.environ.get("GEMINI_CONFIG_DIR")
-        base = Path(override) if override else Path.home() / ".gemini"
-        return base / "oauth_creds.json"
+        """The credential file in use: Antigravity's when it wrote one.
+
+        Antigravity moves the session into the OS keyring on migration, so
+        a migrated machine often keeps only the legacy file — both layouts
+        stay readable and whichever exists wins. With neither on disk the
+        reported path is the one the CLI this machine has would write.
+        """
+        candidates = [directory / _CREDENTIAL_FILE for directory in self._antigravity_dirs()]
+        legacy = self.home / _CREDENTIAL_FILE
+        candidates.append(legacy)
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return candidates[0] if self.antigravity() else legacy
 
     @property
     def _project_cache_path(self) -> Path:
-        return self.path.parent / "moru_project_id"
+        # Pinned to the shared root, never the per-CLI subdirectory: one
+        # account resolves to one project whichever binary wrote the grant.
+        return self.home / "moru_project_id"
 
     def _env_project(self) -> str | None:
-        return (
-            os.environ.get("GOOGLE_CLOUD_PROJECT")
-            or os.environ.get("GOOGLE_CLOUD_PROJECT_ID")
-            or None
-        )
+        """Project the user configured, from the environment or the CLI's own.
+
+        The CLI exports GOOGLE_CLOUD_PROJECT out of `<config>/.env` and then
+        `~/.env` and only fills what the process has not already set
+        (gemini-cli ``loadEnvironment``), so moru reads them in the same
+        order — a user who set the project for the CLI never has to set it
+        again for moru.
+        """
+        for name in _PROJECT_ENV_VARS:
+            value = (os.environ.get(name) or "").strip()
+            if value:
+                return value
+        for env_file in (self.home / ".env", Path.home() / ".env"):
+            if not env_file.is_file():
+                continue
+            values = dotenv_values(env_file)
+            for name in _PROJECT_ENV_VARS:
+                value = (values.get(name) or "").strip()
+                if value:
+                    return value
+        return None
+
+    def _cached_project(self) -> str | None:
+        """Project a previous resolution persisted, so it happens once."""
+        path = self._project_cache_path
+        if not path.is_file():
+            return None
+        try:
+            return path.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
 
     def _load(self) -> OAuthCredentials | None:
         doc = self._read_json()
@@ -519,12 +649,7 @@ class GeminiCliStore(CliCredentialStore):
         if not isinstance(access, str) or not access:
             return None
         expiry = doc.get("expiry_date")
-        project = self._env_project()
-        if project is None and self._project_cache_path.is_file():
-            try:
-                project = self._project_cache_path.read_text(encoding="utf-8").strip() or None
-            except OSError:
-                project = None
+        project = self._env_project() or self._cached_project()
         return OAuthCredentials(
             access=access,
             refresh=doc.get("refresh_token") or "",
@@ -570,13 +695,38 @@ class GeminiCliStore(CliCredentialStore):
 
     # -- Cloud Code Assist project ---------------------------------------
 
-    def project(self) -> str:
-        """Cloud Code Assist project id, discovering + caching on first use.
+    def status(self) -> dict[str, Any]:
+        """Auth summary for GET /providers — including the project.
 
-        Ported from oh-my-pi's ``discoverProject``: loadCodeAssist tells us
-        the already-provisioned project; free-tier accounts that have none
-        get onboarded, and the long-running operation is polled to
-        completion.
+        The base probe only proves a token is on disk, but a Gemini CLI
+        request also needs a Cloud Code Assist project, and resolving one
+        is exactly what fails for Workspace/GCA accounts. Running the same
+        chain the request runs is what keeps the desktop's 연결됨 badge and
+        its 연결 테스트 from disagreeing.
+        """
+        summary = super().status()
+        summary["antigravity"] = self.antigravity()
+        if not summary["connected"]:
+            return summary
+        try:
+            summary["project"] = self.project()
+        except Exception as exc:  # noqa: BLE001 - status must never raise
+            logger.debug("Gemini CLI project resolution failed", exc_info=True)
+            summary["connected"] = False
+            summary["project"] = None
+            summary["error"] = str(exc)
+        return summary
+
+    def project(self) -> str:
+        """Cloud Code Assist project id, resolved once and then persisted.
+
+        Mirrors the CLI's own ``setupUser``: an explicitly configured
+        project wins, otherwise loadCodeAssist reports the one Code Assist
+        already provisioned, and an account that has never been onboarded
+        gets onboarded — which is how free-tier and personal accounts get a
+        managed project without ever setting GOOGLE_CLOUD_PROJECT. Only
+        when every one of those avenues comes back empty is the account
+        genuinely one of the Workspace/GCA cases that must name its own.
         """
         creds = self.credentials()
         if creds.project_id:
@@ -588,83 +738,98 @@ class GeminiCliStore(CliCredentialStore):
             "Content-Type": "application/json",
             **gemini_cli_headers(),
         }
-        with httpx.Client(timeout=_TIMEOUT) as client:
-            load = client.post(
-                f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist",
-                headers=headers,
-                json={
-                    "cloudaicompanionProject": env_project,
-                    "metadata": {
-                        "ideType": "IDE_UNSPECIFIED",
-                        "platform": "PLATFORM_UNSPECIFIED",
-                        "pluginType": "GEMINI",
-                        "duetProject": env_project,
-                    },
-                },
-            )
-            if load.status_code == 200:
-                payload = load.json()
-            else:
-                payload = self._vpc_sc_fallback(load)
+        payload = self._load_code_assist(headers, env_project)
 
-            if payload.get("currentTier"):
-                project = payload.get("cloudaicompanionProject") or env_project
-                if not project:
-                    raise CliAuthError(_NEEDS_PROJECT_ENV)
-                self._cache_project(project)
-                return project
-
-            tier_id = _default_tier(payload.get("allowedTiers"))
-            if tier_id != _TIER_FREE and not env_project:
+        if payload.get("currentTier"):
+            # Already onboarded: the response names the project, and an
+            # account whose tier carries none must supply its own.
+            project = payload.get("cloudaicompanionProject") or env_project
+            if not project:
                 raise CliAuthError(_NEEDS_PROJECT_ENV)
+            return self._cache_project(project)
 
-            onboard_body: dict[str, Any] = {
-                "tierId": tier_id,
+        lro = self._onboard_user(headers, _default_tier(payload.get("allowedTiers")), env_project)
+        project = (
+            ((lro.get("response") or {}).get("cloudaicompanionProject") or {}).get("id")
+            or env_project
+            # Onboarding said nothing, but loadCodeAssist may still have
+            # named the provisioned project before the tier was assigned.
+            or payload.get("cloudaicompanionProject")
+        )
+        if not project:
+            raise CliAuthError(_NEEDS_PROJECT_ENV)
+        return self._cache_project(project)
+
+    def _load_code_assist(
+        self, headers: dict[str, str], env_project: str | None
+    ) -> dict[str, Any]:
+        response = self._send(
+            "POST",
+            f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist",
+            headers=headers,
+            json_body={
+                "cloudaicompanionProject": env_project,
                 "metadata": {
                     "ideType": "IDE_UNSPECIFIED",
                     "platform": "PLATFORM_UNSPECIFIED",
                     "pluginType": "GEMINI",
+                    "duetProject": env_project,
                 },
-            }
-            if tier_id != _TIER_FREE and env_project:
-                onboard_body["cloudaicompanionProject"] = env_project
-                onboard_body["metadata"]["duetProject"] = env_project
+            },
+        )
+        if response.status_code == 200:
+            return response.json()
+        return self._vpc_sc_fallback(response)
 
-            resp = client.post(
-                f"{CODE_ASSIST_ENDPOINT}/v1internal:onboardUser",
-                headers=headers,
-                json=onboard_body,
+    def _onboard_user(
+        self, headers: dict[str, str], tier_id: str, env_project: str | None
+    ) -> dict[str, Any]:
+        """Provision this account's project, polling the operation out."""
+        body: dict[str, Any] = {
+            "tierId": tier_id,
+            "metadata": {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+            },
+        }
+        if tier_id != _TIER_FREE and env_project:
+            # The free tier runs on a Google-managed project and answers
+            # "Precondition Failed" when the request names one.
+            body["cloudaicompanionProject"] = env_project
+            body["metadata"]["duetProject"] = env_project
+
+        response = self._send(
+            "POST",
+            f"{CODE_ASSIST_ENDPOINT}/v1internal:onboardUser",
+            headers=headers,
+            json_body=body,
+        )
+        if response.status_code != 200:
+            raise CliAuthError(
+                f"Gemini CLI 프로젝트 등록에 실패했습니다. "
+                f"({response.status_code}) {response.text[:300]}"
             )
-            if resp.status_code != 200:
+        lro = response.json()
+        # Bounded poll: a stuck operation must surface as an error rather
+        # than hang the translation job.
+        for attempt in range(24):
+            if lro.get("done"):
+                break
+            name = lro.get("name")
+            if not name:
+                break
+            time.sleep(5 if attempt else 0)
+            poll = self._send(
+                "GET", f"{CODE_ASSIST_ENDPOINT}/v1internal/{name}", headers=headers
+            )
+            if poll.status_code != 200:
                 raise CliAuthError(
-                    f"onboardUser failed ({resp.status_code}): {resp.text[:300]}"
+                    f"Gemini CLI 프로젝트 등록 상태를 확인할 수 없습니다. "
+                    f"({poll.status_code}) {poll.text[:200]}"
                 )
-            lro = resp.json()
-            # Bounded poll: a stuck operation must surface as an error
-            # rather than hang the translation job.
-            for attempt in range(24):
-                if lro.get("done"):
-                    break
-                name = lro.get("name")
-                if not name:
-                    break
-                time.sleep(5 if attempt else 0)
-                poll = client.get(
-                    f"{CODE_ASSIST_ENDPOINT}/v1internal/{name}", headers=headers
-                )
-                if poll.status_code != 200:
-                    raise CliAuthError(
-                        f"operation poll failed ({poll.status_code}): {poll.text[:200]}"
-                    )
-                lro = poll.json()
-
-        project = (
-            (lro.get("response") or {}).get("cloudaicompanionProject") or {}
-        ).get("id") or env_project
-        if not project:
-            raise CliAuthError(_NEEDS_PROJECT_ENV)
-        self._cache_project(project)
-        return project
+            lro = poll.json()
+        return lro
 
     @staticmethod
     def _vpc_sc_fallback(response: httpx.Response) -> dict[str, Any]:
@@ -680,10 +845,12 @@ class GeminiCliStore(CliCredentialStore):
         ):
             return {"currentTier": {"id": _TIER_STANDARD}}
         raise CliAuthError(
-            f"loadCodeAssist failed ({response.status_code}): {response.text[:300]}"
+            f"Gemini CLI 계정 정보를 불러올 수 없습니다. "
+            f"({response.status_code}) {response.text[:300]}"
         )
 
-    def _cache_project(self, project: str) -> None:
+    def _cache_project(self, project: str) -> str:
+        """Persist a resolved project so it is discovered once, not per call."""
         try:
             self._project_cache_path.parent.mkdir(parents=True, exist_ok=True)
             self._project_cache_path.write_text(project, encoding="utf-8")
@@ -691,6 +858,7 @@ class GeminiCliStore(CliCredentialStore):
             logger.debug("Could not cache Gemini project id", exc_info=True)
         if self._cache is not None:
             self._cache.project_id = project
+        return project
 
 
 _NEEDS_PROJECT_ENV = (

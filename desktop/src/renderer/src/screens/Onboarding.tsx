@@ -13,7 +13,7 @@ import { useTranslation } from "react-i18next";
 import { MoruLogo } from "@/components/MoruLogo";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
-import { cliProductName, cliSetupState, isCliProvider } from "@/lib/cliProviders";
+import { cliGuidance, cliSetupState, cliStatusChip, isCliProvider, providerLabel } from "@/lib/cliProviders";
 import { LOCAL_PROVIDERS, PROVIDER_TIERS } from "@/lib/models";
 import { useAccount } from "@/stores/account";
 import { useRouter } from "@/stores/router";
@@ -222,7 +222,7 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
               const tileCli = isCliProvider(p) ? cliSetupState(p) : null;
               const connected =
                 tileCli !== null ? tileCli.kind === "ready" : savedIds.has(p.id) || p.has_key;
-              const label = tileCli !== null ? cliProductName(p) : p.name;
+              const label = providerLabel(p, t);
               return (
                 <button
                   key={p.id}
@@ -241,11 +241,7 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
                     <div className="truncate text-[12px] font-bold text-text">{label}</div>
                     <div className="mt-[2px] font-mono text-[10px] text-text3">
                       {tileCli !== null
-                        ? tileCli.kind === "ready"
-                          ? t("onboarding.key.cliReady")
-                          : tileCli.kind === "needs-setup"
-                            ? t("onboarding.key.cliNeedsSetup")
-                            : t("onboarding.key.cliNeedsLogin")
+                        ? cliStatusChip(tileCli, t).label
                         : savedIds.has(p.id)
                           ? t("onboarding.key.saved")
                           : LOCAL_PROVIDERS.has(p.id)
@@ -266,17 +262,9 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
               {selectedCli !== null ? (
                 <div className="border border-line2 bg-raised px-4 py-3">
                   <div className="mb-2 font-mono text-[11px] leading-relaxed text-text3">
-                    {selectedCli.kind === "ready"
-                      ? t("onboarding.key.cliConnectedDetail", {
-                          account: selectedCli.account ?? cliProductName(selected),
-                        })
-                      : selectedCli.kind === "needs-setup"
-                        ? selectedCli.reason !== null
-                          ? t("onboarding.key.cliBlockedDetail", { reason: selectedCli.reason })
-                          : t("settings.models.cliBlockedUnknown")
-                        : selectedCli.command !== null
-                          ? t("onboarding.key.cliLoginDetail", { cmd: selectedCli.command })
-                          : t("settings.models.cliLoginHintNoCmd")}
+                    {selectedCli.kind === "ready" && selectedCli.account !== null
+                      ? t("onboarding.key.cliConnectedDetail", { account: selectedCli.account })
+                      : cliGuidance(selectedCli, t)}
                   </div>
                   <button
                     type="button"

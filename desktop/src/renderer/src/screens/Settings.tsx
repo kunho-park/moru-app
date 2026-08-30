@@ -14,9 +14,11 @@ import { moru } from "@/lib/bridge";
 import { formatInt } from "@/lib/format";
 import {
   cliFailureReason,
-  cliProductName,
+  cliGuidance,
   cliSetupState,
+  cliStatusChip,
   isCliProvider,
+  providerLabel,
 } from "@/lib/cliProviders";
 import { LOCAL_PROVIDERS, modelDisplayName } from "@/lib/models";
 import { WEB_URL, WebApiError, web } from "@/lib/web";
@@ -331,26 +333,15 @@ function CliProviderCard({ provider }: { provider: Provider }) {
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["providers"] }),
   });
 
-  const status =
-    state.kind === "ready"
-      ? { label: t("settings.models.cliConnected"), tone: "text-accent" }
-      : state.kind === "needs-setup"
-        ? { label: t("settings.models.cliNeedsSetup"), tone: "text-amber" }
-        : { label: t("settings.models.cliNeedsLogin"), tone: "text-text3" };
-
-  const guidance =
-    state.kind === "ready"
-      ? t("settings.models.cliReady")
-      : state.kind === "needs-setup"
-        ? /* A readable grant that still cannot serve a request (a Workspace
-             Google account with no Cloud Code Assist project, say) must say
-             so — telling this user to log in again never fixes it. */
-          state.reason !== null
-          ? t("settings.models.cliBlocked", { reason: state.reason })
-          : t("settings.models.cliBlockedUnknown")
-        : state.command !== null
-          ? t("settings.models.cliLoginHint", { cmd: state.command })
-          : t("settings.models.cliLoginHintNoCmd");
+  const status = cliStatusChip(state, t);
+  const guidance = cliGuidance(state, t);
+  /* Which backend a request would take, and where its config came from.
+     Only shown while something is wrong: it is support information, and a
+     working provider does not need to explain its plumbing. */
+  const transport =
+    state.kind !== "ready" && typeof provider.transport === "string"
+      ? [provider.transport, provider.config_dir].filter(Boolean).join(" · ")
+      : null;
 
   /* The engine hands back str(exc) on an unexpected failure, so the probe
      result is sanitized before it reaches the strip: a card that tells the
@@ -375,7 +366,7 @@ function CliProviderCard({ provider }: { provider: Provider }) {
         </div>
         <div className="min-w-0 flex-1">
           <div className="mb-[2px] flex items-center gap-2">
-            <span className="text-sm font-bold text-text">{cliProductName(provider)}</span>
+            <span className="text-sm font-bold text-text">{providerLabel(provider, t)}</span>
             <span className="bg-[rgba(61,220,132,0.08)] px-[5px] py-[2px] font-mono text-[10px] text-accent">
               {t("settings.models.cliSubscription")}
             </span>
@@ -393,8 +384,13 @@ function CliProviderCard({ provider }: { provider: Provider }) {
       </div>
 
       <div className="flex items-center gap-[10px] px-5 py-4">
-        <div className="min-w-0 flex-1 font-mono text-[11px] leading-[1.6] text-text3">
-          {guidance}
+        <div className="min-w-0 flex-1">
+          <div className="font-mono text-[11px] leading-[1.6] text-text3">{guidance}</div>
+          {transport !== null && (
+            <div className="mt-[6px] font-mono text-[10px] text-text4">
+              {t("settings.models.cliTransport", { transport })}
+            </div>
+          )}
         </div>
         <button
           type="button"

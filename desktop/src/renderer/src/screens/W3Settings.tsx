@@ -15,9 +15,11 @@ import { moru } from "@/lib/bridge";
 import { formatCompact, formatInt, formatUsd } from "@/lib/format";
 import {
   cliFailureReason,
-  cliProductName,
+  cliGuidance,
   cliSetupState,
+  cliStatusChip,
   isCliProvider,
+  providerLabel,
   type CliSetupState,
 } from "@/lib/cliProviders";
 import {
@@ -133,10 +135,10 @@ function TerminalIcon({ color }: { color: string }) {
 
 /**
  * Setup guidance for the selected coding-CLI subscription, standing in for
- * the key row those providers have no use for. Mirrors the Settings card —
- * same three states, same strings — so the two screens cannot disagree, and
- * re-checks in place so the user never has to restart the app after logging
- * in.
+ * the key row those providers have no use for. Title aside, every word comes
+ * from the same `cliStatusChip`/`cliGuidance` the Settings card uses, so the
+ * two screens cannot describe one provider differently. Re-checks in place,
+ * so nobody has to restart the app after signing in.
  */
 function CliSetupBand({ provider, state }: { provider: Provider; state: CliSetupState }) {
   const { t } = useTranslation();
@@ -148,26 +150,21 @@ function CliSetupBand({ provider, state }: { provider: Provider; state: CliSetup
 
   const ready = state.kind === "ready";
   const tone = ready
-    ? { border: "border-accent-lo", bg: "bg-tint", chip: "rgba(61,220,132,0.12)", ink: "#3DDC84" }
-    : { border: "border-amber", bg: "", chip: "rgba(245,180,84,0.12)", ink: "#F5B454" };
+    ? { border: "border-accent-lo", chip: "rgba(61,220,132,0.12)", ink: "#3DDC84" }
+    : { border: "border-amber", chip: "rgba(245,180,84,0.12)", ink: "#F5B454" };
 
+  const name = providerLabel(provider, t);
   const title = ready
-    ? t("w3.key.cliConfirmed", { provider: cliProductName(provider) })
-    : state.kind === "needs-setup"
-      ? t("w3.key.cliNeedsSetup", { provider: cliProductName(provider) })
-      : t("w3.key.cliNeedsLogin", { provider: cliProductName(provider) });
-
-  const detail = ready
-    ? state.account !== null
-      ? t("settings.models.cliReady") + ` · ${state.account}`
-      : t("settings.models.cliReady")
-    : state.kind === "needs-setup"
-      ? state.reason !== null
-        ? t("settings.models.cliBlocked", { reason: state.reason })
-        : t("settings.models.cliBlockedUnknown")
-      : state.command !== null
-        ? t("settings.models.cliLoginHint", { cmd: state.command })
-        : t("settings.models.cliLoginHintNoCmd");
+    ? t("w3.key.cliConfirmed", { provider: name })
+    : t("w3.key.cliBlocked", { provider: name, status: cliStatusChip(state, t).label });
+  const detail =
+    ready && state.account !== null
+      ? `${cliGuidance(state, t)} · ${state.account}`
+      : cliGuidance(state, t);
+  const transport =
+    !ready && typeof provider.transport === "string"
+      ? [provider.transport, provider.config_dir].filter(Boolean).join(" · ")
+      : null;
 
   /* The probe returns the engine's str(exc) on an unexpected failure; a
      screen telling the user how to fix their setup must not answer with a
@@ -181,7 +178,7 @@ function CliSetupBand({ provider, state }: { provider: Provider; state: CliSetup
 
   return (
     <div
-      className={`relative mb-5 flex items-center gap-[14px] border ${tone.border} ${tone.bg} px-[18px] py-4`}
+      className={`relative mb-5 flex items-center gap-[14px] border ${tone.border} ${ready ? "bg-tint" : ""} px-[18px] py-4`}
       style={ready ? undefined : { background: "rgba(245,180,84,0.04)" }}
     >
       <div
@@ -193,6 +190,11 @@ function CliSetupBand({ provider, state }: { provider: Provider; state: CliSetup
       <div className="min-w-0 flex-1">
         <div className="mb-[2px] text-[13px] font-bold text-text">{title}</div>
         <div className="font-mono text-[11px] leading-[1.6] text-text2">{detail}</div>
+        {transport !== null && (
+          <div className="mt-[6px] font-mono text-[10px] text-text4">
+            {t("settings.models.cliTransport", { transport })}
+          </div>
+        )}
         {probeFailure !== null && (
           <div className="mt-1 font-mono text-[11px] text-red">{probeFailure}</div>
         )}
@@ -378,9 +380,7 @@ export function W3Settings() {
   const providerName =
     provider === undefined
       ? (PROVIDER_LABELS[providerId] ?? providerId)
-      : isCliProvider(provider)
-        ? cliProductName(provider)
-        : provider.name;
+      : providerLabel(provider, t);
   const selectedSecret = resolveProviderSecret(
     providerId,
     secretQuery.data,
@@ -684,21 +684,12 @@ export function W3Settings() {
             const isConnected = connected.has(id);
             const entry = providersQuery.data?.find((p) => p.id === id);
             const tileCli = entry !== undefined && isCliProvider(entry) ? cliSetupState(entry) : null;
-            const name =
-              entry === undefined
-                ? (PROVIDER_LABELS[id] ?? id)
-                : tileCli !== null
-                  ? cliProductName(entry)
-                  : entry.name;
-            /* Same three states the Settings card reports, so a provider
+            const name = entry === undefined ? (PROVIDER_LABELS[id] ?? id) : providerLabel(entry, t);
+            /* Word-for-word the chip the Settings card shows, so a provider
                cannot read 설정 필요 there and 연결됨 here. */
             const status =
               tileCli !== null
-                ? tileCli.kind === "ready"
-                  ? t("w3.provider.connected")
-                  : tileCli.kind === "needs-setup"
-                    ? t("w3.provider.needsCliSetup")
-                    : t("w3.provider.needsCliLogin")
+                ? cliStatusChip(tileCli, t).label
                 : isConnected
                   ? t("w3.provider.connected")
                   : LOCAL_PROVIDERS.has(id)

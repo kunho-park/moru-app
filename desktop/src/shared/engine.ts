@@ -378,6 +378,24 @@ export interface CommunitySyncResult {
   tm: { version: string; entries: number; updated: boolean } | null;
 }
 
+/**
+ * Setup state of an `auth: "cli"` provider, as the engine reports it.
+ *
+ * - `cli-missing` — the CLI is not on this machine; install it.
+ * - `logged-out`  — CLI present, no credential; sign in.
+ * - `cli-ready`   — CLI present, but its login lives somewhere we cannot
+ *                   read (Antigravity keeps it in the OS keyring), so only
+ *                   a real request can prove the session either way.
+ * - `ready`       — a request would succeed now.
+ * - `unusable`    — signed in, but a request would still fail.
+ */
+export type CliProviderState =
+  | "cli-missing"
+  | "logged-out"
+  | "cli-ready"
+  | "ready"
+  | "unusable";
+
 export interface Provider {
   id: string;
   name: string;
@@ -388,12 +406,26 @@ export interface Provider {
   /** Present only for coding-CLI subscriptions (Claude Code, Codex, Gemini CLI). */
   auth?: "cli";
   connected?: boolean;
-  /** Shell command that authenticates the CLI, e.g. "claude login". */
+  /** What the UI should branch on. `connected` is a bool kept for older
+   *  clients and cannot separate "install it" from "sign in" from "signed
+   *  in but broken" — three different next actions. */
+  state?: CliProviderState;
+  /** The CLI binary that owns this grant, e.g. "claude", "agy". */
+  cli?: string | null;
+  /** Whether that binary is on this machine. */
+  cli_installed?: boolean;
+  /** Command that signs the CLI in, resolved per machine — Gemini CLI
+   *  reports "gemini" or "agy" depending on which one is installed. */
   login_hint?: string | null;
   /** Signed-in account, when the CLI's credential exposes one. */
   account?: string | null;
   /** Why an `auth: "cli"` provider is not usable, when it is not. */
   error?: string | null;
+  /** gemini-cli only: which backend a request would take ("legacy-http" |
+   *  "agy-cli"). Diagnostic — the two fail in completely different ways. */
+  transport?: string | null;
+  config_dir?: string | null;
+  config_dir_source?: string | null;
 }
 
 /** POST /providers/models - live model listing with static-catalog fallback. */

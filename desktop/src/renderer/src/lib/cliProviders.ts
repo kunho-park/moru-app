@@ -14,6 +14,8 @@
  * here would go stale silently, which is the same class of bug that let a
  * provider report "connected" while a real call failed.
  */
+import type { TFunction } from "i18next";
+
 import type { Provider } from "../../../shared/engine";
 
 /** Trimmed value, or null for absent/blank — the wire uses both for "none". */
@@ -36,40 +38,120 @@ export function isCliProvider(provider: Provider): boolean {
 }
 
 /**
- * What the user has to do next, which is the only thing the three states
- * differ by:
- * - `ready`       — a real request would succeed; nothing to do.
- * - `needs-setup` — signed in, but the grant cannot serve a request. Logging
- *                   in again does not fix it (e.g. a Workspace Google
- *                   account with no Cloud Code Assist project).
- * - `needs-login` — no readable credential. Log in with `command`.
+ * What the user has to do next — the only thing these states differ by, and
+ * the reason a boolean was never enough.
+ *
+ * - `ready`       — a request would succeed; nothing to do.
+ * - `cli-ready`   — the CLI is installed but keeps its login somewhere we
+ *                   cannot read (Antigravity uses the OS keyring). Neither
+ *                   "signed in" nor "signed out" is knowable from here, so
+ *                   the honest move is to try a real request.
+ * - `unusable`    — signed in, but a request would still fail. Signing in
+ *                   again does not fix it.
+ * - `logged-out`  — CLI present, no credential. Sign in with `command`.
+ * - `cli-missing` — no CLI on this machine. Install `cli` first; telling
+ *                   this user to run a login command is useless.
  */
 export type CliSetupState =
   | { kind: "ready"; account: string | null }
-  | { kind: "needs-setup"; reason: string | null }
-  | { kind: "needs-login"; command: string | null };
+  | { kind: "cli-ready"; command: string | null }
+  | { kind: "unusable"; reason: string | null }
+  | { kind: "logged-out"; command: string | null; cli: string | null }
+  | { kind: "cli-missing"; cli: string | null };
 
 /**
- * The provider's setup state, derived only from what the engine reports.
+ * The provider's setup state, taken from what the engine reports.
  *
- * `connected` is the engine's honest answer: for Gemini CLI it resolves a
- * Cloud Code Assist project the same way a real request does, so it cannot
- * come back true for a login that would fail on first use.
- *
- * Note the engine cannot currently tell "CLI never installed" apart from
- * "installed but not logged in" — both arrive as connected:false with no
- * error — so `needs-login` covers both, and its copy has to serve a user in
- * either position.
+ * `state` is the contract; `connected` is only consulted when an older
+ * engine omits it, and then it can only tell the coarse story a boolean
+ * can. The engine's `ready` is an honest answer — on the legacy Gemini
+ * transport it resolves a Cloud Code Assist project exactly as a request
+ * would, so it cannot come back true for a login that fails on first use.
  */
 export function cliSetupState(provider: Provider): CliSetupState {
+  const command = nonEmpty(provider.login_hint);
+  const cli = nonEmpty(provider.cli);
+  switch (provider.state) {
+    case "ready":
+      return { kind: "ready", account: nonEmpty(provider.account) };
+    case "cli-ready":
+      return { kind: "cli-ready", command };
+    case "unusable":
+      return { kind: "unusable", reason: cliFailureReason(provider.error) };
+    case "logged-out":
+      return { kind: "logged-out", command, cli };
+    case "cli-missing":
+      return { kind: "cli-missing", cli };
+  }
+  // Pre-`state` engine: a bool plus an error string is all there is.
   if (provider.connected ?? provider.has_key) {
     return { kind: "ready", account: nonEmpty(provider.account) };
   }
-  // `error` is set only when a credential was readable and still unusable.
   if (nonEmpty(provider.error) !== null) {
-    return { kind: "needs-setup", reason: cliFailureReason(provider.error) };
+    return { kind: "unusable", reason: cliFailureReason(provider.error) };
   }
-  return { kind: "needs-login", command: nonEmpty(provider.login_hint) };
+  return { kind: "logged-out", command, cli };
+}
+
+/**
+ * The status word and its tone. Every surface that shows a CLI provider's
+ * standing reads it from here, which is what makes "설정 필요 in Settings,
+ * 연결됨 in the translation step" structurally impossible rather than a
+ * thing to remember.
+ */
+export function cliStatusChip(
+  state: CliSetupState,
+  t: TFunction,
+): { label: string; tone: string } {
+  switch (state.kind) {
+    case "ready":
+      return { label: t("settings.models.cliConnected"), tone: "text-accent" };
+    case "cli-ready":
+      return { label: t("settings.models.cliUnverified"), tone: "text-text2" };
+    case "unusable":
+      return { label: t("settings.models.cliNeedsSetup"), tone: "text-amber" };
+    case "logged-out":
+      return { label: t("settings.models.cliNeedsLogin"), tone: "text-text3" };
+    case "cli-missing":
+      return { label: t("settings.models.cliNotInstalled"), tone: "text-text3" };
+  }
+}
+
+/**
+ * The sentence telling the user what to do next. Shared for the same reason
+ * as the chip: two screens describing one provider must not diverge.
+ *
+ * Every branch is actionable and none of them can print a traceback — the
+ * engine's raw `str(exc)` is filtered by `cliFailureReason` first, and the
+ * fallback copy takes over when nothing readable survives.
+ */
+export function cliGuidance(state: CliSetupState, t: TFunction): string {
+  switch (state.kind) {
+    case "ready":
+      return t("settings.models.cliReady");
+    case "cli-ready":
+      // Nothing on disk proves this session either way, so the copy must
+      // not claim a login state. Running a request is the only proof.
+      return state.command !== null
+        ? t("settings.models.cliKeyringHint", { cmd: state.command })
+        : t("settings.models.cliKeyringHintNoCmd");
+    case "unusable":
+      return state.reason !== null
+        ? t("settings.models.cliBlocked", { reason: state.reason })
+        : t("settings.models.cliBlockedUnknown");
+    case "logged-out":
+      // `cli` is the binary ("claude"); `command` is what signs it in
+      // ("claude login", or bare "agy"). They are not interchangeable.
+      return state.command !== null && state.cli !== null
+        ? t("settings.models.cliLoginHint", { cli: state.cli, cmd: state.command })
+        : t("settings.models.cliLoginHintNoCmd");
+    case "cli-missing":
+      // Naming a login command here would be useless: there is nothing to
+      // run it with yet.
+      return state.cli !== null
+        ? t("settings.models.cliMissingHint", { cli: state.cli })
+        : t("settings.models.cliMissingHintNoName");
+  }
 }
 
 /** A Python traceback, verbatim from the engine's `str(exc)`. */
@@ -98,19 +180,19 @@ export function cliFailureReason(raw: string | null | undefined): string | null 
 }
 
 /**
- * The engine's catalog ships display names with a Korean "(구독)" suffix
- * ("Gemini CLI (구독)"), which an English user should never read. Split the
- * marker off and let the caller render a localized one beside the product
- * name.
+ * Display name for a provider: a locale override when one exists, otherwise
+ * the engine's own `name`.
  *
- * The product name itself still comes from the engine. A table of names
- * keyed by id would read "Gemini CLI" for months after that provider is
- * renamed to Antigravity — its id is staying put — so the one thing this
- * must not do is decide what the product is called.
+ * Keyed by id so a locale *can* override, defaulted to the engine so an id
+ * no locale knows still renders — and so a rename engine-side lands without
+ * a desktop release. That last part is not hypothetical: `gemini-cli` keeps
+ * its id for saved-settings compatibility while its name becomes
+ * Antigravity, so a table of names keyed by id would start lying.
+ *
+ * Overrides go under `providers.name.<id>` in any i18n file. None exist
+ * today: the engine's names are product names, not prose, and read the same
+ * in both locales.
  */
-const SUBSCRIPTION_MARKER = /[(（]\s*구독\s*[)）]\s*$/;
-
-export function cliProductName(provider: Provider): string {
-  const stripped = provider.name.replace(SUBSCRIPTION_MARKER, "").trim();
-  return stripped.length > 0 ? stripped : provider.name;
+export function providerLabel(provider: Provider, t: TFunction): string {
+  return t(`providers.name.${provider.id}`, { defaultValue: provider.name });
 }

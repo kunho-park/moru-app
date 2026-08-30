@@ -43,13 +43,20 @@
     "cliConnected": "Connected",
     "cliNeedsLogin": "Login needed",
     "cliNeedsSetup": "Setup needed",
+    "cliNotInstalled": "Not installed",
+    "cliUnverified": "Not verified",
     "cliReady": "Runs on your installed CLI's existing login — no API key required.",
-    "cliLoginHint": "No sign-in found for this CLI yet. Run `{{cmd}}` in a terminal and finish signing in there, then re-check. If the CLI is not installed yet, install it first.",
-    "cliLoginHintNoCmd": "No sign-in found for this CLI yet. Sign in with this provider's CLI, then re-check.",
+    "cliLoginHint": "The `{{cli}}` CLI is installed but not signed in. Run `{{cmd}}` in a terminal, finish signing in there, then re-check.",
+    "cliLoginHintNoCmd": "This CLI is installed but not signed in. Sign in with it, then re-check.",
+    "cliMissingHint": "The `{{cli}}` command is not on this computer. Install it first — there is nothing to sign in to yet — then re-check.",
+    "cliMissingHintNoName": "This provider's CLI is not on this computer. Install it first, then re-check.",
+    "cliKeyringHint": "This CLI keeps its sign-in in your operating system's keyring, so we cannot read it from here — you may already be signed in. Press re-check to try a real request; if it fails, run `{{cmd}}` to sign in.",
+    "cliKeyringHintNoCmd": "This CLI keeps its sign-in in your operating system's keyring, so we cannot read it from here. Press re-check to try a real request.",
     "cliBlocked": "Signed in, but not usable yet: {{reason}}",
     "cliBlockedUnknown": "Signed in, but this subscription cannot serve a request yet. The CLI did not say why — run it in a terminal to see what it reports.",
+    "cliTransport": "Connection path: {{transport}}",
     "cliRecheck": "Re-check",
-    "cliTestFailUnknown": "The check failed and the CLI gave no readable reason — run it in a terminal to see what it reports."
+    "cliTestFailUnknown": "the CLI gave no readable reason — run it in a terminal to see what it reports."
   },
   "general": {
     "title": "App preferences",

@@ -1140,10 +1140,16 @@ def create_app(
             if p["id"] in CLI_PROVIDER_IDS:
                 # No API key exists for these: "ready" means the user's own
                 # CLI is logged in AND its grant can actually serve a
-                # request, which for Gemini CLI includes resolving a Cloud
-                # Code Assist project. `error` carries why it cannot, so
-                # the card stops telling a migrated or Workspace user to
-                # just log in again.
+                # request, which for the legacy Gemini CLI includes
+                # resolving a Cloud Code Assist project. `error` carries why
+                # it cannot, so the card stops telling a migrated or
+                # Workspace user to just log in again.
+                #
+                # `state` is what a client should branch on. `connected` is
+                # a bool and cannot distinguish "CLI not installed" from
+                # "installed but logged out" from "logged in but unusable",
+                # which are three different things to tell a user to do.
+                # Kept alongside, not replaced, so older clients still read.
                 status = await asyncio.to_thread(provider_status, p["id"])
                 entry["auth"] = "cli"
                 entry["has_key"] = bool(status.get("connected"))
@@ -1151,6 +1157,15 @@ def create_app(
                 entry["login_hint"] = status.get("login_hint")
                 entry["account"] = status.get("email")
                 entry["error"] = status.get("error")
+                entry["state"] = status.get("state")
+                entry["cli"] = status.get("cli")
+                entry["cli_installed"] = status.get("cli_installed")
+                # gemini-cli only: which of its two backends is in play, so
+                # a support conversation is not guesswork.
+                if status.get("transport") is not None:
+                    entry["transport"] = status["transport"]
+                    entry["config_dir"] = status.get("config_dir")
+                    entry["config_dir_source"] = status.get("config_dir_source")
             out.append(entry)
         return out
 

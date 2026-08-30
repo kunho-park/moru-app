@@ -9,11 +9,18 @@ against the original Bun implementation (``Bun.hash.xxHash64``).
 from __future__ import annotations
 
 import json
+import subprocess
 
 import httpx
 import pytest
 
-from moru_engine.cli_providers import claude_code, codex, credentials, gemini_cli
+from moru_engine.cli_providers import (
+    antigravity,
+    claude_code,
+    codex,
+    credentials,
+    gemini_cli,
+)
 
 # --------------------------------------------------------------------------
 # Claude Code — billing header + cch attestation
@@ -474,9 +481,16 @@ def test_missing_credentials_raise_an_actionable_error(tmp_path, monkeypatch) ->
 
 @pytest.fixture
 def gemini_home(tmp_path, monkeypatch):
-    """An isolated config root on a machine with neither CLI installed."""
-    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(tmp_path))
-    for name in ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID", "GEMINI_CLI_HOME"):
+    """An isolated config root on a machine with neither CLI installed.
+
+    Pinned with GEMINI_CLI_HOME, the legacy CLI's real relocation switch.
+    This fixture used to pin with GEMINI_CONFIG_DIR, which is honoured by
+    neither CLI — its only occurrences in gemini-cli are assignments in
+    that project's own test harness, never read by production code — so
+    the suite was exercising a mechanism no user has.
+    """
+    monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path))
+    for name in ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID", "GEMINI_CONFIG_DIR"):
         monkeypatch.delenv(name, raising=False)
     # ~/.env is a real avenue in the resolution chain: keep the host's out.
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -563,12 +577,23 @@ def test_gemini_store_keeps_the_legacy_grant_readable_after_migration(
     assert store.credentials().access == "live-token"
 
 
-def test_gemini_store_reads_the_alternate_antigravity_directory(gemini_home) -> None:
-    """Installs carried over from the desktop build use `antigravity/`."""
+def test_gemini_store_ignores_a_workspace_style_antigravity_directory(
+    gemini_home,
+) -> None:
+    """`~/.gemini/antigravity/` is NOT a global config root.
+
+    It does exist, but only workspace-relative, holding artifacts and
+    transcript.jsonl. The shipped agy binary's only `.gemini/antigravity/`
+    strings are of that form; its global root is `antigravity-cli`, with
+    the suffix. Treating the unsuffixed one as a credential home made any
+    home directory that happened to also be a workspace look like a
+    migrated Antigravity install.
+    """
     _write_grant(gemini_home / "antigravity")
     store = credentials.GeminiCliStore()
-    assert store.antigravity() is True
-    assert store.path == gemini_home / "antigravity" / "oauth_creds.json"
+    assert store.antigravity() is False
+    # The legacy location is still what a request would read.
+    assert store.path == gemini_home / "oauth_creds.json"
 
 
 def test_agy_is_found_off_path_at_its_documented_install_location(
@@ -584,6 +609,237 @@ def test_agy_is_found_off_path_at_its_documented_install_location(
     binary.parent.mkdir(parents=True)
     binary.write_text("#!/bin/sh\n")
     assert credentials._agy_installed() is True
+
+
+# --------------------------------------------------------------------------
+# GEMINI_CLI_HOME — the CLI contradicts itself, so both readings are probed
+# --------------------------------------------------------------------------
+
+
+def test_gemini_home_follows_the_nested_reading_when_that_is_where_config_is(
+    tmp_path, monkeypatch
+) -> None:
+    """`homedir()` treats GEMINI_CLI_HOME as a home base, config below it.
+
+    The shipped bundle has both readings. Under this one the credential
+    lives at `$GEMINI_CLI_HOME/.gemini/`, and hardcoding the other
+    interpretation stranded these users with an empty probe one level up.
+    """
+    monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path))
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: False)
+    _write_grant(tmp_path / ".gemini")
+    store = credentials.GeminiCliStore()
+    assert store.home == tmp_path / ".gemini"
+    assert store.config_dir_source == store.HOME_ENV_NESTED
+    assert store.available() is True
+
+
+def test_gemini_home_prefers_the_direct_reading_when_both_hold_a_grant(
+    tmp_path, monkeypatch
+) -> None:
+    """The documented tiebreak, and it must be observable.
+
+    A migration leaving a stale `$GEMINI_CLI_HOME/.gemini` beside a live
+    `$GEMINI_CLI_HOME` is an ordinary state. "Whichever we checked first"
+    is how a provider works on one machine and not another, so the rule is
+    fixed — the direct reading wins, because that is what moru already
+    shipped and breaking the tie this way cannot regress a working user —
+    and the winner is reported so it can be debugged.
+    """
+    monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path))
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: False)
+    _write_grant(tmp_path)
+    _write_grant(tmp_path / ".gemini")
+    store = credentials.GeminiCliStore()
+    assert store.home == tmp_path
+    assert store.config_dir_source == store.HOME_ENV_DIRECT
+    assert store.status()["config_dir"] == str(tmp_path)
+    assert store.status()["config_dir_source"] == store.HOME_ENV_DIRECT
+
+
+def test_gemini_config_dir_env_var_is_not_honoured(tmp_path, monkeypatch) -> None:
+    """GEMINI_CONFIG_DIR is read by neither CLI, so moru must not either.
+
+    Honouring a variable no CLI reads is worse than ignoring it: a user who
+    sets it believes their config moved while every probe looks elsewhere.
+    """
+    monkeypatch.delenv("GEMINI_CLI_HOME", raising=False)
+    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(tmp_path / "ignored"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: False)
+    store = credentials.GeminiCliStore()
+    assert store.home == tmp_path / ".gemini"
+    assert store.config_dir_source == store.HOME_DEFAULT
+
+
+# --------------------------------------------------------------------------
+# Auth states and transport precedence
+# --------------------------------------------------------------------------
+
+
+def test_status_separates_a_missing_cli_from_a_logged_out_one(monkeypatch) -> None:
+    """The distinction the UI needs: install the CLI vs. log in.
+
+    Without it both look like `connected: false` and the app can only
+    offer one generic message.
+    """
+    store = credentials.CodexStore()
+    monkeypatch.setattr(store, "_load", lambda: None)
+
+    monkeypatch.setattr(credentials.shutil, "which", lambda _cmd: None)
+    absent = store.status()
+    assert absent["state"] == credentials.STATE_CLI_MISSING
+    assert absent["cli_installed"] is False
+    assert absent["cli"] == "codex"
+
+    monkeypatch.setattr(credentials.shutil, "which", lambda _cmd: "/usr/bin/codex")
+    present = store.status()
+    assert present["state"] == credentials.STATE_LOGGED_OUT
+    assert present["cli_installed"] is True
+
+
+def test_antigravity_status_never_claims_logged_out_from_a_missing_file(
+    gemini_home, monkeypatch
+) -> None:
+    """agy keeps its session in the OS keyring, so a file proves nothing.
+
+    `oauth_creds` appears zero times in the shipped binary. Reporting
+    `logged-out` because no JSON exists would call a signed-in user signed
+    out — the defect this whole reporting change exists to end.
+    """
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: True)
+    store = credentials.GeminiCliStore()
+    status = store.status()
+    assert status["antigravity"] is True
+    assert status["transport"] == credentials.TRANSPORT_AGY_CLI
+    assert status["state"] == credentials.STATE_CLI_READY
+    assert status["state"] != credentials.STATE_LOGGED_OUT
+    assert status["credentials_in_keyring"] is True
+    assert status["cli"] == "agy"
+
+
+def test_antigravity_status_never_resolves_a_cloud_project(
+    gemini_home, monkeypatch
+) -> None:
+    """Finding 3, made a test: no Code Assist onboarding on the agy path.
+
+    The agy binary contains no GOOGLE_CLOUD_PROJECT string; it bills
+    against a Google AI plan. Demanding a project these users never needed,
+    and leaking a Code Assist traceback when it could not be resolved, is
+    the original reported failure. A request here must never touch the
+    HTTP seam at all.
+    """
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: True)
+
+    def _explode(*_a, **_k):
+        raise AssertionError("agy path must not call Cloud Code Assist")
+
+    store = credentials.GeminiCliStore()
+    monkeypatch.setattr(store, "_send", _explode)
+    # Status must stay quiet, and project() must refuse rather than onboard.
+    assert store.status()["project"] is None
+    with pytest.raises(credentials.CliAuthError):
+        store.project()
+
+
+def test_transport_precedence_prefers_a_readable_legacy_grant(
+    gemini_home, monkeypatch
+) -> None:
+    """Both CLIs present: the file-backed path wins, deterministically.
+
+    agy stores its session in the keyring, so an oauth_creds.json on disk
+    was written by the legacy CLI — and borrowing that token over HTTP is
+    the path we can verify end to end.
+    """
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: True)
+    store = credentials.GeminiCliStore()
+    assert store.transport == credentials.TRANSPORT_AGY_CLI
+
+    _write_grant(gemini_home)
+    assert store.transport == credentials.TRANSPORT_LEGACY_HTTP
+
+
+def test_project_error_tells_the_user_what_to_do_and_no_dead_link() -> None:
+    """The remediation text is the whole point of reaching this error.
+
+    gemini-cli prints goo.gle/gemini-cli-auth-docs, which now redirects to
+    a 404 whose `#workspace-gca` anchor no longer exists (verified with
+    curl). Copying an upstream broken link into our own UI is not a fix.
+    """
+    message = credentials._NEEDS_PROJECT_ENV
+    assert "GOOGLE_CLOUD_PROJECT" in message
+    assert "goo.gle/gemini-cli-auth-docs" not in message
+    assert "geminicli.com/docs/get-started/authentication/#set-gcp" in message
+
+
+# --------------------------------------------------------------------------
+# `agy models` — decorated text is the only format on offer
+# --------------------------------------------------------------------------
+
+
+def test_agy_models_parses_the_documented_two_column_output() -> None:
+    """Real shape, from the official sample. Slugs carry an effort suffix."""
+    slugs = antigravity.parse_models_output(
+        "Fetching available models...\n"
+        "gemini-3.7-flash-high     Gemini 3.7 Flash (High)\n"
+        "gemini-3.7-flash-medium   Gemini 3.7 Flash (Medium)\n"
+        "gemini-3.1-pro-high       Gemini 3.1 Pro (High)\n"
+        "claude-sonnet-4-6         Claude Sonnet 4.6 (Thinking)\n"
+        "...\n"
+    )
+    assert slugs == [
+        "gemini-3.7-flash-high",
+        "gemini-3.7-flash-medium",
+        "gemini-3.1-pro-high",
+        "claude-sonnet-4-6",
+    ]
+
+
+def test_agy_models_treats_rc_zero_with_an_error_line_as_failure(monkeypatch) -> None:
+    """Verified on the real binary: signed out, it errors AND exits 0.
+
+    So a non-zero exit status cannot be the signal. Trusting rc alone
+    would hand a signed-out user an empty lineup, which reads as "my
+    subscription includes no models".
+    """
+    signed_out = subprocess.CompletedProcess(
+        args=["agy", "models"],
+        returncode=0,
+        stdout="Fetching available models...\n",
+        stderr=(
+            "Error: Please sign in to view available models. "
+            "Launch the CLI without arguments to sign in.\n"
+        ),
+    )
+    monkeypatch.setattr(antigravity, "run_agy", lambda *a, **k: signed_out)
+    assert antigravity.list_models() == list(antigravity.AGY_FALLBACK_MODELS)
+
+
+def test_agy_models_falls_back_rather_than_reporting_zero_models(monkeypatch) -> None:
+    """An unrecognisable restyle must degrade, not empty the list."""
+    restyled = subprocess.CompletedProcess(
+        args=["agy", "models"],
+        returncode=0,
+        stdout="╭─ Models ─╮\n│ (see the /model picker) │\n╰──────────╯\n",
+        stderr="",
+    )
+    monkeypatch.setattr(antigravity, "run_agy", lambda *a, **k: restyled)
+    models = antigravity.list_models()
+    assert models == list(antigravity.AGY_FALLBACK_MODELS)
+    assert models, "an empty lineup reads to a user as 'no models'"
+
+
+def test_agy_fallback_models_are_effort_suffixed_not_legacy_ids() -> None:
+    """The two transports do not share a model namespace.
+
+    A legacy Gemini API id on the agy path fails at request time, and
+    headless mode exits non-zero on an unknown --model rather than falling
+    back — so a stale namespace here is a hard break, not a downgrade.
+    """
+    assert antigravity.AGY_DEFAULT_MODEL in antigravity.AGY_FALLBACK_MODELS
+    for legacy in ("gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"):
+        assert legacy not in antigravity.AGY_FALLBACK_MODELS
 
 
 def test_agy_on_path_is_enough(monkeypatch) -> None:

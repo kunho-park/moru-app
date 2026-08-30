@@ -37,6 +37,21 @@ _SKEW_MS = 5 * 60 * 1000
 
 _TIMEOUT = httpx.Timeout(30.0)
 
+#: Coarse auth states a UI can branch on without parsing prose. The
+#: desktop renders a different affordance for each — install the CLI, log
+#: in, or surface `error` — so the distinction has to survive the API
+#: boundary rather than being inferred from `connected` plus a guess.
+STATE_CLI_MISSING = "cli-missing"      # no CLI on this machine
+STATE_LOGGED_OUT = "logged-out"        # CLI present, no credential
+STATE_CLI_READY = "cli-ready"          # CLI present, login state only it can prove
+STATE_READY = "ready"                  # credential usable now
+STATE_UNUSABLE = "unusable"            # logged in, but a request would fail
+
+#: Which backend a `gemini-cli` request takes. One provider id, two very
+#: different transports; see `GeminiCliStore.transport` for precedence.
+TRANSPORT_LEGACY_HTTP = "legacy-http"  # borrowed OAuth -> cloudcode-pa
+TRANSPORT_AGY_CLI = "agy-cli"          # subprocess -> agy headless mode
+
 
 class CliAuthError(RuntimeError):
     """No usable credential for a CLI provider.
@@ -112,8 +127,12 @@ class CliCredentialStore(ABC):
     id: str
     #: Human label used in error messages.
     label: str
-    #: Command the user runs to (re-)authenticate.
+    #: Command the user runs to (re-)authenticate. Reported to the client
+    #: as `login_hint` so a renderer never hardcodes a per-CLI command.
     login_hint: str
+    #: Binary this grant belongs to, probed on PATH to tell "CLI not
+    #: installed" apart from "installed but logged out".
+    cli_command: str
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -148,19 +167,48 @@ class CliCredentialStore(ABC):
             logger.debug("Credential probe failed for %s", self.id, exc_info=True)
             return False
 
+    def cli_installed(self) -> bool:
+        """Whether the CLI that owns this grant is on this machine.
+
+        What separates "install the CLI" from "log in" in the UI: without
+        it a logged-out user and a user who never had the CLI look
+        identical, and the app can only offer one generic message.
+        """
+        return shutil.which(self.cli_command) is not None
+
     def status(self) -> dict[str, Any]:
-        """Auth summary for GET /providers."""
+        """Auth summary for GET /providers.
+
+        `state` is the field a client should branch on; `connected` is kept
+        for older clients that only understood a boolean.
+        """
+        installed = self.cli_installed()
         try:
             creds = self._load()
         except Exception as exc:  # noqa: BLE001
-            return {"connected": False, "error": str(exc)}
+            return {
+                "connected": False,
+                "error": str(exc),
+                "state": STATE_UNUSABLE,
+                "cli_installed": installed,
+                "cli": self.cli_command,
+            }
         if creds is None:
-            return {"connected": False, "error": None}
+            return {
+                "connected": False,
+                "error": None,
+                "state": STATE_LOGGED_OUT if installed else STATE_CLI_MISSING,
+                "cli_installed": installed,
+                "cli": self.cli_command,
+            }
         return {
             "connected": True,
             "error": None,
             "email": creds.email,
             "expires": creds.expires or None,
+            "state": STATE_READY,
+            "cli_installed": installed,
+            "cli": self.cli_command,
         }
 
     def credentials(self) -> OAuthCredentials:
@@ -256,6 +304,7 @@ class ClaudeCodeStore(CliCredentialStore):
     id = "claude-code"
     label = "Claude Code"
     login_hint = "claude login"
+    cli_command = "claude"
 
     @property
     def path(self) -> Path:
@@ -391,6 +440,7 @@ class CodexStore(CliCredentialStore):
     id = "codex"
     label = "OpenAI Codex"
     login_hint = "codex login"
+    cli_command = "codex"
 
     @property
     def path(self) -> Path:
@@ -498,44 +548,71 @@ _TIER_FREE = "free-tier"
 _TIER_LEGACY = "legacy-tier"
 _TIER_STANDARD = "standard-tier"
 
-#: Commands that own this grant. Google replaced the `gemini` CLI with
-#: Antigravity CLI, whose binary is `agy`; both are live in the wild, so the
-#: store reports whichever one this machine actually has.
+#: Commands that own this grant. Google's Antigravity CLI (binary `agy`)
+#: succeeded the `gemini` CLI, but did not retire it: npm @google/gemini-cli
+#: still ships (0.57.0 stable, a nightly dated today) with no deprecation
+#: marker. Both are live in the wild, so the store reports whichever one
+#: this machine actually has.
 _AGY_COMMAND = "agy"
 _GEMINI_COMMAND = "gemini"
 
-#: Antigravity nests its config inside the legacy home instead of taking a
-#: new one, so a migrated machine has both layouts side by side and the
-#: newer one wins. `antigravity-cli` is the documented directory; installs
-#: carried over from the 1.x desktop build also keep an `antigravity` one.
-#: https://antigravity.google/docs/cli/using/
-_ANTIGRAVITY_SUBDIRS = ("antigravity-cli", "antigravity")
+#: Antigravity nests its global config inside the legacy home rather than
+#: taking a new one: `~/.gemini/antigravity-cli/`. Verified three ways —
+#: the docs (settings.json, updater/, skills/ all documented under it),
+#: the shipped binary's own path strings, and empirically: running the
+#: real agy 1.1.22 created exactly that directory and no `~/.antigravity*`.
+#:
+#: `~/.gemini/antigravity/` (no `-cli`) is deliberately NOT probed. It does
+#: exist, but only workspace-relative, for artifacts and transcript.jsonl —
+#: never as a global config root. Treating it as one was a false belief and
+#: a pattern-matching trap for any home that is also a workspace.
+#: https://antigravity.google/docs/cli/install
+_ANTIGRAVITY_SUBDIRS = ("antigravity-cli",)
 _CREDENTIAL_FILE = "oauth_creds.json"
 
-#: Project env vars the CLI itself honors (setup.ts, `setupUser`).
+#: Project env vars the CLI itself honors, in this order (gemini-cli
+#: `setup.ts`). Legacy path only — see `GeminiCliStore.project`.
 _PROJECT_ENV_VARS = ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID")
 
 
-def _agy_installed() -> bool:
-    """Whether the Antigravity binary is on this machine.
+def agy_path() -> Path | None:
+    """Filesystem path to the Antigravity binary, or None when absent.
 
     PATH alone is not enough: the installer drops `agy` in ~/.local/bin,
     which a GUI-spawned sidecar's environment routinely omits, so the
     documented install locations are probed too.
-    https://antigravity.google/docs/cli/install/
+
+    Only two locations are real installer targets — `~/.local/bin/agy`
+    (macOS/Linux, per install.sh) and `%LOCALAPPDATA%\\agy\\bin\\agy.exe`
+    (Windows, per install.ps1). The unix /usr/local and /opt/homebrew
+    entries are opportunistic: nothing installs there by default, but a
+    user who passed the installer's `--dir` may have. `C:\\Program Files\\
+    Google\\antigravity-cli` is NOT probed — it appears once in a stray
+    PowerShell snippet on the troubleshooting page that contradicts both
+    installers and its own preceding paragraph, and the shipped binary
+    contains zero "Program Files" strings.
+    https://antigravity.google/docs/cli/install
     """
-    if shutil.which(_AGY_COMMAND) is not None:
-        return True
-    local_app_data = os.environ.get("LOCALAPPDATA")
+    found = shutil.which(_AGY_COMMAND)
+    if found is not None:
+        return Path(found)
     candidates = [
         Path.home() / ".local" / "bin" / _AGY_COMMAND,
         Path("/opt/homebrew/bin") / _AGY_COMMAND,
         Path("/usr/local/bin") / _AGY_COMMAND,
-        Path(r"C:\Program Files\Google\antigravity-cli") / f"{_AGY_COMMAND}.exe",
     ]
+    local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
         candidates.append(Path(local_app_data) / "agy" / "bin" / f"{_AGY_COMMAND}.exe")
-    return any(path.is_file() for path in candidates)
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _agy_installed() -> bool:
+    """Whether the Antigravity binary is on this machine."""
+    return agy_path() is not None
 
 
 def gemini_cli_headers(model_id: str = "gemini-3.1-pro-preview") -> dict[str, str]:
@@ -555,16 +632,70 @@ class GeminiCliStore(CliCredentialStore):
     id = "gemini-cli"
     label = "Gemini CLI"
 
+    #: How `home` was resolved, for `provider_status` to surface. A user
+    #: debugging a relocated config must be able to see which reading won.
+    HOME_DEFAULT = "default"
+    HOME_ENV_DIRECT = "gemini-cli-home"
+    HOME_ENV_NESTED = "gemini-cli-home/.gemini"
+
+    def _resolve_home(self) -> tuple[Path, str]:
+        """Config root both CLIs share — Antigravity nests inside it.
+
+        GEMINI_CLI_HOME is the legacy CLI's own relocation switch, and the
+        shipped 0.57.0 bundle is genuinely INCONSISTENT about what it
+        means. Both call sites exist:
+
+            const baseDir = process.env["GEMINI_CLI_HOME"] || join(os.homedir(), ".gemini");
+            const envHome = process.env["GEMINI_CLI_HOME"];   // config = <envHome>/.gemini
+
+        So a user's config is either at ``$GEMINI_CLI_HOME`` or at
+        ``$GEMINI_CLI_HOME/.gemini`` depending which path the CLI took.
+        Picking one reading would silently strand whichever half of users
+        the other serves, so both are probed and disk decides.
+
+        Tiebreak, when BOTH hold a credential (an ordinary state after a
+        migration leaves a stale nested copy): the direct reading wins.
+        That is not arbitrary — it is the reading moru already shipped, so
+        breaking the tie this way cannot regress a user who works today.
+        The winner is reported as ``config_dir_source`` either way.
+
+        ``GEMINI_CONFIG_DIR`` is deliberately gone. Its only two
+        occurrences in the whole gemini-cli repo are assignments in test
+        harnesses, never read by production code, and it is absent from
+        the agy binary — so honouring it was a no-op that looked like an
+        escape hatch.
+        """
+        base = (os.environ.get("GEMINI_CLI_HOME") or "").strip()
+        if not base:
+            return Path.home() / ".gemini", self.HOME_DEFAULT
+        direct = Path(base)
+        nested = direct / ".gemini"
+        # Disk decides; the direct reading breaks a tie.
+        if self._holds_config(direct):
+            return direct, self.HOME_ENV_DIRECT
+        if self._holds_config(nested):
+            return nested, self.HOME_ENV_NESTED
+        return direct, self.HOME_ENV_DIRECT
+
+    @staticmethod
+    def _holds_config(directory: Path) -> bool:
+        """Whether a directory looks like a real Gemini/Antigravity home.
+
+        A credential file is the strongest signal, but an Antigravity user
+        has no credential file at all (keyring), so the nested config dir
+        counts too.
+        """
+        if (directory / _CREDENTIAL_FILE).is_file():
+            return True
+        return any((directory / name).is_dir() for name in _ANTIGRAVITY_SUBDIRS)
+
     @property
     def home(self) -> Path:
-        """Config root both CLIs share — Antigravity kept the legacy one.
+        return self._resolve_home()[0]
 
-        GEMINI_CLI_HOME is the CLI's own relocation switch (its settings
-        path is read straight off it), so a user who moved their config
-        does not have to tell moru about it a second time.
-        """
-        override = os.environ.get("GEMINI_CONFIG_DIR") or os.environ.get("GEMINI_CLI_HOME")
-        return Path(override) if override else Path.home() / ".gemini"
+    @property
+    def config_dir_source(self) -> str:
+        return self._resolve_home()[1]
 
     def _antigravity_dirs(self) -> list[Path]:
         home = self.home
@@ -696,38 +827,110 @@ class GeminiCliStore(CliCredentialStore):
     # -- Cloud Code Assist project ---------------------------------------
 
     def status(self) -> dict[str, Any]:
-        """Auth summary for GET /providers — including the project.
+        """Auth summary for GET /providers.
 
-        The base probe only proves a token is on disk, but a Gemini CLI
-        request also needs a Cloud Code Assist project, and resolving one
-        is exactly what fails for Workspace/GCA accounts. Running the same
-        chain the request runs is what keeps the desktop's 연결됨 badge and
-        its 연결 테스트 from disagreeing.
+        Two transports hide behind this one provider id and they fail in
+        completely different ways, so the summary names which one is in
+        play (see `transport`) before reporting anything about it.
+
+        Legacy (`gemini` + oauth_creds.json): a token on disk is not
+        enough — the request also needs a Cloud Code Assist project, and
+        resolving one is exactly what fails for Workspace/GCA accounts. So
+        the same chain the request runs is run here, which is what keeps
+        the desktop's badge and its connection test from disagreeing.
+
+        Antigravity (`agy`): project resolution is NOT run, and must never
+        be. The agy binary contains no GOOGLE_CLOUD_PROJECT string at all;
+        it bills against Google AI plans, not Code Assist onboarding.
+        Blocking these users on a project they never needed is the defect
+        this reporting exists to end. Their credentials live in the OS
+        keyring, so login state is simply NOT knowable from disk — saying
+        `logged-out` because no file exists would be a lie. It reports
+        `cli-ready` and leaves proving the session to the CLI itself.
         """
         summary = super().status()
-        summary["antigravity"] = self.antigravity()
+        antigravity = self.antigravity()
+        summary["antigravity"] = antigravity
+        summary["transport"] = self.transport
+        summary["cli"] = self.cli_command
+        summary["cli_installed"] = self.cli_installed()
+        summary["config_dir"] = str(self.home)
+        summary["config_dir_source"] = self.config_dir_source
+
+        if antigravity:
+            # Keyring-backed: a missing file proves nothing either way.
+            summary["credentials_in_keyring"] = True
+            summary["project"] = None
+            summary["state"] = (
+                STATE_READY if summary["connected"] else STATE_CLI_READY
+            )
+            return summary
+
+        summary["credentials_in_keyring"] = False
         if not summary["connected"]:
+            summary["state"] = (
+                STATE_LOGGED_OUT if summary["cli_installed"] else STATE_CLI_MISSING
+            )
             return summary
         try:
             summary["project"] = self.project()
+            summary["state"] = STATE_READY
         except Exception as exc:  # noqa: BLE001 - status must never raise
             logger.debug("Gemini CLI project resolution failed", exc_info=True)
             summary["connected"] = False
             summary["project"] = None
             summary["error"] = str(exc)
+            summary["state"] = STATE_UNUSABLE
         return summary
+
+    @property
+    def transport(self) -> str:
+        """Which of the two backends a request would actually take.
+
+        Precedence is deliberate and stated so it cannot differ silently
+        between machines: a readable legacy grant wins. `agy` keeps its
+        session in the OS keyring, so when an `oauth_creds.json` is on
+        disk it was written by the legacy CLI, and borrowing that token
+        over HTTP is the path we can actually verify end to end. Only with
+        no such file does an Antigravity install take over.
+        """
+        if (self.home / _CREDENTIAL_FILE).is_file():
+            return TRANSPORT_LEGACY_HTTP
+        for directory in self._antigravity_dirs():
+            if (directory / _CREDENTIAL_FILE).is_file():
+                return TRANSPORT_LEGACY_HTTP
+        return TRANSPORT_AGY_CLI if self.antigravity() else TRANSPORT_LEGACY_HTTP
+
+    @property
+    def cli_command(self) -> str:
+        return _AGY_COMMAND if self.antigravity() else _GEMINI_COMMAND
+
+    def cli_installed(self) -> bool:
+        return _agy_installed() or shutil.which(_GEMINI_COMMAND) is not None
 
     def project(self) -> str:
         """Cloud Code Assist project id, resolved once and then persisted.
 
-        Mirrors the CLI's own ``setupUser``: an explicitly configured
-        project wins, otherwise loadCodeAssist reports the one Code Assist
-        already provisioned, and an account that has never been onboarded
-        gets onboarded — which is how free-tier and personal accounts get a
-        managed project without ever setting GOOGLE_CLOUD_PROJECT. Only
-        when every one of those avenues comes back empty is the account
-        genuinely one of the Workspace/GCA cases that must name its own.
+        LEGACY TRANSPORT ONLY. Mirrors the CLI's own ``setupUser``: an
+        explicitly configured project wins, otherwise loadCodeAssist
+        reports the one Code Assist already provisioned, and an account
+        that has never been onboarded gets onboarded — which is how
+        free-tier and personal accounts get a managed project without ever
+        setting GOOGLE_CLOUD_PROJECT. Only when every one of those avenues
+        comes back empty is the account genuinely one of the Workspace/GCA
+        cases that must name its own.
+
+        Antigravity never reaches any of it. Its binary contains no
+        GOOGLE_CLOUD_PROJECT string; it bills against a Google AI plan and
+        selects any project interactively at sign-in. Running Code Assist
+        onboarding for an `agy` user demanded a project they never needed
+        and surfaced a Code-Assist traceback for it — the original defect.
         """
+        if self.transport == TRANSPORT_AGY_CLI:
+            raise CliAuthError(
+                "Antigravity CLI(agy)는 Cloud Code Assist 프로젝트를 쓰지 않습니다. "
+                "이 경로에서는 프로젝트를 조회하지 않습니다."
+            )
         creds = self.credentials()
         if creds.project_id:
             return creds.project_id
@@ -861,9 +1064,23 @@ class GeminiCliStore(CliCredentialStore):
         return project
 
 
+#: Reached only when every automatic avenue is exhausted, so it has to say
+#: what to DO rather than name a failure. Two details are load-bearing and
+#: both come from gemini-cli's own behaviour: the value must be the string
+#: project ID, since a numeric project NUMBER is rejected outright
+#: (`InvalidNumericProjectIdError`), and GOOGLE_CLOUD_PROJECT_ID is read as
+#: a fallback.
+#:
+#: The link gemini-cli itself prints — goo.gle/gemini-cli-auth-docs — now
+#: redirects to a 404 and its `#workspace-gca` anchor no longer exists.
+#: Verified with curl; replaced with the live docs site and its real
+#: `#set-gcp` anchor rather than copying an upstream broken link.
 _NEEDS_PROJECT_ENV = (
-    "이 Google 계정은 GOOGLE_CLOUD_PROJECT 환경 변수가 필요합니다. "
-    "https://goo.gle/gemini-cli-auth-docs#workspace-gca 를 참고하세요."
+    "이 Google 계정(회사/학교 Workspace 또는 Gemini Code Assist 라이선스)은 "
+    "Cloud 프로젝트를 직접 지정해야 합니다. 터미널에서 "
+    'export GOOGLE_CLOUD_PROJECT="프로젝트-ID" 를 설정한 뒤 다시 시도해 주세요. '
+    "(숫자 프로젝트 번호가 아니라 문자열 프로젝트 ID여야 합니다.) "
+    "안내: https://geminicli.com/docs/get-started/authentication/#set-gcp"
 )
 
 

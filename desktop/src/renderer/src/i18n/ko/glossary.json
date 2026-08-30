@@ -58,10 +58,7 @@
     "retry": "다시 시도"
   },
   "footer": {
-    "summary": "{{count}} 용어 · 마지막 갱신 {{time}}",
-    "webPending": "웹 동기화 준비중",
-    "sync": "동기화",
-    "syncTooltip": "웹 플랫폼 출시 후 제공됩니다"
+    "summary": "{{count}} 용어 · 마지막 갱신 {{time}}"
   },
   "toast": {
     "copied": "클립보드에 복사됨",

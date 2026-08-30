@@ -858,7 +858,7 @@ export function GlossaryScreen() {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between border-t border-line2 bg-hover px-3.5 py-2.5">
+        <div className="flex items-center border-t border-line2 bg-hover px-3.5 py-2.5">
           <div className="font-mono text-[11px] text-text3">
             {query.isPending || query.isError
               ? "—"
@@ -866,12 +866,6 @@ export function GlossaryScreen() {
                   count: formatInt(terms.length),
                   time: formatRelative(query.dataUpdatedAt, lang),
                 })}
-          </div>
-          <div className="flex items-center gap-2 font-mono text-[11px] text-text3">
-            <span className="text-text4">{t("glossary.footer.webPending")}</span>
-            <button disabled title={t("glossary.footer.syncTooltip")} className="cursor-not-allowed text-text4">
-              {t("glossary.footer.sync")}
-            </button>
           </div>
         </div>
       </div>

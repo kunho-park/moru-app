@@ -1185,12 +1185,20 @@ class JobManager:
 
     async def _run_scan(self, record: JobRecord) -> EnrichedScanResult:
         params = record.params
-        migration_inputs = (
-            params.get("previous_modpack_path"),
-            params.get("previous_resourcepack_path"),
-            params.get("previous_overrides_path"),
+        previous_modpack = params.get("previous_modpack_path")
+        # Reuse needs BOTH sides, and the A side is what makes it safe. B on
+        # its own - a pack downloaded from moru.gg, say - is target-locale
+        # files with no record of the source text they were translated from,
+        # and MigrationCatalog.match refuses every lookup whose source cannot
+        # be shown byte-identical between the old modpack and this one. So a
+        # B-only request can only ever index its way to zero matches, and
+        # asking for the catalog without A raised KeyError below and failed
+        # the entire scan. Skipping it reports "no previous translation",
+        # which is the truth.
+        migration_requested = previous_modpack is not None and any(
+            params.get(key) is not None
+            for key in ("previous_resourcepack_path", "previous_overrides_path")
         )
-        migration_requested = any(value is not None for value in migration_inputs)
         migration_fingerprint_before: str | None = None
         if migration_requested:
             migration_fingerprint_before = await asyncio.to_thread(
@@ -1242,7 +1250,7 @@ class JobManager:
             self._temporary_dirs.add(migration_assets)
             progress("migration", 0, 1, "이전 번역 비교 준비 중...")
             enriched.migration = await build_migration_catalog(
-                previous_modpack_path=Path(str(params["previous_modpack_path"])),
+                previous_modpack_path=Path(str(previous_modpack)),
                 previous_resourcepack_path=(
                     Path(str(params["previous_resourcepack_path"]))
                     if params.get("previous_resourcepack_path")

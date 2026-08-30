@@ -11,6 +11,7 @@ documented inline on each route.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -42,7 +43,7 @@ from ..cli_providers import (
     provider_models,
     provider_status,
 )
-from ..community import sync_community
+from ..community import download_translation, find_translation, sync_community
 from ..dspy_modules import build_lm
 from ..graph import TranslationGraph
 from ..pipeline import (
@@ -52,6 +53,7 @@ from ..pipeline import (
     TranslationPipeline,
 )
 from ..models.glossary import Glossary
+from ..scanner.pack_identity import PackIdentity
 from ..tm import MANUAL_ORIGIN, SHARED_GLOSSARY_VERSION, LocalTM
 from ..validator import TranslationValidator
 from .assist import (
@@ -82,6 +84,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LOCALE_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+#: Characters kept when a pack id becomes a cache directory name. Ids are
+#: platform uuids, but the id is attacker-influenced in the sense that it
+#: arrives over the wire, and it is about to be joined onto a filesystem
+#: path — so it is filtered rather than trusted.
+_PACK_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _safe_segment(pack_id: str) -> str:
+    return _PACK_ID_RE.sub("_", pack_id)[:64]
+
 
 #: Static provider catalog. Model ids are LiteLLM strings usable directly
 #: as PipelineConfig.model. has_key only reflects env-var presence; the
@@ -224,6 +237,13 @@ class CommunitySyncRequest(BaseModel):
     web_url: str
     source_lang: str = "en_us"
     target_lang: str
+
+
+class CommunityDownloadRequest(BaseModel):
+    """A matched pack to fetch. ``pack_id`` only names the cache directory."""
+
+    pack_id: str
+    download_url: str
 
 
 class ProviderTestRequest(BaseModel):
@@ -951,6 +971,89 @@ def create_app(
             raise HTTPException(
                 status_code=502, detail=f"community sync failed: {exc}"
             ) from exc
+
+    @api.get("/community/translation")
+    async def community_translation(
+        web_url: str, job_id: str, target_lang: str
+    ) -> dict[str, Any]:
+        """Is a published community translation already covering this pack?
+
+        Asked once the scan is done, so the answer can quote how many of the
+        user's own entries the published pack does not cover — the figure
+        that decides whether reusing it is worth anything. The scan payload
+        supplies both halves: the launcher-metadata identity to look up, and
+        the per-category entry counts to measure against.
+
+        Deviation from the usual error mapping: every failure is a null
+        match, never a status code. Nothing published, a platform too old to
+        serve the route, a modpack with no usable identity, a dropped
+        connection — none of these are conditions the user can act on, and a
+        wizard step that reports a red error because an optional lookup
+        failed is worse than one that quietly offers nothing.
+        """
+        target = _validate_locale(target_lang, "target_lang")
+        payload = await scan_result(job_id)
+        identity_data = payload.get("identity")
+        if not isinstance(identity_data, dict):
+            return {"match": None}
+        # Filter by field name: cached scan payloads persist inside sessions,
+        # so one written by an older engine may carry keys this build's
+        # PackIdentity no longer has.
+        known = {f.name for f in dataclasses.fields(PackIdentity)}
+        identity = PackIdentity(
+            **{k: v for k, v in identity_data.items() if k in known}
+        )
+        categories = payload.get("categories")
+        local_categories = (
+            {
+                str(entry["name"]): int(entry["entry_count"])
+                for entry in categories
+                if isinstance(entry, dict) and "name" in entry
+            }
+            if isinstance(categories, list)
+            else None
+        )
+        try:
+            match = await find_translation(
+                web_url, identity, target, local_categories=local_categories
+            )
+        except Exception as exc:  # noqa: BLE001 — an optional lookup, see above
+            logger.info("Community translation lookup skipped: %s", exc)
+            return {"match": None}
+        return {"match": dataclasses.asdict(match) if match else None}
+
+    @api.post("/community/translation/download")
+    async def community_translation_download(
+        body: CommunityDownloadRequest,
+    ) -> dict[str, Any]:
+        """Fetch a matched pack's archives for run-scoped migration reuse.
+
+        Returns local ZIP paths for the migration inputs. This is only the B
+        side of A/B/C: whether any entry may actually be reused is still
+        decided by the byte-identity check in the migration index, which
+        needs the previous original modpack as A. A caller that supplies B
+        alone is rejected by the job validator, deliberately.
+
+        Unlike the lookup, a failure here IS reported: the user pressed a
+        button and is owed an answer.
+        """
+        if not body.pack_id.strip():
+            raise HTTPException(status_code=422, detail="pack_id is required")
+        destination = config_root / "community-packs" / _safe_segment(body.pack_id)
+        try:
+            archives = await download_translation(body.download_url, destination)
+        except Exception as exc:  # noqa: BLE001 — network/disk errors -> 502
+            raise HTTPException(
+                status_code=502, detail=f"translation download failed: {exc}"
+            ) from exc
+        return {
+            "resourcepack_path": str(archives["resource_pack"])
+            if "resource_pack" in archives
+            else None,
+            "overrides_path": str(archives["overrides"])
+            if "overrides" in archives
+            else None,
+        }
 
     @api.get("/tm/stats")
     async def tm_stats() -> dict[str, Any]:

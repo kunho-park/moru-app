@@ -12,6 +12,7 @@ import pytest
 from aiohttp import web
 
 from moru_engine.community import (
+    download_translation,
     find_translation,
     load_user_glossary_terms,
     merge_extracted_terms,
@@ -572,3 +573,109 @@ async def test_query_narrows_by_curseforge_id_and_skips_a_nameless_pack(
     # Nothing to narrow by -> no request at all.
     assert await find_translation(url, PackIdentity(version="4.1.2"), "ko_kr") is None
     assert len(fake.queries) == 1
+
+
+# -- translation-pack download -------------------------------------------------
+
+
+class FakePackHost:
+    """Minimal /api/packs/{id}/download: one body per published kind."""
+
+    def __init__(self, **bodies: bytes) -> None:
+        self.bodies = bodies
+        self.kinds: list[str | None] = []
+
+    def app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_get("/api/packs/{pack_id}/download", self._download)
+        return app
+
+    async def _download(self, request: web.Request) -> web.StreamResponse:
+        kind = request.query.get("kind")
+        self.kinds.append(kind)
+        body = self.bodies.get(kind or "resource_pack")
+        if body is None:
+            return web.json_response({"error": "no such file"}, status=404)
+        return web.Response(body=body, content_type="application/zip")
+
+
+async def _pack_host(aiohttp_server: Any, fake: FakePackHost) -> str:
+    server = await aiohttp_server(fake.app())
+    return f"http://{server.host}:{server.port}/api/packs/p1/download"
+
+
+async def test_download_fetches_both_channels_as_migration_ready_zips(
+    aiohttp_server: Any, tmp_path: Path
+) -> None:
+    """The two archives map onto the two migration inputs.
+
+    Saved as ZIPs on purpose: the migration index already accepts a folder
+    or a ZIP, so extracting here would only duplicate a tested path.
+    """
+    fake = FakePackHost(resource_pack=b"RP-ZIP-BYTES", overrides=b"OV-ZIP-BYTES")
+    url = await _pack_host(aiohttp_server, fake)
+
+    archives = await download_translation(url, tmp_path / "p1")
+
+    assert set(archives) == {"resource_pack", "overrides"}
+    assert archives["resource_pack"].read_bytes() == b"RP-ZIP-BYTES"
+    assert archives["overrides"].read_bytes() == b"OV-ZIP-BYTES"
+    assert fake.kinds == ["resource_pack", "overrides"]
+
+
+async def test_a_channel_the_pack_never_published_is_absent_not_an_error(
+    aiohttp_server: Any, tmp_path: Path
+) -> None:
+    """Most packs ship a resource pack and no overrides archive.
+
+    The download route answers 404 for a kind the pack has no file for, which
+    is a statement about the pack rather than a failure.
+    """
+    fake = FakePackHost(resource_pack=b"RP")
+    url = await _pack_host(aiohttp_server, fake)
+
+    archives = await download_translation(url, tmp_path / "p1")
+
+    assert set(archives) == {"resource_pack"}
+    assert not (tmp_path / "p1" / "overrides.zip").exists()
+
+
+async def test_a_pack_with_nothing_downloadable_yields_nothing(
+    aiohttp_server: Any, tmp_path: Path
+) -> None:
+    fake = FakePackHost()
+    url = await _pack_host(aiohttp_server, fake)
+
+    assert await download_translation(url, tmp_path / "p1") == {}
+
+
+async def test_an_oversized_body_leaves_no_half_written_archive(
+    aiohttp_server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A truncated archive must never survive as a usable pack.
+
+    The part file is only renamed into place once the body completes, so an
+    aborted transfer cannot be picked up by a later run as a real pack and
+    silently reused as half a translation.
+    """
+    monkeypatch.setattr("moru_engine.community._MAX_PACK_BYTES", 8)
+    fake = FakePackHost(resource_pack=b"x" * 4096)
+    url = await _pack_host(aiohttp_server, fake)
+
+    with pytest.raises(ValueError, match="size cap"):
+        await download_translation(url, tmp_path / "p1")
+
+    assert list((tmp_path / "p1").iterdir()) == []
+
+
+async def test_kind_is_appended_to_a_url_that_already_has_a_query(
+    aiohttp_server: Any, tmp_path: Path
+) -> None:
+    """Downloads select a variant with ?variant=; the kind must join it."""
+    fake = FakePackHost(resource_pack=b"RP")
+    base = await _pack_host(aiohttp_server, fake)
+
+    archives = await download_translation(f"{base}?variant=plain", tmp_path / "p1")
+
+    assert set(archives) == {"resource_pack"}
+    assert fake.kinds == ["resource_pack", "overrides"]

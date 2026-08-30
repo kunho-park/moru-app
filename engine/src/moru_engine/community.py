@@ -25,6 +25,13 @@ URL: ``GET {web}/api/translations/compatible`` lists the packs published
 for one modpack, and the *decision* of whether one fits the local pack is
 made here — only this side knows the pack actually on disk.
 
+:func:`download_translation` then fetches a matched pack's archives so the
+run-scoped A/B/C migration can reuse them. It stops at the download: the
+archives are B (target-locale files), and whether any entry of B may be
+applied is decided by :mod:`..migration.previous_translation`, which
+requires the source text behind a key to be byte-identical between the old
+and current modpack. Nothing here relaxes that.
+
 A manifest 404 (nothing published yet) is a clean no-op, never an error.
 """
 
@@ -38,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import aiofiles
 import aiohttp
 from platformdirs import user_config_dir
 
@@ -54,9 +62,11 @@ from .tm import META_LAST_SHARED_VERSION, LocalTM
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "PACK_KINDS",
     "SHARED_TM_VERSION",
     "TranslationMatch",
     "default_glossary_store_dir",
+    "download_translation",
     "find_translation",
     "load_user_glossary_terms",
     "merge_extracted_terms",
@@ -550,3 +560,81 @@ async def find_translation(
         best.uncovered_entries,
     )
     return best
+
+
+# -- translation-pack download -------------------------------------------------
+
+#: Download channels a published pack can carry. They map one-to-one onto the
+#: pipeline's two output trees, and therefore onto the A/B/C migration inputs
+#: ``previous_resourcepack_path`` / ``previous_overrides_path``.
+PACK_KINDS = ("resource_pack", "overrides")
+
+#: A resource pack carrying CJK fonts plus a large quest tree runs to a few
+#: hundred MB. The cap is not a size expectation, only a stop against a bad
+#: URL filling the user's disk.
+_MAX_PACK_BYTES = 512 * 1024 * 1024
+
+#: Pack archives get their own budget: :data:`_TIMEOUT` is sized for the
+#: few-KB metadata calls and would abort a real download on a slow line.
+#: ``sock_read`` is what actually detects a stalled transfer; a total cap
+#: alone would either kill a healthy slow download or hang on a dead one.
+_PACK_TIMEOUT = aiohttp.ClientTimeout(total=1800, sock_read=120)
+
+
+async def _download_archive(
+    session: aiohttp.ClientSession, url: str, path: Path
+) -> bool:
+    """Stream one archive to ``path``; False when the pack has no such kind.
+
+    Streamed rather than buffered because these are the largest things the
+    engine ever fetches. The part file is only renamed into place after the
+    body completes, so an interrupted download can never be mistaken for a
+    usable pack by a later run.
+    """
+    part = path.with_suffix(path.suffix + ".part")
+    total = 0
+    try:
+        async with session.get(url) as resp:
+            if resp.status == 404:
+                return False  # this pack does not publish this channel
+            resp.raise_for_status()
+            async with aiofiles.open(part, "wb") as handle:
+                async for chunk in resp.content.iter_chunked(1 << 20):
+                    total += len(chunk)
+                    if total > _MAX_PACK_BYTES:
+                        raise ValueError(f"pack archive exceeds size cap: {url}")
+                    await handle.write(chunk)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    part.replace(path)
+    logger.info("Downloaded %s (%d bytes)", path.name, total)
+    return True
+
+
+async def download_translation(
+    download_url: str, destination: Path
+) -> dict[str, Path]:
+    """Fetch a matched pack's archives into ``destination``.
+
+    ``download_url`` is the kind-less form the platform publishes
+    (``/api/packs/{id}/download``); each channel is requested by appending
+    ``?kind=``, and a 404 there means the pack simply does not publish that
+    channel rather than that anything went wrong. The returned paths are
+    ZIPs, which is what the migration inputs already accept, so nothing is
+    extracted here.
+
+    Raises on a transport failure so the caller can decide what the user
+    sees; an empty dict means the pack published nothing downloadable.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    separator = "&" if "?" in download_url else "?"
+    downloaded: dict[str, Path] = {}
+    async with aiohttp.ClientSession(timeout=_PACK_TIMEOUT) as session:
+        for kind in PACK_KINDS:
+            path = destination / f"{kind}.zip"
+            if await _download_archive(
+                session, f"{download_url}{separator}kind={kind}", path
+            ):
+                downloaded[kind] = path
+    return downloaded

@@ -27,8 +27,20 @@ info:
     engine builds that ignore the field keep behaving as they do today.
     The snapshot body shapes, previously implicit, are now spelled out as
     GlossarySnapshotEntry and TmSnapshotEntry.
+    Contract v6 adds GET /api/translations/compatible: the published
+    translations for one modpack in one language, so the desktop can tell
+    a user a translation already exists before they pay to make another.
+    Purely additive and read-only. The endpoint makes no compatibility
+    decision - it reports what is published and the engine judges fit,
+    because only the desktop side knows the Minecraft version installed
+    and how much untranslated content the local pack has. Candidates
+    therefore omit `mc_version` and `compatible_versions`: nothing in the
+    platform records either per translation pack, and a guessed value
+    would let the engine honour a declared range it must not trust. An
+    absent Minecraft version caps a candidate at exact-version matching,
+    which is the fail-closed default.
   version: "0.6.0"
-  x-contract-version: 5
+  x-contract-version: 6
 servers:
   - url: "https://moru.gg"
 paths:
@@ -119,6 +131,50 @@ paths:
                   url: { type: string, description: public pack page }
         "403":
           description: pack_id is not owned by the caller
+  /api/translations/compatible:
+    get:
+      summary: Published translations for one modpack (desktop pre-translation check)
+      description: >
+        Unauthenticated. Narrows by CurseForge id when the caller has one
+        and by modpack name otherwise; at least one of the two is
+        required. Returns every published pack for that modpack in the
+        requested language that still has a downloadable artifact.
+        Compatibility is NOT decided here - the engine applies every rule
+        itself, because only the desktop knows the Minecraft version on
+        disk and how much untranslated content the local pack has.
+        Nothing found is an empty candidates array with a 200, never a
+        404: a transport failure means "try later" while an empty list
+        means "nobody has translated this", and the engine must be able
+        to tell them apart.
+      parameters:
+        - { name: target_lang, in: query, required: true, schema: { type: string, example: ko_kr } }
+        - { name: modpack_name, in: query, schema: { type: string } }
+        - { name: curseforge_id, in: query, schema: { type: integer } }
+        - name: modpack_version
+          in: query
+          description: >
+            Only orders the result: an exact match is placed first so the
+            per-modpack cap can never truncate it away.
+          schema: { type: string }
+        - name: mc_version
+          in: query
+          description: >
+            Accepted and ignored. The platform stores no Minecraft version
+            per translation pack, so it cannot filter on one.
+          schema: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [candidates]
+                properties:
+                  candidates:
+                    type: array
+                    items: { $ref: "#/components/schemas/CompatibleTranslation" }
+        "400": { description: unsupported target_lang, or neither curseforge_id nor modpack_name }
+        "429": { description: rate limited }
   /api/export/corrections:
     get:
       summary: Approved corrections for evalset building (operator token required)
@@ -199,6 +255,48 @@ components:
       scheme: bearer
       description: Desktop API token issued via /auth/desktop-login
   schemas:
+    CompatibleTranslation:
+      type: object
+      description: >
+        One published pack offered as a candidate by
+        /api/translations/compatible. Every field describes what WAS
+        published; none of them asserts that the pack fits the caller's
+        modpack. Two fields the engine knows how to read are deliberately
+        never emitted, because the platform records neither per pack:
+        `mc_version` and `compatible_versions`. Emitting a guess would be
+        worse than omitting them - a Minecraft version the engine can
+        compare on both sides is exactly the gate that lets a NON-exact
+        modpack version through on a declared range, so a wrong value
+        turns a safe miss into a wrong offer. Absent, the engine caps the
+        candidate at exact-version matching.
+      required: [pack_id, modpack_version, url, download_url]
+      properties:
+        pack_id: { type: string }
+        modpack_version:
+          type: string
+          description: the modpack version this translation was built for
+        total_entries:
+          type: integer
+          nullable: true
+          description: entries the pack contains; absent on packs registered without stats
+        categories:
+          type: object
+          nullable: true
+          additionalProperties: { type: integer }
+          description: >
+            Entries per pipeline category bucket, as registered in
+            TranslationPackCreate.stats.categories. Null when the pack
+            predates the field or stored an unusable blob - all or
+            nothing, because a partially-read map would report content the
+            pack does translate as uncovered.
+        url: { type: string, description: public pack page }
+        download_url:
+          type: string
+          description: >
+            Kind-less on purpose. /api/packs/{id}/download resolves an
+            absent `kind` to the resource pack; append
+            `?kind=overrides` for the other channel, where a 404 means
+            this pack has no overrides archive.
     GlossarySnapshotEntry:
       type: object
       description: >
@@ -308,9 +406,6 @@ components:
             coverage_percent: { type: number }
             quality_score: { type: number, description: validator pass rate 0-1 }
             tm_hits: { type: integer }
-            migration_hits:
-              type: integer
-              description: exact A/B/C matches reused from a previous translation
             categories:
               type: object
               additionalProperties: { type: integer }

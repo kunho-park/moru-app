@@ -644,6 +644,88 @@ paths:
                       entries: { type: integer }
                       updated: { type: boolean }
         "502": { description: web platform unreachable or bad snapshot }
+  /community/translation:
+    get:
+      summary: >
+        Is a published community translation already covering this modpack?
+        Asks web-api.yaml /api/translations/compatible with the identity of a
+        finished scan job, then applies every compatibility rule locally,
+        because only the engine knows the Minecraft version on disk and how
+        much untranslated content the pack has. The scan's per-category entry
+        counts are what let the answer quote coverage rather than a bare
+        yes/no.
+      description: >
+        Never fails. Nothing published, a modpack with no usable identity, a
+        web platform too old to serve the route, an unreachable network, a
+        malformed body: every one of them is `match: null` with a 200. An
+        optional lookup has nothing to tell the user when it does not work,
+        and a wizard step that reddens because of one would be a regression.
+        A 404 still means the job id is unknown, as everywhere else.
+      parameters:
+        - { name: web_url, in: query, required: true, schema: { type: string } }
+        - name: job_id
+          in: query
+          required: true
+          description: a finished scan job, or a translate job carrying its payload
+          schema: { type: string }
+        - { name: target_lang, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [match]
+                properties:
+                  match:
+                    nullable: true
+                    allOf: [{ $ref: "#/components/schemas/TranslationMatch" }]
+        "404": { description: unknown job }
+        "422": { description: invalid target_lang }
+  /community/translation/download:
+    post:
+      summary: >
+        Fetch a matched pack's archives for run-scoped A/B/C migration reuse.
+      description: >
+        Returns local ZIP paths suitable for the `previous_resourcepack_path`
+        / `previous_overrides_path` job params. This is only the B side:
+        whether any entry may actually be reused is still decided by the
+        migration index, which requires the previous ORIGINAL modpack as A
+        and reuses an entry only when its source text is byte-identical
+        between A and the current pack. Supplying the downloaded artifacts
+        without A is rejected by POST /jobs with a 422 — deliberately, since
+        key-matching alone would apply a stale translation to English text
+        that has since changed.
+
+        Unlike the lookup this reports failure: the user pressed a button.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pack_id, download_url]
+              properties:
+                pack_id:
+                  type: string
+                  description: names the cache directory; not sent to the platform
+                download_url:
+                  type: string
+                  description: TranslationMatch.download_url, kind-less
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resourcepack_path: { type: string, nullable: true }
+                  overrides_path: { type: string, nullable: true }
+                description: >
+                  Null for a channel this pack does not publish. Both null
+                  means the pack had nothing downloadable.
+        "422": { description: missing pack_id }
+        "502": { description: download failed }
   /tm/stats:
     get:
       summary: Local translation-memory statistics
@@ -933,6 +1015,61 @@ components:
                   folder,
                 ]
             confident: { type: boolean }
+    TranslationMatch:
+      type: object
+      description: >
+        A published community pack offered for the scanned modpack. The
+        version match only decides candidacy; what the user acts on is
+        `uncovered_entries`. Measured over 11,513 real published modpack
+        versions, a declared range carries a translation across only ~25% of
+        real updates, because most version strings are not orderable
+        releases at all — so the coverage report, not the range, is what
+        makes offering a non-exact match worth anything.
+      required: [pack_id, exact, uncovered_by_category, note]
+      properties:
+        pack_id: { type: string }
+        modpack_version: { type: string, nullable: true }
+        exact:
+          type: boolean
+          description: >
+            The pack was built for this modpack version. The only thing that
+            matched before ranges existed, and today the only thing that can
+            match at all: the platform records no per-pack Minecraft version,
+            and the engine refuses a range whose Minecraft boundary it could
+            not check on both sides.
+        compatible_versions:
+          type: object
+          nullable: true
+          description: inclusive range the pack's author declared, if any
+          properties:
+            min: { type: string }
+            max: { type: string }
+        total_entries: { type: integer, nullable: true }
+        uncovered_entries:
+          type: integer
+          nullable: true
+          description: >
+            LOWER BOUND on local source entries this translation does not
+            cover. Null when the local side was not measured; 0 means no
+            missing entry could be established, which is as far as counts
+            go. Deliberately never a percentage — only a key-level diff of
+            the downloaded pack could justify one.
+        uncovered_by_category:
+          type: object
+          additionalProperties: { type: integer }
+          description: >
+            The same figure per scan category, fully-covered categories
+            dropped, so a category that shrank cannot mask one that grew.
+            Collapses to a single "" bucket when the two sides name their
+            categories differently, which is the normal case.
+        url: { type: string, nullable: true }
+        download_url:
+          type: string
+          nullable: true
+          description: pass to /community/translation/download
+        note:
+          type: string
+          description: user-facing Korean summary of what matched and what it costs
     Entry:
       type: object
       required: [key, source_text, translated_text, status]

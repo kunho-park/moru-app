@@ -14,11 +14,14 @@ import uuid
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import Mock
 
+import aiohttp
 import pytest
 from fastapi.testclient import TestClient
 from moru_engine import __version__
 from moru_engine.cli_providers.credentials import STORES
+from moru_engine.community import TranslationMatch
 from moru_engine.graph import TranslationGraph
 from moru_engine.pipeline import (
     EntryResult,
@@ -2165,3 +2168,198 @@ def test_translate_graph_unknown_or_wrong_type_is_404(
         client.get(f"/translate/{scan_job['id']}/graph", headers=AUTH).status_code
         == 404
     )
+
+
+# -- community translation lookup ---------------------------------------------
+
+
+def test_community_translation_measures_coverage_against_the_real_scan(
+    client: TestClient, scan_job: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point of asking after the scan: the answer can be quantified.
+
+    A bare "someone translated this" is not actionable. The endpoint feeds
+    the scan's own per-category entry counts to the matcher so the offer can
+    say how much of THIS pack the published one leaves untranslated.
+    """
+    captured: dict[str, Any] = {}
+
+    async def fake_find(
+        web_url: str,
+        identity: Any,
+        target_lang: str,
+        local_categories: Any = None,
+    ) -> TranslationMatch:
+        captured["web_url"] = web_url
+        captured["identity"] = identity
+        captured["target_lang"] = target_lang
+        captured["local_categories"] = local_categories
+        return TranslationMatch(
+            pack_id="pack-1",
+            modpack_version="4.1.2",
+            exact=True,
+            compatible_versions=None,
+            total_entries=8_036,
+            uncovered_entries=40,
+            uncovered_by_category={"": 40},
+            url="https://moru.gg/ko/pack/pack-1",
+            download_url="https://moru.gg/api/packs/pack-1/download",
+            note="4.1.2 버전용으로 제작된 번역팩입니다.",
+        )
+
+    monkeypatch.setattr("moru_engine.server.app.find_translation", fake_find)
+    response = client.get(
+        "/community/translation",
+        headers=AUTH,
+        params={
+            "web_url": "https://moru.gg",
+            "job_id": scan_job["id"],
+            "target_lang": "ko_kr",
+        },
+    )
+
+    assert response.status_code == 200
+    match = response.json()["match"]
+    assert match["pack_id"] == "pack-1"
+    assert match["uncovered_entries"] == 40
+    assert match["download_url"].endswith("/download")
+
+    # The local side really came from the scan, not an empty placeholder.
+    scan_payload = client.get(
+        f"/scan/{scan_job['id']}/result", headers=AUTH
+    ).json()
+    assert captured["local_categories"] == {
+        c["name"]: c["entry_count"] for c in scan_payload["categories"]
+    }
+    assert captured["local_categories"]
+    assert captured["identity"].name == scan_payload["identity"]["name"]
+    assert captured["target_lang"] == "ko_kr"
+
+
+def test_community_translation_failure_is_invisible_to_the_user(
+    client: TestClient, scan_job: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An optional lookup must never turn into a wizard error.
+
+    Offline, a platform too old to serve the route, a 500, a dropped socket:
+    none of these are anything the user can act on, and the scan screen has
+    nothing to say about them. Every one collapses to "nothing found".
+    """
+    for failure in (
+        aiohttp.ClientConnectorError(Mock(), OSError("offline")),
+        aiohttp.ClientResponseError(Mock(), (), status=500),
+        TimeoutError(),
+        ValueError("malformed candidate body"),
+    ):
+
+        async def fake_find(*_: Any, exc: BaseException = failure, **__: Any) -> None:
+            raise exc
+
+        monkeypatch.setattr("moru_engine.server.app.find_translation", fake_find)
+        response = client.get(
+            "/community/translation",
+            headers=AUTH,
+            params={
+                "web_url": "https://moru.gg",
+                "job_id": scan_job["id"],
+                "target_lang": "ko_kr",
+            },
+        )
+        assert response.status_code == 200, failure
+        assert response.json() == {"match": None}, failure
+
+
+def test_community_translation_nothing_published_is_a_clean_null(
+    client: TestClient, scan_job: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_find(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr("moru_engine.server.app.find_translation", fake_find)
+    response = client.get(
+        "/community/translation",
+        headers=AUTH,
+        params={
+            "web_url": "https://moru.gg",
+            "job_id": scan_job["id"],
+            "target_lang": "ko_kr",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"match": None}
+
+
+def test_community_translation_download_returns_migration_inputs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """What comes back is exactly what the A/B/C migration inputs accept."""
+    rp = tmp_path / "resource_pack.zip"
+    rp.write_bytes(b"RP")
+
+    async def fake_download(download_url: str, destination: Path) -> dict[str, Path]:
+        assert download_url == "https://moru.gg/api/packs/pack-1/download"
+        return {"resource_pack": rp}
+
+    monkeypatch.setattr("moru_engine.server.app.download_translation", fake_download)
+    response = client.post(
+        "/community/translation/download",
+        headers=AUTH,
+        json={
+            "pack_id": "pack-1",
+            "download_url": "https://moru.gg/api/packs/pack-1/download",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "resourcepack_path": str(rp),
+        "overrides_path": None,
+    }
+
+
+def test_community_translation_download_reports_its_own_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike the lookup, this one is a button press and is owed an answer."""
+
+    async def fake_download(*_: Any, **__: Any) -> dict[str, Path]:
+        raise aiohttp.ClientError("connection reset")
+
+    monkeypatch.setattr("moru_engine.server.app.download_translation", fake_download)
+    response = client.post(
+        "/community/translation/download",
+        headers=AUTH,
+        json={"pack_id": "pack-1", "download_url": "https://moru.gg/x"},
+    )
+    assert response.status_code == 502
+    assert "translation download failed" in response.json()["detail"]
+
+
+def test_a_downloaded_pack_alone_cannot_start_a_migration_scan(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The safety boundary, pinned.
+
+    A pack downloaded from moru.gg is B: target-locale files, with no record
+    of the source text they were translated from. Reuse is only sound when
+    that source can be shown byte-identical between the old modpack and this
+    one, which needs A. Accepting B alone would apply a stale translation to
+    a changed English string without anyone noticing, so it is refused at the
+    request boundary rather than quietly producing zero reuse.
+    """
+    downloaded = tmp_path / "resource_pack.zip"
+    downloaded.write_bytes(b"RP")
+
+    response = client.post(
+        "/jobs",
+        headers=AUTH,
+        json={
+            "type": "scan",
+            "params": {
+                "modpack_path": str(MODPACK),
+                "previous_resourcepack_path": str(downloaded),
+            },
+        },
+    )
+    assert response.status_code == 422
+    assert "previous_modpack_path" in response.json()["detail"]

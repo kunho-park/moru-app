@@ -1157,6 +1157,10 @@ def create_app(
                 entry["login_hint"] = status.get("login_hint")
                 entry["account"] = status.get("email")
                 entry["error"] = status.get("error")
+                # Paired with `error`: the prose stays for older clients,
+                # the code lets a localized client say it in the user's own
+                # language instead of rendering our Korean verbatim.
+                entry["error_code"] = status.get("error_code")
                 entry["state"] = status.get("state")
                 entry["cli"] = status.get("cli")
                 entry["cli_installed"] = status.get("cli_installed")

@@ -22,6 +22,7 @@ from moru_engine.cli_providers import (
     codex,
     credentials,
     gemini_cli,
+    provider_status,
 )
 
 # --------------------------------------------------------------------------
@@ -1493,3 +1494,121 @@ def test_saved_legacy_model_on_the_agy_path_names_its_replacement() -> None:
     message = str(excinfo.value)
     assert "gemini-3.5-flash" in message
     assert "gemini-3.5-flash-medium" in message
+
+
+# --------------------------------------------------------------------------
+# error_code — a localizable reason beside the Korean prose
+# --------------------------------------------------------------------------
+
+
+def test_error_prose_is_kept_verbatim_beside_the_code(gemini_home, monkeypatch) -> None:
+    """`error` must not change shape: an older desktop shows it verbatim.
+
+    The renderer sanitizes and displays this string, so removing or
+    restructuring it would regress clients that have no code mapping. The
+    code is added ALONGSIDE, never instead.
+    """
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    monkeypatch.setattr(
+        store, "project",
+        lambda: (_ for _ in ()).throw(
+            credentials.CliAuthError(
+                credentials._NEEDS_PROJECT_ENV,
+                code=credentials.REASON_PROJECT_REQUIRED,
+            )
+        ),
+    )
+    status = store.status()
+    assert status["error"] == credentials._NEEDS_PROJECT_ENV
+    assert status["error_code"] == credentials.REASON_PROJECT_REQUIRED
+    assert status["state"] == credentials.STATE_UNUSABLE
+
+
+def test_project_required_and_setup_failed_are_told_apart(gemini_home, monkeypatch) -> None:
+    """Same prose shape, opposite instructions.
+
+    "Set GOOGLE_CLOUD_PROJECT" is the user's job; "Code Assist refused" is
+    not. A renderer cannot distinguish them from the sentence alone, which
+    is the whole reason a code exists.
+    """
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+
+    monkeypatch.setattr(
+        store, "project",
+        lambda: (_ for _ in ()).throw(
+            credentials.CliAuthError("등록 실패", code=credentials.REASON_PROJECT_SETUP_FAILED)
+        ),
+    )
+    assert store.status()["error_code"] == credentials.REASON_PROJECT_SETUP_FAILED
+
+    monkeypatch.setattr(
+        store, "project",
+        lambda: (_ for _ in ()).throw(
+            credentials.CliAuthError("프로젝트 필요", code=credentials.REASON_PROJECT_REQUIRED)
+        ),
+    )
+    assert store.status()["error_code"] == credentials.REASON_PROJECT_REQUIRED
+
+
+def test_an_uncoded_failure_falls_through_to_the_prose(gemini_home, monkeypatch) -> None:
+    """No invented taxonomy: an unmapped failure carries no code.
+
+    Emitting a code for an httpx error or a bug would tell the renderer to
+    show localized copy that does not describe what happened. None means
+    "use the prose", which is the honest answer.
+    """
+    _write_grant(gemini_home)
+    store = credentials.GeminiCliStore()
+    monkeypatch.setattr(
+        store, "project",
+        lambda: (_ for _ in ()).throw(RuntimeError("connection reset by peer")),
+    )
+    status = store.status()
+    assert status["error_code"] is None
+    assert "connection reset" in status["error"]
+
+
+def test_login_required_is_the_code_for_every_token_problem(monkeypatch) -> None:
+    """Not logged in, expired, and unreadable all mean "sign in again"."""
+    store = credentials.CodexStore()
+    monkeypatch.setattr(store, "_load", lambda: None)
+    with pytest.raises(credentials.CliAuthError) as excinfo:
+        store.credentials()
+    assert excinfo.value.code == credentials.REASON_LOGIN_REQUIRED
+
+    # An unreadable credential file: same instruction, same code.
+    def _boom():
+        raise ValueError("bad json")
+
+    monkeypatch.setattr(store, "_load", _boom)
+    assert store.status()["error_code"] == credentials.REASON_LOGIN_REQUIRED
+
+
+def test_unknown_provider_reports_a_code_too() -> None:
+    status = provider_status("not-a-provider")
+    assert status["error_code"] == credentials.REASON_UNKNOWN_PROVIDER
+    assert "unknown provider" in status["error"]
+
+
+def test_reason_codes_stay_a_small_closed_set() -> None:
+    """Guards against the taxonomy creeping.
+
+    Each code has to imply a DIFFERENT user action; anything that reads as
+    the same sentence belongs folded into an existing one. If this list
+    grows, that decision should be deliberate rather than incidental.
+    """
+    codes = {
+        name: value
+        for name, value in vars(credentials).items()
+        if name.startswith("REASON_")
+    }
+    assert set(codes.values()) == {
+        "login-required",
+        "project-required",
+        "project-setup-failed",
+        "unknown-provider",
+    }
+    # Stable wire strings: renderers key their copy off these.
+    assert all(value == value.lower() and " " not in value for value in codes.values())

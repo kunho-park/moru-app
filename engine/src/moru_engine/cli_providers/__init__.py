@@ -22,6 +22,7 @@ from .claude_code import ClaudeCodeLLM
 from .codex import CodexLLM
 from .credentials import (
     GEMINI_CLI_STORE,
+    REASON_UNKNOWN_PROVIDER,
     STATE_CLI_MISSING,
     STORES,
     TRANSPORT_AGY_CLI,
@@ -173,6 +174,7 @@ def provider_status(provider_id: str) -> dict[str, Any]:
         return {
             "connected": False,
             "error": f"unknown provider: {provider_id}",
+            "error_code": REASON_UNKNOWN_PROVIDER,
             "state": STATE_CLI_MISSING,
         }
     status = store.status()

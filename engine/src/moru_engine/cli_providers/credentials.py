@@ -53,11 +53,45 @@ TRANSPORT_LEGACY_HTTP = "legacy-http"  # borrowed OAuth -> cloudcode-pa
 TRANSPORT_AGY_CLI = "agy-cli"          # subprocess -> agy headless mode
 
 
+#: Machine-readable failure reasons, paired with the human `error` string.
+#: The engine writes `error` in Korean, and a client that shows it verbatim
+#: leaks one locale into a product shipping English too. So `error_code`
+#: travels alongside it and a renderer maps the code to its own localized
+#: copy, falling back to the prose for any code it does not recognise.
+#:
+#: Deliberately tiny and closed. Each code exists only because it implies a
+#: DIFFERENT action for the user; anything that would read as the same
+#: sentence is folded into one code, and anything not enumerated here
+#: arrives as `error_code: None` so the prose still shows.
+REASON_LOGIN_REQUIRED = "login-required"          # sign in again (any token problem)
+REASON_PROJECT_REQUIRED = "project-required"      # set GOOGLE_CLOUD_PROJECT
+REASON_PROJECT_SETUP_FAILED = "project-setup-failed"  # Code Assist refused; not the user
+REASON_UNKNOWN_PROVIDER = "unknown-provider"      # internal: bad provider id
+
+
 class CliAuthError(RuntimeError):
     """No usable credential for a CLI provider.
 
-    Carries a message aimed at the desktop UI: what to run to fix it.
+    Carries a message aimed at the desktop UI: what to run to fix it, plus
+    an optional stable `code` so the UI can say it in the user's own
+    language instead of echoing ours.
     """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def reason_of(exc: BaseException, default: str | None = None) -> str | None:
+    """The stable reason code an exception carries, if any.
+
+    Only `CliAuthError` sets one. Anything else \u2014 an httpx error, a JSON
+    decode, a bug \u2014 has no meaningful code, and inventing one would tell a
+    renderer to show localized copy that does not match what happened. Those
+    fall through to `default` (usually None), leaving the prose to speak.
+    """
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, str) and code else default
 
 
 def _now_ms() -> int:
@@ -93,7 +127,10 @@ def _atomic_write_json(path: Path, data: object, *, private: bool) -> None:
 def _refreshed(resp: httpx.Response) -> dict[str, Any]:
     """Parsed body of a token-refresh response, or the failure it reports."""
     if resp.status_code != 200:
-        raise CliAuthError(f"token refresh failed ({resp.status_code}): {resp.text[:300]}")
+        raise CliAuthError(
+            f"token refresh failed ({resp.status_code}): {resp.text[:300]}",
+            code=REASON_LOGIN_REQUIRED,
+        )
     return resp.json()
 
 
@@ -180,15 +217,21 @@ class CliCredentialStore(ABC):
         """Auth summary for GET /providers.
 
         `state` is the field a client should branch on; `connected` is kept
-        for older clients that only understood a boolean.
+        for older clients that only understood a boolean. `error` keeps its
+        exact prose for the same reason, with `error_code` added beside it
+        so a client can localize instead of echoing our Korean.
         """
         installed = self.cli_installed()
         try:
             creds = self._load()
         except Exception as exc:  # noqa: BLE001
+            # An unreadable credential file is fixed by signing in again,
+            # which is the same instruction as a missing one — so it shares
+            # that code rather than earning its own.
             return {
                 "connected": False,
                 "error": str(exc),
+                "error_code": reason_of(exc, REASON_LOGIN_REQUIRED),
                 "state": STATE_UNUSABLE,
                 "cli_installed": installed,
                 "cli": self.cli_command,
@@ -197,6 +240,7 @@ class CliCredentialStore(ABC):
             return {
                 "connected": False,
                 "error": None,
+                "error_code": None,
                 "state": STATE_LOGGED_OUT if installed else STATE_CLI_MISSING,
                 "cli_installed": installed,
                 "cli": self.cli_command,
@@ -204,6 +248,7 @@ class CliCredentialStore(ABC):
         return {
             "connected": True,
             "error": None,
+            "error_code": None,
             "email": creds.email,
             "expires": creds.expires or None,
             "state": STATE_READY,
@@ -222,13 +267,15 @@ class CliCredentialStore(ABC):
             if creds is None:
                 raise CliAuthError(
                     f"{self.label}에 로그인되어 있지 않습니다. 터미널에서 "
-                    f"`{self.login_hint}`로 로그인한 뒤 다시 시도해 주세요."
+                    f"`{self.login_hint}`로 로그인한 뒤 다시 시도해 주세요.",
+                    code=REASON_LOGIN_REQUIRED,
                 )
             if creds.stale():
                 if not creds.refresh:
                     raise CliAuthError(
                         f"{self.label} 토큰이 만료되었고 갱신 토큰이 없습니다. "
-                        f"`{self.login_hint}`로 다시 로그인해 주세요."
+                        f"`{self.login_hint}`로 다시 로그인해 주세요.",
+                        code=REASON_LOGIN_REQUIRED,
                     )
                 logger.info("Refreshing %s credentials", self.id)
                 creds = self._refresh(creds)
@@ -396,7 +443,10 @@ class ClaudeCodeStore(CliCredentialStore):
         )
         access = data.get("access_token")
         if not isinstance(access, str) or not access:
-            raise CliAuthError("Anthropic refresh response had no access_token")
+            raise CliAuthError(
+                "Anthropic refresh response had no access_token",
+                code=REASON_LOGIN_REQUIRED,
+            )
         expires_in = data.get("expires_in")
         account = data.get("account") or {}
         return OAuthCredentials(
@@ -482,7 +532,10 @@ class CodexStore(CliCredentialStore):
         )
         access = data.get("access_token")
         if not isinstance(access, str) or not access:
-            raise CliAuthError("Codex refresh response had no access_token")
+            raise CliAuthError(
+                "Codex refresh response had no access_token",
+                code=REASON_LOGIN_REQUIRED,
+            )
         claims = _decode_jwt(access)
         auth = claims.get(_CODEX_JWT_CLAIM) or {}
         exp = claims.get("exp")
@@ -801,7 +854,10 @@ class GeminiCliStore(CliCredentialStore):
         )
         access = data.get("access_token")
         if not isinstance(access, str) or not access:
-            raise CliAuthError("Google refresh response had no access_token")
+            raise CliAuthError(
+                "Google refresh response had no access_token",
+                code=REASON_LOGIN_REQUIRED,
+            )
         expires_in = data.get("expires_in")
         raw = dict(creds.raw)
         if isinstance(data.get("id_token"), str):
@@ -880,6 +936,10 @@ class GeminiCliStore(CliCredentialStore):
             summary["connected"] = False
             summary["project"] = None
             summary["error"] = str(exc)
+            # Distinguishes "you must set GOOGLE_CLOUD_PROJECT" from "Code
+            # Assist refused" — two failures with the same prose shape but
+            # completely different instructions for the user.
+            summary["error_code"] = reason_of(exc)
             summary["state"] = STATE_UNUSABLE
         return summary
 
@@ -948,7 +1008,7 @@ class GeminiCliStore(CliCredentialStore):
             # account whose tier carries none must supply its own.
             project = payload.get("cloudaicompanionProject") or env_project
             if not project:
-                raise CliAuthError(_NEEDS_PROJECT_ENV)
+                raise CliAuthError(_NEEDS_PROJECT_ENV, code=REASON_PROJECT_REQUIRED)
             return self._cache_project(project)
 
         lro = self._onboard_user(headers, _default_tier(payload.get("allowedTiers")), env_project)
@@ -960,7 +1020,7 @@ class GeminiCliStore(CliCredentialStore):
             or payload.get("cloudaicompanionProject")
         )
         if not project:
-            raise CliAuthError(_NEEDS_PROJECT_ENV)
+            raise CliAuthError(_NEEDS_PROJECT_ENV, code=REASON_PROJECT_REQUIRED)
         return self._cache_project(project)
 
     def _load_code_assist(
@@ -1011,7 +1071,8 @@ class GeminiCliStore(CliCredentialStore):
         if response.status_code != 200:
             raise CliAuthError(
                 f"Gemini CLI 프로젝트 등록에 실패했습니다. "
-                f"({response.status_code}) {response.text[:300]}"
+                f"({response.status_code}) {response.text[:300]}",
+                code=REASON_PROJECT_SETUP_FAILED,
             )
         lro = response.json()
         # Bounded poll: a stuck operation must surface as an error rather
@@ -1029,7 +1090,8 @@ class GeminiCliStore(CliCredentialStore):
             if poll.status_code != 200:
                 raise CliAuthError(
                     f"Gemini CLI 프로젝트 등록 상태를 확인할 수 없습니다. "
-                    f"({poll.status_code}) {poll.text[:200]}"
+                    f"({poll.status_code}) {poll.text[:200]}",
+                    code=REASON_PROJECT_SETUP_FAILED,
                 )
             lro = poll.json()
         return lro
@@ -1049,7 +1111,8 @@ class GeminiCliStore(CliCredentialStore):
             return {"currentTier": {"id": _TIER_STANDARD}}
         raise CliAuthError(
             f"Gemini CLI 계정 정보를 불러올 수 없습니다. "
-            f"({response.status_code}) {response.text[:300]}"
+            f"({response.status_code}) {response.text[:300]}",
+            code=REASON_PROJECT_SETUP_FAILED,
         )
 
     def _cache_project(self, project: str) -> str:

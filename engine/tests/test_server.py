@@ -1764,6 +1764,52 @@ def test_glossary_rejects_bad_locale(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_glossary_recovers_a_legacy_or_damaged_store(
+    tmp_path_factory: pytest.TempPathFactory, shutdown_flag: threading.Event
+) -> None:
+    """The stored document is whatever a past build wrote.
+
+    A bare term list predates the doc wrapper, and a crash mid-write can
+    leave `terms` holding something that is not a list at all. Returning the
+    file verbatim served the first case as empty and pushed the second into
+    the renderer, where mapping over it throws and blanks the glossary screen
+    rather than showing the empty state.
+    """
+    root = tmp_path_factory.mktemp("glossary-legacy")
+    store = root / "config" / "glossaries"
+    store.mkdir(parents=True)
+    term = {"source": "Diamond", "target": "다이아몬드", "origin": "vanilla"}
+    params = {"source_lang": "en_us", "target_lang": "ko_kr"}
+
+    def read(document: object) -> dict[str, Any]:
+        (store / "en_us_ko_kr.json").write_text(
+            json.dumps(document, ensure_ascii=False), encoding="utf-8"
+        )
+        app = create_app(
+            token=TOKEN,
+            config_dir=root / "config",
+            tm_db_path=root / "tm.sqlite3",
+            shutdown_handler=shutdown_flag.set,
+            shutdown_delay=0.0,
+        )
+        with TestClient(app) as legacy_client:
+            response = legacy_client.get("/glossary", params=params, headers=AUTH)
+        assert response.status_code == 200
+        return response.json()
+
+    # A pre-wrapper store is still readable, and the missing key_scope
+    # deserializes to "every key".
+    body = read([term])
+    assert body["terms"] == [{**term, "key_scope": []}]
+
+    # A non-list `terms` reads as empty instead of reaching the renderer.
+    assert read({**params, "terms": {"bogus": 1}})["terms"] == []
+
+    # One unusable row must not cost the rows around it.
+    body = read({**params, "terms": [term, {"nope": True}, {"source": "Gold", "target": "금"}]})
+    assert [entry["source"] for entry in body["terms"]] == ["Diamond", "Gold"]
+
+
 def test_tm_stats_empty_db(
     tmp_path_factory: pytest.TempPathFactory, shutdown_flag: threading.Event
 ) -> None:

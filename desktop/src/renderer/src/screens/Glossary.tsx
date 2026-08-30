@@ -231,7 +231,13 @@ export function GlossaryScreen() {
     queryKey: ["glossary", SOURCE_LANG, targetLang],
     queryFn: () => api.glossary(SOURCE_LANG, targetLang),
   });
-  const terms: GlossaryTerm[] = useMemo(() => query.data?.terms ?? [], [query.data]);
+  // A store written by an older build can carry a non-list `terms`; mapping
+  // over it throws mid-render, which blanks the screen instead of showing the
+  // empty state. The engine normalizes too - this is the client-side floor.
+  const terms: GlossaryTerm[] = useMemo(
+    () => (Array.isArray(query.data?.terms) ? query.data.terms : []),
+    [query.data],
+  );
 
   const saveMutation = useMutation({
     mutationFn: (next: GlossaryTerm[]) =>

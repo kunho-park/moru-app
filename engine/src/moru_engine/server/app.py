@@ -33,7 +33,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from platformdirs import user_config_dir
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.websockets import WebSocketDisconnect
 
 from .. import __version__
@@ -939,14 +939,35 @@ def create_app(
 
     @api.get("/glossary")
     async def get_glossary(source_lang: str, target_lang: str) -> dict[str, Any]:
+        """The stored glossary, normalized to the response contract.
+
+        The document on disk is whatever some past build wrote: a bare term
+        list before the doc wrapper existed, rows without ``key_scope``, or a
+        half-written file from a crash. Returning it verbatim pushed that
+        straight into the renderer, where a ``terms`` value that is not a list
+        throws mid-render and blanks the screen instead of showing the empty
+        state. Parse through the response model, drop rows it rejects, and
+        keep serving the ones that survive.
+        """
         stored = _read_json(_glossary_path(source_lang, target_lang))
-        if isinstance(stored, dict):
-            return stored
-        return {
-            "source_lang": source_lang,
-            "target_lang": target_lang,
-            "terms": [],
-        }
+        raw_terms = stored.get("terms") if isinstance(stored, dict) else stored
+        terms: list[GlossaryTerm] = []
+        dropped = 0
+        for entry in raw_terms if isinstance(raw_terms, list) else ():
+            try:
+                terms.append(GlossaryTerm.model_validate(entry))
+            except ValidationError:
+                dropped += 1
+        if dropped:
+            logger.warning(
+                "Dropped %d malformed glossary term(s) for %s->%s",
+                dropped,
+                source_lang,
+                target_lang,
+            )
+        return GlossaryDoc(
+            source_lang=source_lang, target_lang=target_lang, terms=terms
+        ).model_dump()
 
     @api.put("/glossary")
     async def put_glossary(body: GlossaryDoc) -> dict[str, Any]:

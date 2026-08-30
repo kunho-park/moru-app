@@ -44,7 +44,8 @@
     "ollamaEmpty": "No models found — make sure Ollama is running",
     "compatModelsTitle": "Models loaded on the server",
     "compatEmpty": "No models found — check the server is running and the address (e.g. http://localhost:1234/v1)",
-    "needsCliLogin": "CLI login needed"
+    "needsCliLogin": "CLI login needed",
+    "needsCliSetup": "Setup needed"
   },
   "preset": {
     "recommended": "Best pick",
@@ -90,6 +91,9 @@
   },
   "key": {
     "checking": "Checking API key…",
+    "cliConfirmed": "{{provider}} subscription ready",
+    "cliNeedsLogin": "{{provider}} needs a CLI login",
+    "cliNeedsSetup": "{{provider}} is signed in but not usable yet",
     "confirmed": "{{provider}} API key verified",
     "savedLocal": "Stored in this computer's secure storage",
     "engineManaged": "Using the key registered in engine settings",

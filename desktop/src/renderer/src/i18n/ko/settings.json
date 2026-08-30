@@ -41,10 +41,15 @@
     "empty": "사용 가능한 프로바이더가 없습니다",
     "cliSubscription": "구독",
     "cliConnected": "연결됨",
-    "cliDisconnected": "사용 불가",
+    "cliNeedsLogin": "로그인 필요",
+    "cliNeedsSetup": "설정 필요",
     "cliReady": "설치된 CLI의 로그인 정보를 그대로 사용합니다. API 키가 필요 없어요.",
-    "cliLoginHint": "터미널에서 `{{cmd}}`로 로그인하면 바로 사용할 수 있어요.",
-    "cliBlocked": "로그인은 되어 있지만 아직 사용할 수 없어요: {{reason}}"
+    "cliLoginHint": "아직 이 CLI의 로그인 정보를 찾지 못했어요. 터미널에서 `{{cmd}}`를 실행하고 안내에 따라 로그인을 마친 뒤 다시 확인해 주세요. CLI가 아직 설치되어 있지 않다면 먼저 설치해야 해요.",
+    "cliLoginHintNoCmd": "아직 이 CLI의 로그인 정보를 찾지 못했어요. 이 제공자의 CLI로 로그인한 뒤 다시 확인해 주세요.",
+    "cliBlocked": "로그인은 되어 있지만 아직 사용할 수 없어요: {{reason}}",
+    "cliBlockedUnknown": "로그인은 되어 있지만 아직 요청을 처리할 수 없어요. CLI가 이유를 알려주지 않았으니 터미널에서 직접 실행해 어떤 문제인지 확인해 주세요.",
+    "cliRecheck": "다시 확인",
+    "cliTestFailUnknown": "확인에 실패했는데 CLI가 알아볼 수 있는 이유를 주지 않았어요. 터미널에서 직접 실행해 확인해 주세요."
   },
   "general": {
     "title": "앱 기본 설정",

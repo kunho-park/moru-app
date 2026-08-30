@@ -12,7 +12,13 @@ import { useTranslation } from "react-i18next";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
 import { formatInt } from "@/lib/format";
-import { CLI_PROVIDERS, isKeylessProvider, modelDisplayName } from "@/lib/models";
+import {
+  cliFailureReason,
+  cliProductName,
+  cliSetupState,
+  isCliProvider,
+} from "@/lib/cliProviders";
+import { LOCAL_PROVIDERS, modelDisplayName } from "@/lib/models";
 import { WEB_URL, WebApiError, web } from "@/lib/web";
 import { useAccount } from "@/stores/account";
 import { useRouter } from "@/stores/router";
@@ -308,21 +314,55 @@ function ProviderCard({
 }
 
 /**
- * Coding-CLI subscription card (Claude Code, Codex, Gemini CLI). There is
- * no key field: the engine rides the OAuth grant the CLI already stores,
- * so the card reports whether that grant is readable and names the command
- * that fixes it when it is not.
+ * Coding-CLI subscription card (Claude Code, Codex, Gemini CLI /
+ * Antigravity). There is no key field: the engine rides the OAuth grant the
+ * user's CLI already stores, so the card reports whether that grant can
+ * actually serve a request and what to do when it cannot — three states,
+ * because the next action differs in each.
  */
 function CliProviderCard({ provider }: { provider: Provider }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const decor = providerDecor(provider);
-  const connected = provider.connected ?? provider.has_key;
+  const state = cliSetupState(provider);
 
-  const test = useMutation({
+  const recheck = useMutation({
     mutationFn: () => api.testProvider(provider.id, undefined, provider.models[0]),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["providers"] }),
   });
+
+  const status =
+    state.kind === "ready"
+      ? { label: t("settings.models.cliConnected"), tone: "text-accent" }
+      : state.kind === "needs-setup"
+        ? { label: t("settings.models.cliNeedsSetup"), tone: "text-amber" }
+        : { label: t("settings.models.cliNeedsLogin"), tone: "text-text3" };
+
+  const guidance =
+    state.kind === "ready"
+      ? t("settings.models.cliReady")
+      : state.kind === "needs-setup"
+        ? /* A readable grant that still cannot serve a request (a Workspace
+             Google account with no Cloud Code Assist project, say) must say
+             so — telling this user to log in again never fixes it. */
+          state.reason !== null
+          ? t("settings.models.cliBlocked", { reason: state.reason })
+          : t("settings.models.cliBlockedUnknown")
+        : state.command !== null
+          ? t("settings.models.cliLoginHint", { cmd: state.command })
+          : t("settings.models.cliLoginHintNoCmd");
+
+  /* The engine hands back str(exc) on an unexpected failure, so the probe
+     result is sanitized before it reaches the strip: a card that tells the
+     user to fix something must never answer with a traceback. */
+  const probe = testStatusOf(recheck);
+  const probeStatus: TestStatus =
+    probe.kind === "fail"
+      ? {
+          kind: "fail",
+          message: cliFailureReason(probe.message) ?? t("settings.models.cliTestFailUnknown"),
+        }
+      : probe;
 
   return (
     <div className="relative mb-3 overflow-hidden border border-line2 bg-raised">
@@ -335,7 +375,7 @@ function CliProviderCard({ provider }: { provider: Provider }) {
         </div>
         <div className="min-w-0 flex-1">
           <div className="mb-[2px] flex items-center gap-2">
-            <span className="text-sm font-bold text-text">{provider.name}</span>
+            <span className="text-sm font-bold text-text">{cliProductName(provider)}</span>
             <span className="bg-[rgba(61,220,132,0.08)] px-[5px] py-[2px] font-mono text-[10px] text-accent">
               {t("settings.models.cliSubscription")}
             </span>
@@ -345,38 +385,28 @@ function CliProviderCard({ provider }: { provider: Provider }) {
           </div>
         </div>
         <div className="shrink-0 text-right">
-          <div
-            className={`font-mono text-xs font-bold ${connected ? "text-accent" : "text-text3"}`}
-          >
-            {connected ? t("settings.models.cliConnected") : t("settings.models.cliDisconnected")}
-          </div>
-          {connected && provider.account !== null && provider.account !== undefined && (
-            <div className="font-mono text-[10px] text-text3">{provider.account}</div>
+          <div className={`font-mono text-xs font-bold ${status.tone}`}>{status.label}</div>
+          {state.kind === "ready" && state.account !== null && (
+            <div className="font-mono text-[10px] text-text3">{state.account}</div>
           )}
         </div>
       </div>
 
       <div className="flex items-center gap-[10px] px-5 py-4">
-        <div className="min-w-0 flex-1 font-mono text-[11px] text-text3">
-          {connected
-            ? t("settings.models.cliReady")
-            : /* A readable grant that still cannot serve a request (e.g. a
-                 Workspace account with no Cloud Code Assist project) must
-                 say so — telling the user to log in again never fixes it. */
-              provider.error !== null && provider.error !== undefined
-              ? t("settings.models.cliBlocked", { reason: provider.error })
-              : t("settings.models.cliLoginHint", { cmd: provider.login_hint ?? "" })}
+        <div className="min-w-0 flex-1 font-mono text-[11px] leading-[1.6] text-text3">
+          {guidance}
         </div>
         <button
+          type="button"
           className="shrink-0 border border-accent bg-transparent px-3 py-2 text-[11px] font-semibold text-accent hover:bg-[rgba(61,220,132,0.08)] disabled:cursor-not-allowed disabled:opacity-40"
-          disabled={test.isPending}
-          onClick={() => test.mutate()}
+          disabled={recheck.isPending}
+          onClick={() => recheck.mutate()}
         >
-          {t("settings.models.test")}
+          {t("settings.models.cliRecheck")}
         </button>
       </div>
 
-      <TestStatusLine status={testStatusOf(test)} />
+      <TestStatusLine status={probeStatus} />
     </div>
   );
 }
@@ -675,7 +705,7 @@ function ModelsTab() {
             </div>
           )}
           {providers
-            .filter((p) => !isKeylessProvider(p.id))
+            .filter((p) => !isCliProvider(p) && !LOCAL_PROVIDERS.has(p.id))
             .map((p) => (
               <ProviderCard
                 key={p.id}
@@ -685,7 +715,7 @@ function ModelsTab() {
               />
             ))}
           {providers
-            .filter((p) => CLI_PROVIDERS[p.id] === true)
+            .filter(isCliProvider)
             .map((p) => (
               <CliProviderCard key={p.id} provider={p} />
             ))}

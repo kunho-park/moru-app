@@ -8,13 +8,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { SpeechLevel, TermStyle } from "../../../shared/engine";
+import type { Provider, SpeechLevel, TermStyle } from "../../../shared/engine";
 import { ModelSelect } from "@/components/ModelSelect";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
 import { formatCompact, formatInt, formatUsd } from "@/lib/format";
 import {
-  CLI_PROVIDERS,
+  cliFailureReason,
+  cliProductName,
+  cliSetupState,
+  isCliProvider,
+  type CliSetupState,
+} from "@/lib/cliProviders";
+import {
   LOCAL_PROVIDERS,
   PRESET_IDS,
   PROVIDER_ORDER,
@@ -111,6 +117,95 @@ function KeyIcon({ color }: { color: string }) {
       <path d="M4 5 A2 2 0 0 1 8 5 A2 2 0 0 1 4 5 Z" />
       <path d="M6 7 V12 M4 10 H6" />
     </svg>
+  );
+}
+
+/** Same 14px stroke grammar as KeyIcon; a key would misdescribe a provider
+ *  that authenticates through a terminal and never takes one. */
+function TerminalIcon({ color }: { color: string }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={color} strokeWidth="1.5">
+      <rect x="1.5" y="2.5" width="11" height="9" />
+      <path d="M4 6 L6 8 L4 10 M7.5 10 H10" />
+    </svg>
+  );
+}
+
+/**
+ * Setup guidance for the selected coding-CLI subscription, standing in for
+ * the key row those providers have no use for. Mirrors the Settings card —
+ * same three states, same strings — so the two screens cannot disagree, and
+ * re-checks in place so the user never has to restart the app after logging
+ * in.
+ */
+function CliSetupBand({ provider, state }: { provider: Provider; state: CliSetupState }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const recheck = useMutation({
+    mutationFn: () => api.testProvider(provider.id, undefined, provider.models[0]),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["providers"] }),
+  });
+
+  const ready = state.kind === "ready";
+  const tone = ready
+    ? { border: "border-accent-lo", bg: "bg-tint", chip: "rgba(61,220,132,0.12)", ink: "#3DDC84" }
+    : { border: "border-amber", bg: "", chip: "rgba(245,180,84,0.12)", ink: "#F5B454" };
+
+  const title = ready
+    ? t("w3.key.cliConfirmed", { provider: cliProductName(provider) })
+    : state.kind === "needs-setup"
+      ? t("w3.key.cliNeedsSetup", { provider: cliProductName(provider) })
+      : t("w3.key.cliNeedsLogin", { provider: cliProductName(provider) });
+
+  const detail = ready
+    ? state.account !== null
+      ? t("settings.models.cliReady") + ` · ${state.account}`
+      : t("settings.models.cliReady")
+    : state.kind === "needs-setup"
+      ? state.reason !== null
+        ? t("settings.models.cliBlocked", { reason: state.reason })
+        : t("settings.models.cliBlockedUnknown")
+      : state.command !== null
+        ? t("settings.models.cliLoginHint", { cmd: state.command })
+        : t("settings.models.cliLoginHintNoCmd");
+
+  /* The probe returns the engine's str(exc) on an unexpected failure; a
+     screen telling the user how to fix their setup must not answer with a
+     traceback. */
+  const probeFailure =
+    recheck.data !== undefined && !recheck.data.ok
+      ? (cliFailureReason(recheck.data.error) ?? t("settings.models.cliTestFailUnknown"))
+      : recheck.error !== null
+        ? (cliFailureReason(recheck.error.message) ?? t("settings.models.cliTestFailUnknown"))
+        : null;
+
+  return (
+    <div
+      className={`relative mb-5 flex items-center gap-[14px] border ${tone.border} ${tone.bg} px-[18px] py-4`}
+      style={ready ? undefined : { background: "rgba(245,180,84,0.04)" }}
+    >
+      <div
+        className="flex h-8 w-8 shrink-0 items-center justify-center"
+        style={{ background: tone.chip }}
+      >
+        <TerminalIcon color={tone.ink} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="mb-[2px] text-[13px] font-bold text-text">{title}</div>
+        <div className="font-mono text-[11px] leading-[1.6] text-text2">{detail}</div>
+        {probeFailure !== null && (
+          <div className="mt-1 font-mono text-[11px] text-red">{probeFailure}</div>
+        )}
+      </div>
+      <button
+        type="button"
+        disabled={recheck.isPending}
+        onClick={() => recheck.mutate()}
+        className="shrink-0 cursor-pointer border border-accent bg-transparent px-[14px] py-[7px] text-[12px] font-semibold text-accent hover:bg-[rgba(61,220,132,0.08)] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {recheck.isPending ? t("settings.models.testing") : t("settings.models.cliRecheck")}
+      </button>
+    </div>
   );
 }
 
@@ -261,6 +356,14 @@ export function W3Settings() {
     const set = new Set<string>();
     for (const p of providersQuery.data ?? []) {
       if (LOCAL_PROVIDERS.has(p.id)) continue;
+      // A CLI subscription counts as ready only when the engine says its
+      // grant can actually serve a request. A key someone once saved under
+      // this id must never stand in for that, or this band would read
+      // 연결됨 while Settings reads 설정 필요 for the same provider.
+      if (isCliProvider(p)) {
+        if (cliSetupState(p).kind === "ready") set.add(p.id);
+        continue;
+      }
       if (p.has_key || (secretsQuery.data?.[p.id] ?? null) !== null) set.add(p.id);
     }
     if (ollamaModels.length > 0) set.add("ollama");
@@ -270,7 +373,14 @@ export function W3Settings() {
   }, [providersQuery.data, secretsQuery.data, ollamaModelsQuery.data, compatModelsQuery.data]);
 
   const provider = providersQuery.data?.find((p) => p.id === providerId);
-  const providerName = provider?.name ?? PROVIDER_LABELS[providerId] ?? providerId;
+  const cliState =
+    provider !== undefined && isCliProvider(provider) ? cliSetupState(provider) : null;
+  const providerName =
+    provider === undefined
+      ? (PROVIDER_LABELS[providerId] ?? providerId)
+      : isCliProvider(provider)
+        ? cliProductName(provider)
+        : provider.name;
   const selectedSecret = resolveProviderSecret(
     providerId,
     secretQuery.data,
@@ -279,9 +389,15 @@ export function W3Settings() {
   const hasLocalKey = selectedSecret !== null;
   const keyLoading =
     !isLocal &&
-    !hasLocalKey &&
-    (secretQuery.isPending || secretQuery.isFetching || secretsQuery.isFetching);
-  const hasKey = hasLocalKey || provider?.has_key === true;
+    // Which affordance belongs here depends on `auth`, which only the
+    // catalog knows — wait for it rather than flashing a key form at a
+    // subscription provider that has none.
+    ((provider === undefined && providersQuery.isPending) ||
+      (cliState === null &&
+        !hasLocalKey &&
+        (secretQuery.isPending || secretQuery.isFetching || secretsQuery.isFetching)));
+  const hasKey =
+    cliState !== null ? cliState.kind === "ready" : hasLocalKey || provider?.has_key === true;
   const modelMatches = providerIdOf(settings.model) === providerId;
   const canStart = isLocal ? modelMatches : hasKey && modelMatches;
 
@@ -566,15 +682,28 @@ export function W3Settings() {
           {PROVIDER_ORDER.map((id) => {
             const active = id === providerId;
             const isConnected = connected.has(id);
+            const entry = providersQuery.data?.find((p) => p.id === id);
+            const tileCli = entry !== undefined && isCliProvider(entry) ? cliSetupState(entry) : null;
             const name =
-              providersQuery.data?.find((p) => p.id === id)?.name ?? PROVIDER_LABELS[id] ?? id;
-            const status = isConnected
-              ? t("w3.provider.connected")
-              : CLI_PROVIDERS[id] === true
-                ? t("w3.provider.needsCliLogin")
-                : LOCAL_PROVIDERS.has(id)
-                  ? t("w3.provider.unreachable")
-                  : t("w3.provider.needsKey");
+              entry === undefined
+                ? (PROVIDER_LABELS[id] ?? id)
+                : tileCli !== null
+                  ? cliProductName(entry)
+                  : entry.name;
+            /* Same three states the Settings card reports, so a provider
+               cannot read 설정 필요 there and 연결됨 here. */
+            const status =
+              tileCli !== null
+                ? tileCli.kind === "ready"
+                  ? t("w3.provider.connected")
+                  : tileCli.kind === "needs-setup"
+                    ? t("w3.provider.needsCliSetup")
+                    : t("w3.provider.needsCliLogin")
+                : isConnected
+                  ? t("w3.provider.connected")
+                  : LOCAL_PROVIDERS.has(id)
+                    ? t("w3.provider.unreachable")
+                    : t("w3.provider.needsKey");
             return (
               <button
                 key={id}
@@ -719,6 +848,8 @@ export function W3Settings() {
         <div className="mb-5 animate-pxpulse border border-line2 bg-raised px-[18px] py-4 font-mono text-[11px] text-text3">
           {t("w3.key.checking")}
         </div>
+      ) : cliState !== null && provider !== undefined ? (
+        <CliSetupBand provider={provider} state={cliState} />
       ) : hasKey && !editingKey ? (
         <div className="relative mb-5 flex items-center gap-[14px] border border-accent-lo bg-tint px-[18px] py-4">
           <div

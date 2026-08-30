@@ -73,25 +73,28 @@ export const PROVIDER_ORDER: readonly string[] = [
 export const LOCAL_PROVIDERS: ReadonlySet<string> = new Set(["ollama", "openai-compatible"]);
 
 /**
- * Coding-CLI subscriptions (Claude Code, OpenAI Codex, Gemini CLI). The
- * engine rides the grant the user's own CLI already holds, so there is no
- * key to enter and no per-token bill to estimate — the plan is already
- * paid for. Unlike LOCAL_PROVIDERS they have a fixed lineup, so the normal
- * tier cards apply and there is no base URL to configure.
+ * Provider ids the engine reported as `auth: "cli"` on the last
+ * `GET /providers`, seeded with the three that shipped with this build.
+ *
+ * UI code must branch on `isCliProvider(provider)` against the wire instead
+ * — this exists for pricing, which resolves from a bare model string and has
+ * no Provider object to consult. The seed only covers the window before the
+ * catalog first loads; after that the engine is authoritative, so a fourth
+ * CLI provider estimates at zero cost with no change here.
  */
-export const CLI_PROVIDERS: Record<string, true> = {
-  "claude-code": true,
-  codex: true,
-  "gemini-cli": true,
-};
+let cliProviderIds: ReadonlySet<string> = new Set(["claude-code", "codex", "gemini-cli"]);
+
+export function rememberCliProviders(ids: readonly string[]): void {
+  cliProviderIds = new Set(ids);
+}
 
 /**
- * True when a provider never takes an API key — served locally or backed
- * by a coding-CLI subscription. Two different reasons, one UI consequence,
- * so the union is worth a name.
+ * True when a provider never takes an API key — served locally, or backed by
+ * a coding-CLI subscription whose plan is already paid for. Two different
+ * reasons, one consequence for pricing, so the union is worth a name.
  */
 export function isKeylessProvider(providerId: string): boolean {
-  return LOCAL_PROVIDERS.has(providerId) || CLI_PROVIDERS[providerId] === true;
+  return LOCAL_PROVIDERS.has(providerId) || cliProviderIds.has(providerId);
 }
 
 /** LiteLLM model-string prefixes that differ from our provider ids. */

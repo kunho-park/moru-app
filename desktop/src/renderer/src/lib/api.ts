@@ -31,6 +31,8 @@ import type {
   ValidationIssue,
 } from "../../../shared/engine";
 import { useEngineStore } from "../stores/engine";
+import { isCliProvider } from "./cliProviders";
+import { rememberCliProviders } from "./models";
 
 export class EngineApiError extends Error {
   constructor(
@@ -283,7 +285,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ pack_id: packId, download_url: downloadUrl }),
     }),
-  providers: () => request<Provider[]>("/providers"),
+  providers: async () => {
+    const providers = await request<Provider[]>("/providers");
+    // Keep the id-only view used by pricing in step with the catalog, so a
+    // CLI provider the engine adds later still estimates at zero cost.
+    rememberCliProviders(providers.filter(isCliProvider).map((p) => p.id));
+    return providers;
+  },
   testProvider: (provider: string, apiKey?: string, model?: string, apiBase?: string) =>
     request<ProviderTestResult>("/providers/test", {
       method: "POST",

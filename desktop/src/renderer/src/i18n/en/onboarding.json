@@ -34,8 +34,9 @@
     "hint": "You can add or change keys anytime in Settings → Models · API keys",
     "cliReady": "CLI signed in",
     "cliNeedsLogin": "CLI login needed",
+    "cliNeedsSetup": "Setup needed",
     "cliConnectedDetail": "Connected as {{account}}. Runs on your existing subscription — no API key needed.",
-    "cliLoginDetail": "Run `{{cmd}}` in a terminal, then re-check below.",
+    "cliLoginDetail": "Run `{{cmd}}` in a terminal and finish signing in there, then re-check below. If the CLI is not installed yet, install it first.",
     "cliBlockedDetail": "Signed in, but not usable yet: {{reason}}",
     "cliRecheck": "Re-check"
   },

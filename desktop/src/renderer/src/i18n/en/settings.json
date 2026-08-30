@@ -41,10 +41,15 @@
     "empty": "No providers available",
     "cliSubscription": "Subscription",
     "cliConnected": "Connected",
-    "cliDisconnected": "Unavailable",
+    "cliNeedsLogin": "Login needed",
+    "cliNeedsSetup": "Setup needed",
     "cliReady": "Runs on your installed CLI's existing login — no API key required.",
-    "cliLoginHint": "Run `{{cmd}}` in a terminal to connect.",
-    "cliBlocked": "Signed in, but not usable yet: {{reason}}"
+    "cliLoginHint": "No sign-in found for this CLI yet. Run `{{cmd}}` in a terminal and finish signing in there, then re-check. If the CLI is not installed yet, install it first.",
+    "cliLoginHintNoCmd": "No sign-in found for this CLI yet. Sign in with this provider's CLI, then re-check.",
+    "cliBlocked": "Signed in, but not usable yet: {{reason}}",
+    "cliBlockedUnknown": "Signed in, but this subscription cannot serve a request yet. The CLI did not say why — run it in a terminal to see what it reports.",
+    "cliRecheck": "Re-check",
+    "cliTestFailUnknown": "The check failed and the CLI gave no readable reason — run it in a terminal to see what it reports."
   },
   "general": {
     "title": "App preferences",

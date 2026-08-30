@@ -13,7 +13,8 @@ import { useTranslation } from "react-i18next";
 import { MoruLogo } from "@/components/MoruLogo";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
-import { CLI_PROVIDERS, LOCAL_PROVIDERS, PROVIDER_TIERS } from "@/lib/models";
+import { cliProductName, cliSetupState, isCliProvider } from "@/lib/cliProviders";
+import { LOCAL_PROVIDERS, PROVIDER_TIERS } from "@/lib/models";
 import { useAccount } from "@/stores/account";
 import { useRouter } from "@/stores/router";
 import { useSettings } from "@/stores/settings";
@@ -115,7 +116,7 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
   // Local providers swap the key field for a base URL; CLI subscriptions
   // have neither — they only need their own CLI to be logged in.
   const selectedIsLocal = selected !== undefined && LOCAL_PROVIDERS.has(selected.id);
-  const selectedIsCli = selected !== undefined && CLI_PROVIDERS[selected.id] === true;
+  const selectedCli = selected !== undefined && isCliProvider(selected) ? cliSetupState(selected) : null;
 
   const keyTest = useMutation({
     mutationFn: async ({ provider, key }: { provider: Provider; key: string }) => {
@@ -218,7 +219,10 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
           <div className="grid grid-cols-2 gap-[2px]">
             {providers.map((p) => {
               const active = p.id === selectedId;
-              const connected = savedIds.has(p.id) || p.has_key;
+              const tileCli = isCliProvider(p) ? cliSetupState(p) : null;
+              const connected =
+                tileCli !== null ? tileCli.kind === "ready" : savedIds.has(p.id) || p.has_key;
+              const label = tileCli !== null ? cliProductName(p) : p.name;
               return (
                 <button
                   key={p.id}
@@ -231,17 +235,19 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
                     className="flex h-7 w-7 shrink-0 items-center justify-center text-[12px] font-bold text-white"
                     style={{ background: PROVIDER_TINT[p.id] ?? "#1F8A5B" }}
                   >
-                    {p.name.charAt(0).toUpperCase()}
+                    {label.charAt(0).toUpperCase()}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[12px] font-bold text-text">{p.name}</div>
+                    <div className="truncate text-[12px] font-bold text-text">{label}</div>
                     <div className="mt-[2px] font-mono text-[10px] text-text3">
-                      {savedIds.has(p.id)
-                        ? t("onboarding.key.saved")
-                        : CLI_PROVIDERS[p.id] === true
-                          ? p.has_key
-                            ? t("onboarding.key.cliReady")
+                      {tileCli !== null
+                        ? tileCli.kind === "ready"
+                          ? t("onboarding.key.cliReady")
+                          : tileCli.kind === "needs-setup"
+                            ? t("onboarding.key.cliNeedsSetup")
                             : t("onboarding.key.cliNeedsLogin")
+                        : savedIds.has(p.id)
+                          ? t("onboarding.key.saved")
                           : LOCAL_PROVIDERS.has(p.id)
                             ? t("onboarding.key.localNoKey")
                             : p.has_key
@@ -257,18 +263,23 @@ function KeyStep({ onSaved }: { onSaved: () => void }) {
 
           {selected !== undefined && (
             <div className="mt-4 flex flex-col gap-2">
-              {selectedIsCli ? (
+              {selectedCli !== null ? (
                 <div className="border border-line2 bg-raised px-4 py-3">
                   <div className="mb-2 font-mono text-[11px] leading-relaxed text-text3">
-                    {selected.has_key
+                    {selectedCli.kind === "ready"
                       ? t("onboarding.key.cliConnectedDetail", {
-                          account: selected.account ?? selected.name,
+                          account: selectedCli.account ?? cliProductName(selected),
                         })
-                      : selected.error !== null && selected.error !== undefined
-                        ? t("onboarding.key.cliBlockedDetail", { reason: selected.error })
-                        : t("onboarding.key.cliLoginDetail", { cmd: selected.login_hint ?? "" })}
+                      : selectedCli.kind === "needs-setup"
+                        ? selectedCli.reason !== null
+                          ? t("onboarding.key.cliBlockedDetail", { reason: selectedCli.reason })
+                          : t("settings.models.cliBlockedUnknown")
+                        : selectedCli.command !== null
+                          ? t("onboarding.key.cliLoginDetail", { cmd: selectedCli.command })
+                          : t("settings.models.cliLoginHintNoCmd")}
                   </div>
                   <button
+                    type="button"
                     onClick={() => {
                       void queryClient.invalidateQueries({ queryKey: ["providers"] });
                     }}

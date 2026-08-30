@@ -45,7 +45,7 @@ const LIST_MAX_HEIGHT = 540;
 const OVERSCAN = 12;
 
 /** Minimal quoted-CSV parser: handles "" escapes, commas/newlines in quotes, CRLF. */
-function parseCsv(text: string): string[][] {
+export function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -96,6 +96,109 @@ function csvField(value: string): string {
  */
 export function parseKeyScope(value: string): string[] {
   return [...new Set(value.split(/[,\s]+/).filter((part) => part !== ""))].sort();
+}
+
+/**
+ * Separator this app WRITES between patterns inside one `key_scope` CSV cell.
+ *
+ * A comma is the CSV delimiter, so joining on `", "` meant a multi-pattern
+ * scope only survived because the cell got quoted — and moru-web splits that
+ * cell on `;`, so the whole thing arrived there as one pattern. `;` is the
+ * separator both ends agree on (moru-web glossaryCsv.KEY_SCOPE_CSV_SEPARATOR).
+ */
+const KEY_SCOPE_CSV_SEPARATOR = ";";
+
+/**
+ * Separators accepted when READING a cell — lenient in, strict out.
+ *
+ * Files this app already exported joined on `", "`, and moru-web writes `;`.
+ * A real pattern can contain neither a comma nor whitespace, so accepting all
+ * of them is unambiguous and keeps both generations of file importable. An
+ * unparseable pattern would be a scope matching no key at all, which the
+ * engine now refuses outright (PUT /glossary -> 422).
+ */
+const KEY_SCOPE_CSV_SPLIT_RE = /[;,\s]+/;
+
+/**
+ * Parse a `key_scope` CSV cell. Same normalisation as `parseKeyScope`, but the
+ * CSV cell is a serialization boundary shared with moru-web rather than a text
+ * box, so it accepts the separators that boundary has actually used.
+ */
+export function parseCsvKeyScope(value: string): string[] {
+  return [
+    ...new Set(value.split(KEY_SCOPE_CSV_SPLIT_RE).filter((part) => part !== "")),
+  ].sort();
+}
+
+/**
+ * Origin from a CSV cell, defaulting to `manual`.
+ *
+ * Export used to drop the column and import hardcoded `manual`, so a
+ * round-trip rewrote every vanilla and community row as a manual copy. Since
+ * a row's identity is source + key scope, that copy REPLACED the original;
+ * Reset then deleted it as user-generated, and the next community sync
+ * re-appended the real vanilla term — one export/import/reset cycle turned a
+ * synced baseline into duplicates. Anything unrecognised still falls back to
+ * `manual`: a hand-written CSV should import, not fail.
+ */
+export function parseCsvOrigin(value: string | undefined): GlossaryOrigin {
+  const candidate = (value ?? "").trim().toLowerCase();
+  // ORIGIN_STYLE is already the keyed-by-origin table; no second list to
+  // fall out of step with it.
+  return Object.hasOwn(ORIGIN_STYLE, candidate)
+    ? (candidate as GlossaryOrigin)
+    : "manual";
+}
+
+/** The clipboard CSV: `source,target,key_scope,origin`. */
+export function buildCsv(terms: GlossaryTerm[]): string {
+  return [
+    "source,target,key_scope,origin",
+    ...terms.map((term) =>
+      [
+        csvField(term.source),
+        csvField(term.target),
+        csvField(term.key_scope.join(KEY_SCOPE_CSV_SEPARATOR)),
+        csvField(term.origin),
+      ].join(","),
+    ),
+  ].join("\n");
+}
+
+/**
+ * Terms from parsed CSV rows. Named columns when a header row exists, else
+ * columns 0/1 — a headerless file is `source,target` and nothing else, so it
+ * imports unscoped and manual exactly as it did before either column existed.
+ */
+export function extractCsvTerms(rows: string[][]): GlossaryTerm[] {
+  let start = 0;
+  let si = 0;
+  let ti = 1;
+  let ki = -1;
+  let oi = -1;
+  const header = rows[0]?.map((c) => c.trim().toLowerCase()) ?? [];
+  const hs = header.indexOf("source");
+  const ht = header.indexOf("target");
+  if (hs !== -1 && ht !== -1) {
+    si = hs;
+    ti = ht;
+    ki = header.indexOf("key_scope");
+    oi = header.indexOf("origin");
+    start = 1;
+  }
+  const imported: GlossaryTerm[] = [];
+  for (const row of rows.slice(start)) {
+    const source = (row[si] ?? "").trim();
+    const target = (row[ti] ?? "").trim();
+    if (!source || !target) continue;
+    imported.push({
+      source,
+      target,
+      origin: oi === -1 ? "manual" : parseCsvOrigin(row[oi]),
+      key_scope: ki === -1 ? [] : parseCsvKeyScope(row[ki] ?? ""),
+    });
+  }
+  return imported;
 }
 
 /**
@@ -410,15 +513,8 @@ export function GlossaryScreen() {
   };
 
   const exportCsv = (): void => {
-    const csv = [
-      "source,target,key_scope",
-      ...terms.map(
-        (term) =>
-          `${csvField(term.source)},${csvField(term.target)},${csvField(term.key_scope.join(", "))}`,
-      ),
-    ].join("\n");
     navigator.clipboard
-      .writeText(csv)
+      .writeText(buildCsv(terms))
       .then(() => showToast(t("glossary.toast.copied")))
       .catch(() => showToast(t("glossary.toast.copyFailed"), "err"));
   };
@@ -426,38 +522,7 @@ export function GlossaryScreen() {
   const importCsvFile = (file: File): void => {
     const reader = new FileReader();
     reader.onload = () => {
-      const rows = parseCsv(String(reader.result ?? ""));
-      if (rows.length === 0) {
-        showToast(t("glossary.toast.importFailed"), "err");
-        return;
-      }
-      let start = 0;
-      let si = 0;
-      let ti = 1;
-      // Scope column is optional: a pre-scope CSV has two columns and
-      // every imported row is unscoped, exactly as before.
-      let ki = -1;
-      const header = rows[0].map((c) => c.trim().toLowerCase());
-      const hs = header.indexOf("source");
-      const ht = header.indexOf("target");
-      if (hs !== -1 && ht !== -1) {
-        si = hs;
-        ti = ht;
-        ki = header.indexOf("key_scope");
-        start = 1;
-      }
-      const imported: GlossaryTerm[] = [];
-      for (const row of rows.slice(start)) {
-        const source = (row[si] ?? "").trim();
-        const target = (row[ti] ?? "").trim();
-        if (source && target)
-          imported.push({
-            source,
-            target,
-            origin: "manual",
-            key_scope: ki === -1 ? [] : parseKeyScope(row[ki] ?? ""),
-          });
-      }
+      const imported = extractCsvTerms(parseCsv(String(reader.result ?? "")));
       if (imported.length === 0) {
         showToast(t("glossary.toast.importFailed"), "err");
         return;
@@ -465,7 +530,8 @@ export function GlossaryScreen() {
       let merged = terms;
       for (const entry of imported) merged = upsertTerm(merged, entry, "end");
       saveMutation.mutate(merged, {
-        onSuccess: () => showToast(t("glossary.toast.imported", { count: imported.length })),
+        onSuccess: () =>
+          showToast(t("glossary.toast.imported", { count: imported.length })),
       });
     };
     reader.onerror = () => showToast(t("glossary.toast.importFailed"), "err");

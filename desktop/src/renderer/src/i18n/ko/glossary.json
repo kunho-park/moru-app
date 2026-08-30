@@ -3,7 +3,7 @@
   "title": "Glossary",
   "subtitle": "용어를 등록하면 모든 번역에 일관되게 반영됩니다.",
   "importCsv": "CSV 가져오기",
-  "importTooltip": "source,target[,key_scope] 헤더의 CSV 파일을 선택해 용어를 가져옵니다",
+  "importTooltip": "source,target[,key_scope][,origin] 헤더의 CSV 파일을 선택해 용어를 가져옵니다",
   "exportCsv": "CSV 내보내기",
   "exportTooltip": "용어 전체를 CSV로 만들어 클립보드에 복사합니다",
   "addTerm": "용어 추가",

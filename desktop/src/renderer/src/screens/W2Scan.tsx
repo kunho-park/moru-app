@@ -9,7 +9,9 @@ import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 
 import type { HardcodedMod, ScanCategory, ScanFile } from "../../../shared/engine";
-import { api } from "@/lib/api";
+import { api, type TranslationMatch } from "@/lib/api";
+import { moru } from "@/lib/bridge";
+import { WEB_URL } from "@/lib/web";
 import { formatCompact, formatInt, formatUsd } from "@/lib/format";
 import { RECOMMENDED_MODEL, estimateUsage, modelDisplayName } from "@/lib/models";
 import { costUsd, estimatePriceForModel, usePricingTable } from "@/lib/pricing";
@@ -508,6 +510,261 @@ function SourceOverrideBand() {
             {t("w2.overrides.packLine", { pack: o.pack, keys: formatInt(o.keys) })}
           </div>
         ))}
+      </div>
+    </FilterBand>
+  );
+}
+
+/**
+ * What the community-translation band should show, or null to render nothing.
+ *
+ * Split out from the component because the honesty of this band lives in the
+ * numbers, not the markup. `uncovered_entries` is a LOWER bound on the local
+ * entries a published pack does not cover, so it is presented as "at least N
+ * of your M" and never as a coverage percentage: only a key-level diff of the
+ * downloaded pack could justify one, and a 40%-covered translation offered as
+ * "compatible" is worse than offering nothing at all.
+ *
+ * Null when there is no match, or when the match carries nothing the user
+ * could act on - a pack with neither a page to read nor an archive to fetch
+ * is a notification with no next step.
+ */
+export function communityOffer(
+  match: TranslationMatch | null | undefined,
+  localEntries: number,
+): {
+  packId: string;
+  version: string | null;
+  exact: boolean;
+  uncovered: number | null;
+  localEntries: number;
+  packEntries: number | null;
+  gaps: { category: string; entries: number }[];
+  url: string | null;
+  downloadUrl: string | null;
+  note: string;
+} | null {
+  if (!match) return null;
+  if (match.url === null && match.download_url === null) return null;
+  return {
+    packId: match.pack_id,
+    version: match.modpack_version,
+    exact: match.exact,
+    uncovered: match.uncovered_entries,
+    localEntries,
+    packEntries: match.total_entries,
+    // Biggest gap first: "mods +412" is the line that decides whether the
+    // offer is worth taking, and it must not sit under three small ones.
+    gaps: Object.entries(match.uncovered_by_category)
+      .map(([category, entries]) => ({ category, entries }))
+      .sort((a, b) => b.entries - a.entries),
+    url: match.url,
+    downloadUrl: match.download_url,
+    note: match.note,
+  };
+}
+
+/**
+ * A translation somebody already published for this modpack.
+ *
+ * Placed on the scan screen because this is the last moment the information
+ * can change what the user does: the key counts are known, so the offer can
+ * be quantified, and no model has been chosen or paid for yet.
+ *
+ * Reuse is deliberately harder than "accept". A downloaded pack is B -
+ * target-locale files with no record of the English they were translated
+ * from - so the engine can only reuse an entry whose source text it can show
+ * unchanged, which needs the previous version's modpack as A. Where that
+ * cannot be established the band says so and the entries get translated
+ * normally, because a stale line delivered silently is worse than paying to
+ * redo it.
+ */
+function CommunityBand() {
+  const { t } = useTranslation();
+  const scanJobId = useWizard((s) => s.scanJobId);
+  const scanResult = useWizard((s) => s.scanResult);
+  const modpackPath = useWizard((s) => s.modpackPath);
+  const previousModpackPath = useWizard((s) => s.previousModpackPath);
+  const setMigrationEnabled = useWizard((s) => s.setMigrationEnabled);
+  const setMigrationInput = useWizard((s) => s.setMigrationInput);
+  const startScan = useWizard((s) => s.startScan);
+  const targetLocale = useWizard((s) => s.targetLocale);
+  const [expanded, setExpanded] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const query = useQuery({
+    queryKey: ["community-translation", scanJobId, targetLocale],
+    queryFn: () => api.communityTranslation(WEB_URL, scanJobId ?? "", targetLocale),
+    enabled: scanJobId !== null,
+    // A lookup nobody asked for: one attempt, and silence when it fails.
+    retry: false,
+    staleTime: 300_000,
+  });
+
+  const localEntries = (scanResult?.categories ?? []).reduce(
+    (sum, c) => sum + c.entry_count,
+    0,
+  );
+  const offer = communityOffer(query.data?.match, localEntries);
+  // Already attached: the purple migration strip above reports the real,
+  // measured reuse, so repeating a promise here would only compete with it.
+  const attached = scanResult?.migration !== null && scanResult?.migration !== undefined;
+  if (offer === null) return null;
+
+  const reuse = async (previous: string): Promise<void> => {
+    if (offer.downloadUrl === null) return;
+    setBusy(true);
+    setFailed(false);
+    try {
+      const archives = await api.downloadCommunityTranslation(
+        offer.packId,
+        offer.downloadUrl,
+      );
+      if (archives.resourcepack_path === null && archives.overrides_path === null) {
+        setFailed(true);
+        return;
+      }
+      setMigrationInput("modpack", previous);
+      setMigrationInput("resourcepack", archives.resourcepack_path);
+      setMigrationInput("overrides", archives.overrides_path);
+      setMigrationEnabled(true);
+      await startScan();
+    } catch {
+      // The user pressed a button, so unlike the lookup this is reported -
+      // but as a line in the band, not a dialog: nothing is broken and the
+      // run can still proceed without reuse.
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const summary = offer.exact
+    ? t("w2.community.summaryExact", { version: offer.version ?? "?" })
+    : t("w2.community.summaryCompatible", { version: offer.version ?? "?" });
+
+  return (
+    <FilterBand
+      header={t("w2.community.header")}
+      summary={summary}
+      expandable
+      expanded={expanded}
+      onToggle={() => setExpanded((prev) => !prev)}
+    >
+      <p className="m-0 mb-3 text-[11px] leading-relaxed text-text3">{offer.note}</p>
+
+      <div className="mb-3 flex flex-col gap-1 font-mono text-[11px] text-text2">
+        {offer.packEntries !== null && (
+          <div>{t("w2.community.packEntries", { entries: formatInt(offer.packEntries) })}</div>
+        )}
+        {offer.uncovered === null ? (
+          <div>{t("w2.community.unmeasured")}</div>
+        ) : offer.uncovered === 0 ? (
+          <div>{t("w2.community.covered")}</div>
+        ) : (
+          <div className="text-amber">
+            {t("w2.community.uncovered", {
+              uncovered: formatInt(offer.uncovered),
+              local: formatInt(offer.localEntries),
+            })}
+          </div>
+        )}
+      </div>
+
+      {offer.gaps.length > 0 && (
+        <>
+          <div className="mb-1.5 font-mono text-[10px] font-semibold tracking-[0.06em] text-text3 uppercase">
+            {t("w2.community.gapsHeader")}
+          </div>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {offer.gaps.map((gap) => (
+              <span
+                key={gap.category}
+                className="border border-edge px-2 py-[3px] font-mono text-[10px] text-text2"
+              >
+                {gap.category === ""
+                  ? t("w2.community.gapTotal", { entries: formatInt(gap.entries) })
+                  : t("w2.community.gapLine", {
+                      category: gap.category,
+                      entries: formatInt(gap.entries),
+                    })}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      {attached ? (
+        <p className="m-0 mb-3 text-[11px] leading-relaxed text-accent">
+          {t("w2.community.attached")}
+        </p>
+      ) : (
+        <p className="m-0 mb-3 text-[11px] leading-relaxed text-text3">
+          {previousModpackPath !== null
+            ? t("w2.community.reuseReady")
+            : offer.exact
+              ? t("w2.community.sameVersionHint")
+              : t("w2.community.needsPrevious")}
+        </p>
+      )}
+
+      {failed && (
+        <p className="m-0 mb-3 text-[11px] leading-relaxed text-red">
+          {t("w2.community.failed")}
+        </p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        {offer.url !== null && (
+          <button
+            onClick={() => void moru.openExternal(offer.url as string)}
+            className="border border-edge px-2.5 py-1.5 font-mono text-[11px] text-text2 hover:text-text"
+          >
+            {t("w2.community.open")}
+          </button>
+        )}
+        {!attached && offer.downloadUrl !== null && (
+          <>
+            {previousModpackPath !== null ? (
+              <button
+                disabled={busy}
+                onClick={() => void reuse(previousModpackPath)}
+                className="border border-accent-lo bg-tint px-2.5 py-1.5 font-mono text-[11px] text-accent hover:text-text disabled:opacity-50"
+              >
+                {busy ? t("w2.community.working") : t("w2.community.reuse")}
+              </button>
+            ) : (
+              <button
+                disabled={busy}
+                onClick={() => {
+                  void (async () => {
+                    const picked = await moru.pickFolder();
+                    if (picked !== null && picked !== "") await reuse(picked);
+                  })();
+                }}
+                className="border border-edge px-2.5 py-1.5 font-mono text-[11px] text-text2 hover:text-text disabled:opacity-50"
+              >
+                {busy ? t("w2.community.working") : t("w2.community.pickPrevious")}
+              </button>
+            )}
+            {/* Same-version reuse without the old modpack. Offered ONLY on an
+                exact version match, never by default, and labelled with what
+                it gives up: the source text is assumed unchanged rather than
+                verified, so a mod updated since the pack was published keeps
+                its old line. The alternative for this user is paying to
+                retranslate a pack that is almost certainly identical. */}
+            {!offer.exact || previousModpackPath !== null ? null : (
+              <button
+                disabled={busy || modpackPath === null}
+                onClick={() => void reuse(modpackPath as string)}
+                className="px-1.5 font-mono text-[10px] text-text3 uppercase hover:text-text2 disabled:opacity-50"
+              >
+                {t("w2.community.sameVersionReuse")}
+              </button>
+            )}
+          </>
+        )}
       </div>
     </FilterBand>
   );
@@ -1073,6 +1330,9 @@ function DoneState() {
           </span>
         </div>
       )}
+
+      {/* Whether this needs translating at all comes before what it costs */}
+      <CommunityBand />
 
       {/* What the scan filtered, rewrote, or cannot reach at all */}
       <SourceOverrideBand />

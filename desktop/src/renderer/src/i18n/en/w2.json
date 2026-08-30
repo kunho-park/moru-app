@@ -40,6 +40,28 @@
     "summary": "Enabled resource packs replaced {{keys}} source strings — the text players actually see is what gets translated",
     "packLine": "{{pack}} · {{keys}} keys"
   },
+  "community": {
+    "header": "Existing translation",
+    "summaryExact": "Someone already translated version {{version}}",
+    "summaryCompatible": "A translation published for {{version}} is marked compatible",
+    "packEntries": "The published pack holds {{entries}} entries",
+    "uncovered": "At least {{uncovered}} of this modpack's {{local}} entries are not in it — those still get translated",
+    "covered": "Comparing entry counts per category found nothing missing",
+    "unmeasured": "How much of this modpack it covers could not be measured",
+    "gapsHeader": "Not covered",
+    "gapLine": "{{category}} +{{entries}}",
+    "gapTotal": "+{{entries}} in total",
+    "reuseReady": "Downloading it attaches it to your previous-version modpack, and every entry whose English text is unchanged is reused instead of retranslated.",
+    "needsPrevious": "Reusing this needs the modpack folder of the version you translated before. A downloaded pack holds Korean text but no record of the English it was translated from, so without it there is no way to tell which lines are still current — and applying a stale one silently would be worse than translating it again.",
+    "sameVersionHint": "This pack was built for the version you have. Pick your previous modpack to reuse it with the source text verified, or reuse it as the same version below — that skips the check, so a mod updated since the pack was published would keep its old translation.",
+    "attached": "Attached. The reuse count above is measured against the entries actually matched.",
+    "failed": "Could not download the pack. Nothing has changed; the run can continue without it.",
+    "open": "View on moru.gg",
+    "reuse": "Download and reuse",
+    "pickPrevious": "Pick previous modpack",
+    "sameVersionReuse": "Reuse as same version",
+    "working": "Working…"
+  },
   "migration": {
     "title": "Previous translation compared",
     "summary": "Reuse {{reused}} previous manual translations and translate only {{translate}} entries.",

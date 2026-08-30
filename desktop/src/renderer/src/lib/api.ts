@@ -90,6 +90,34 @@ export interface SessionSummary {
   export_overrides_zip_path: string | null;
 }
 
+/**
+ * GET /community/translation — a published pack already covering this
+ * modpack. Declared here rather than in shared/engine.ts only because that
+ * file is being edited elsewhere; it belongs there with the other wire types.
+ *
+ * `uncovered_entries` is the field that matters and it is a LOWER BOUND, not
+ * a percentage: null means the local side was not measured, 0 means no
+ * missing entry could be established. Never present it as exact coverage.
+ */
+export interface TranslationMatch {
+  pack_id: string;
+  modpack_version: string | null;
+  exact: boolean;
+  compatible_versions: { min: string; max: string } | null;
+  total_entries: number | null;
+  uncovered_entries: number | null;
+  uncovered_by_category: Record<string, number>;
+  url: string | null;
+  download_url: string | null;
+  note: string;
+}
+
+/** POST /community/translation/download — local ZIPs for the A/B/C inputs. */
+export interface CommunityDownloadResult {
+  resourcepack_path: string | null;
+  overrides_path: string | null;
+}
+
 /** Engine's largest allowed entries page; bulk walks use it to cut round-trips. */
 const FAILED_PAGE_SIZE = 500;
 
@@ -239,6 +267,21 @@ export const api = {
         source_lang: sourceLang,
         target_lang: targetLang,
       }),
+    }),
+  communityTranslation: (webUrl: string, jobId: string, targetLang: string) => {
+    const params = new URLSearchParams({
+      web_url: webUrl,
+      job_id: jobId,
+      target_lang: targetLang,
+    });
+    return request<{ match: TranslationMatch | null }>(
+      `/community/translation?${params.toString()}`,
+    );
+  },
+  downloadCommunityTranslation: (packId: string, downloadUrl: string) =>
+    request<CommunityDownloadResult>("/community/translation/download", {
+      method: "POST",
+      body: JSON.stringify({ pack_id: packId, download_url: downloadUrl }),
     }),
   providers: () => request<Provider[]>("/providers"),
   testProvider: (provider: string, apiKey?: string, model?: string, apiBase?: string) =>

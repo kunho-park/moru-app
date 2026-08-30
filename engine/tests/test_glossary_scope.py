@@ -8,9 +8,12 @@ of one source term and whichever rule the model picks is luck.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
+import moru_engine
+import pytest
 from moru_engine.glossary.vanilla_builder import VanillaGlossaryBuilder
 from moru_engine.models.glossary import UNSCOPED_RANK, Glossary, TermRule
 from moru_engine.models.glossary_filter import GlossaryFilter
@@ -402,3 +405,151 @@ def test_third_party_boss_key_receives_only_the_boss_reading() -> None:
     assert _rendered(
         "enhanced_boss_bar.witherstormmod.witherstorm", "Wither Storm"
     ) == "\n".join([_HEADER, _ENTITY_LINE])
+
+
+# -- the derived dataset, pinned ----------------------------------------------
+
+#: The real vanilla lang pair every shipped rule is derived from.
+_LANG_DIR = (
+    Path(moru_engine.__file__).parent
+    / "assets"
+    / "vanilla_minecraft_assets"
+    / "versions"
+    / "1.21.5"
+)
+
+#: moru-web bundles its OWN copy of the derived dataset: its admin import
+#: writes those rows into the database, the snapshot publisher serves them and
+#: the desktop syncs that snapshot. Nothing regenerates the copy, so a builder
+#: change lands in the engine and silently leaves the copy users actually read
+#: one revision behind. The repos sit side by side.
+_WEB_DATASET = (
+    Path(__file__).resolve().parents[3]
+    / "moru-web"
+    / "src"
+    / "data"
+    / "vanilla-glossary-ko_kr.json"
+)
+
+#: Identity of the derived dataset. The digests pin all 6425 rows without
+#: pasting them; the counts and the Wither pair are asserted separately so a
+#: failure names the property that broke instead of only "a byte moved".
+#: These same two literals are asserted by moru-web against its copy, which is
+#: what ties the two repos together — a dataset regenerated here cannot go
+#: green there until the copy is refreshed.
+_TOTAL_RULES = 6425
+_SCOPED_RULES = 38
+_SEQUENCE_SHA = "0529579a40f96aea9c24931ac5d0ddceb629e5341b859bfdbdf2589090c6fe1a"
+_SCOPED_SHA = "d024d3e48cdc986d6d7ea1e9d3434f855633ba5b7499c8703fe2d2bc1fe3b364"
+
+_Row = tuple[str, str, str, list[str]]
+
+
+def _digest(rows: list[_Row]) -> str:
+    """Hash of the rows in a form any language can reproduce byte for byte."""
+    canonical = "\n".join(
+        "\0".join((source, target, category, ",".join(scope)))
+        for source, target, category, scope in rows
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _lang_pair() -> tuple[dict[str, str], dict[str, str]]:
+    return (
+        json.loads((_LANG_DIR / "en_us.json").read_text(encoding="utf-8")),
+        json.loads((_LANG_DIR / "ko_kr.json").read_text(encoding="utf-8")),
+    )
+
+
+def _built_rows() -> list[_Row]:
+    """The shipped dataset, rebuilt from the bundled lang files."""
+    source, target = _lang_pair()
+    return [
+        (
+            rule.aliases[0] if rule.aliases else "",
+            rule.term_ko,
+            rule.category,
+            list(rule.key_scope),
+        )
+        for rule in _builder()._extract_terms(source, target)
+    ]
+
+
+def test_derived_dataset_matches_its_pinned_identity() -> None:
+    """Scoping is a NARROWING, so the counts are load-bearing in both
+    directions: 38 scoped rules keep the homographs apart, and the other 6387
+    staying unscoped is what keeps thousands of correct rules firing. A
+    derivation that scoped the bulk would fix the bug and cause a far larger
+    one, so the totals and the exact scoped set are pinned, not just the size.
+    """
+    rows = _built_rows()
+    assert len(rows) == _TOTAL_RULES
+    scoped = [row for row in rows if row[3]]
+    assert len(scoped) == _SCOPED_RULES
+    assert _digest(scoped) == _SCOPED_SHA
+    assert _digest(rows) == _SEQUENCE_SHA
+
+
+def test_derived_dataset_keeps_both_wither_senses() -> None:
+    """The reported bug, asserted against the real corpus rather than a slice."""
+    wither = {
+        (target, tuple(scope))
+        for source, target, _category, scope in _built_rows()
+        if source == "Wither"
+    }
+    assert wither == {("시듦", ("effect.*",)), ("위더", ())}
+
+
+def test_target_dedup_never_collapses_a_homograph_group() -> None:
+    """The builder drops any pair whose Korean text was already claimed
+    (``_extract_terms`` L201-207). That dedup is keyed on the TARGET, while a
+    homograph group is defined by a shared SOURCE, so members cannot evict one
+    another — but a *different* source term claiming one of those Korean
+    strings first would delete one sense before ``_scope_ambiguous`` ever sees
+    the group. The group would then look unambiguous, stay unscoped, and ship
+    a partially scoped homograph that still reads as a successful build.
+
+    Nothing in the code prevents that; it happens not to occur in this corpus.
+    So assert it over the real lang files, where a future version bump would
+    otherwise introduce it silently.
+    """
+    source, target = _lang_pair()
+    accepted: dict[str, set[str]] = {}
+    for key, text in source.items():
+        rendered = target.get(key)
+        if not rendered or rendered == text:
+            continue
+        accepted.setdefault(text.lower(), set()).add(rendered)
+
+    emitted: dict[str, int] = {}
+    for row_source, _t, _c, _k in _built_rows():
+        emitted[row_source.lower()] = emitted.get(row_source.lower(), 0) + 1
+
+    collapsed = {
+        text: {"distinct_targets": len(targets), "rules_emitted": emitted.get(text, 0)}
+        for text, targets in accepted.items()
+        if len(targets) > 1 and emitted.get(text, 0) != len(targets)
+    }
+    assert collapsed == {}
+
+
+def test_web_copy_of_the_dataset_has_not_drifted() -> None:
+    """The copy in moru-web is what a user's app actually ends up reading, and
+    it is refreshed by hand. Compare it to a fresh build so the two cannot part
+    ways unnoticed; skipped when the sibling repo simply is not checked out.
+    """
+    if not _WEB_DATASET.is_file():
+        pytest.skip(f"sibling repo not present: {_WEB_DATASET}")
+    web: list[dict[str, object]] = json.loads(_WEB_DATASET.read_text(encoding="utf-8"))
+    rows: list[_Row] = [
+        (
+            str(entry["source"]),
+            str(entry["target"]),
+            str(entry["category"]),
+            [str(pattern) for pattern in entry["key_scope"]],  # type: ignore[union-attr]
+        )
+        for entry in web
+    ]
+    assert len(rows) == _TOTAL_RULES
+    assert _digest(rows) == _SEQUENCE_SHA
+    assert _digest([row for row in rows if row[3]]) == _SCOPED_SHA

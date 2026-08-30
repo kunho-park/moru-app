@@ -10,6 +10,20 @@
     "desc": "Hand translation works on a scanned modpack's entries. Scan a modpack first, then come back here to work through it entry by entry.",
     "cta": "Select a modpack"
   },
+  "preparing": {
+    "title": "Building your work queue",
+    "desc": "Pulling the strings out of the modpack and attaching translation memory and glossary matches. No AI is called, so this costs nothing. The queue appears here as soon as it is ready.",
+    "progress": "{{done}} of {{total}} prepared",
+    "working": "Preparing…"
+  },
+  "failed": {
+    "title": "Could not build the queue",
+    "desc": "Preparing the hand-translation queue failed part-way through. Go back to the translation settings and try again.",
+    "cta": "Back to settings"
+  },
+  "loadError": {
+    "title": "Could not load the queue"
+  },
   "filter": {
     "all": "All",
     "failed": "Failed",

@@ -29,7 +29,11 @@ import { resolveProviderSecret } from "@/lib/providerSecrets";
 import { costUsd, estimatePriceForModel, usePricingTable } from "@/lib/pricing";
 import { useRouter } from "@/stores/router";
 import { useSettings } from "@/stores/settings";
-import { selectedScanTotals, useWizard } from "@/stores/wizard";
+import {
+  selectedScanTotals,
+  useWizard,
+  type ManualSeedOutcome,
+} from "@/stores/wizard";
 
 /* ---- static maps ---- */
 
@@ -155,6 +159,12 @@ export function W3Settings() {
   const [editingKey, setEditingKey] = useState(false);
   const [keyInput, setKeyInput] = useState("");
   const [compatKeyInput, setCompatKeyInput] = useState("");
+  /** Why the last hand-translation attempt refused, so it can be shown. */
+  const [manualSeedRefusal, setManualSeedRefusal] = useState<Exclude<
+    ManualSeedOutcome,
+    "started"
+  > | null>(null);
+  const [manualSeedPending, setManualSeedPending] = useState(false);
 
   /* migration guard: persisted state may predate the `provider` field */
   const providerId = PROVIDER_ORDER.includes(settings.provider)
@@ -1143,6 +1153,19 @@ export function W3Settings() {
         )}
       </div>
 
+      {/* Hand translation refused. Same shape as the source-export failure
+          above, because it is the same kind of news: the button you pressed
+          did not do the thing, and here is why. */}
+      {manualSeedRefusal !== null && (
+        <div className="mb-8 border border-amber/40 px-3 py-2 text-[11px] leading-[1.5]" style={{ background: "rgba(245,180,84,0.06)" }}>
+          <span className="font-semibold text-amber">{t("w3.manualSeed.refused")}</span>
+          <span className="text-text2"> — {t(`w3.manualSeed.${manualSeedRefusal}`)}</span>
+          {manualSeedRefusal === "requestFailed" && wizard.runError !== null && (
+            <span className="font-mono break-words text-text3"> ({wizard.runError})</span>
+          )}
+        </div>
+      )}
+
       {/* Wizard footer */}
       <div className="flex items-center justify-between border-t border-line pt-5">
         <button
@@ -1176,17 +1199,30 @@ export function W3Settings() {
               this path exists for. */}
           <button
             type="button"
-            disabled={wizard.runState === "running"}
+            disabled={wizard.runState === "running" || manualSeedPending}
             onClick={() => {
+              setManualSeedPending(true);
+              setManualSeedRefusal(null);
               void wizard.startManualSeed().then((outcome) => {
-                if (outcome === "started") go("w5m");
+                setManualSeedPending(false);
+                if (outcome === "started") {
+                  go("w5m");
+                  return;
+                }
+                // Never silently: a button press that changes nothing on
+                // screen is how this path was reported as broken.
+                setManualSeedRefusal(outcome);
               });
             }}
             className="flex cursor-pointer items-center gap-[6px] border border-edge bg-card px-4 py-[10px] text-[12px] font-semibold whitespace-nowrap text-text2 hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
-              <path d="M2 10 L4 10 L10 4 L8 2 L2 8 Z" />
-            </svg>
+            {manualSeedPending ? (
+              <span className="inline-block h-3 w-3 animate-pxspin border-2 border-text2 border-t-transparent" />
+            ) : (
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M2 10 L4 10 L10 4 L8 2 L2 8 Z" />
+              </svg>
+            )}
             {t("w3.footer.startManual")}
           </button>
           <button

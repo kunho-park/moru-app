@@ -307,7 +307,16 @@ export const useManual = create<ManualStore>()(
         // keying off `refs.length` let both passes through while the first
         // fetch was still in flight — appending the same page twice.
         // `refresh()` is the way to deliberately re-snapshot.
-        if (get().jobId === jobId) return;
+        //
+        // "Already in flight or already succeeded" rather than a bare id
+        // match, because a bare id match latched FAILURE too: the engine
+        // answers 409 on /entries until the job has a result, and one such
+        // miss left the queue permanently empty with no way back — no retry,
+        // no message, just an empty screen.
+        const current = get();
+        if (current.jobId === jobId && (current.loading || current.error === null)) {
+          return;
+        }
         set({ jobId, ...EMPTY_STATE });
         // Adopt the engine's placeholder grammar. The renderer's fallback is
         // close but not identical, and the engine is the authority because the

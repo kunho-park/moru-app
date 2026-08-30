@@ -122,7 +122,7 @@ test("the run is recorded with no model rather than a fake one", async () => {
 test("it refuses while the queue is draining", async () => {
   useTranslationQueue.setState({ phase: "running" });
   const outcome = await useWizard.getState().startManualSeed();
-  expect(outcome).toBe("busy");
+  expect(outcome).toBe("queueBusy");
   expect(posts).toHaveLength(0);
   // The queued pack's session must be untouched.
   expect(useWizard.getState().sessionId).toBe("sess-1");
@@ -131,7 +131,7 @@ test("it refuses while the queue is draining", async () => {
 
 test("it refuses while the queue is pausing", async () => {
   useTranslationQueue.setState({ phase: "pausing" });
-  expect(await useWizard.getState().startManualSeed()).toBe("busy");
+  expect(await useWizard.getState().startManualSeed()).toBe("queueBusy");
   expect(posts).toHaveLength(0);
 });
 
@@ -143,12 +143,40 @@ test("a paused queue does not block a manual session", async () => {
 
 test("it refuses while a translation is already running", async () => {
   useWizard.setState({ runState: "running" });
-  expect(await useWizard.getState().startManualSeed()).toBe("busy");
+  expect(await useWizard.getState().startManualSeed()).toBe("runBusy");
   expect(posts).toHaveLength(0);
 });
 
 test("it refuses with no modpack selected", async () => {
   useWizard.setState({ modpackPath: null });
-  expect(await useWizard.getState().startManualSeed()).toBe("busy");
+  expect(await useWizard.getState().startManualSeed()).toBe("noPack");
   expect(posts).toHaveLength(0);
+});
+
+/**
+ * Every refusal names itself. A flat "busy" gave W3 nothing to render, which
+ * is how "the button does nothing" became a user-visible bug: the screen has
+ * to be able to say WHICH refusal happened.
+ */
+test("each refusal reason is distinct", async () => {
+  useTranslationQueue.setState({ phase: "running" });
+  const queueBusy = await useWizard.getState().startManualSeed();
+  useTranslationQueue.setState({ phase: "idle" });
+  useWizard.setState({ runState: "running" });
+  const runBusy = await useWizard.getState().startManualSeed();
+  useWizard.setState({ runState: "idle", modpackPath: null });
+  const noPack = await useWizard.getState().startManualSeed();
+  expect(new Set([queueBusy, runBusy, noPack]).size).toBe(3);
+  expect(posts).toHaveLength(0);
+});
+
+/**
+ * The seed must persist its job id onto the session record. Without it a
+ * reopened hand-translation session finds no job and renders the "nothing to
+ * translate" panel — the same empty screen, by a different route.
+ */
+test("the seed records its job id on the session", async () => {
+  expect(await useWizard.getState().startManualSeed()).toBe("started");
+  const record = useSessions.getState().sessions.find((s) => s.id === "sess-1");
+  expect(record.translateJobId).toBe("manual-job");
 });

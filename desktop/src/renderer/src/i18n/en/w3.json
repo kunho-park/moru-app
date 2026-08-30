@@ -109,6 +109,13 @@
     "failed": "Source-text export failed",
     "needPack": "Pick a modpack first"
   },
+  "manualSeed": {
+    "refused": "Could not start hand translation",
+    "noPack": "Pick a modpack in step 1 first.",
+    "runBusy": "A translation is already running. Let it finish or cancel it, then press this again.",
+    "queueBusy": "A multi-pack run is in progress. Starting a hand translation now would push the queued pack aside, so it has to wait — pause the queue or let it finish, then try again.",
+    "requestFailed": "The engine would not accept the job. Try again in a moment."
+  },
   "footer": {
     "tokens": "{{n}} tokens",
     "estimated": "est.",

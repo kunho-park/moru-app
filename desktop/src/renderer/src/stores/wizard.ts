@@ -88,6 +88,21 @@ export const useSessionJobs = create<SessionJobsStore>((set) => ({
     }),
 }));
 
+/**
+ * Why a hand-translation seed did or did not start.
+ *
+ * Specific reasons rather than a flat "busy": every one of them is a refusal
+ * the user has to be told about on screen. A button that silently does
+ * nothing is indistinguishable from a broken app, which is exactly how the
+ * queue-busy and no-pack refusals were reported.
+ */
+export type ManualSeedOutcome =
+  | "started"
+  | "noPack"
+  | "runBusy"
+  | "queueBusy"
+  | "requestFailed";
+
 interface WizardStore {
   /* W1 */
   sessionId: string | null;
@@ -174,7 +189,7 @@ interface WizardStore {
    * Drives the same `runState` as an ordinary run, so W5/W5M/W6 and the
    * history record need no special case.
    */
-  startManualSeed: () => Promise<"started" | "busy">;
+  startManualSeed: () => Promise<ManualSeedOutcome>;
   handleTranslationFrame: (frame: JobEventFrame, sessionId: string) => void;
   cancelTranslate: () => Promise<void>;
   updateReviewStats: (stats: PipelineStats) => void;
@@ -1072,19 +1087,21 @@ export const useWizard = create<WizardStore>((set, get) => ({
    * curation needs a model, which is why `extract_glossary` is forced off
    * here as well as engine-side.
    *
-   * Returns "busy" rather than clobbering state: the queue drives this same
-   * single wizard session and reads a `sessionId` change as abandonment, so
-   * starting a manual session mid-drain would silently drop a queued pack.
+   * Refuses with a NAMED reason rather than clobbering state, and W3 renders
+   * it: the queue drives this same single wizard session and reads a
+   * `sessionId` change as abandonment, so starting a manual session mid-drain
+   * would silently drop a queued pack.
    */
   startManualSeed: async () => {
     const state = get();
-    if (state.modpackPath === null || state.runState === "running") return "busy";
+    if (state.modpackPath === null) return "noPack";
+    if (state.runState === "running") return "runBusy";
     // The queue drives this same single wizard session and reads a `sessionId`
     // change as abandonment, so seeding a manual session mid-drain would
     // silently drop a queued pack. (translationQueue imports this module, but
     // the cycle is inert: both sides only dereference at call time.)
     const queuePhase = useTranslationQueue.getState().phase;
-    if (queuePhase === "running" || queuePhase === "pausing") return "busy";
+    if (queuePhase === "running" || queuePhase === "pausing") return "queueBusy";
 
     const settings = snapshotTranslationSettings();
     const scanTotals = selectedScanTotals(state);
@@ -1161,18 +1178,27 @@ export const useWizard = create<WizardStore>((set, get) => ({
       const job = await api.startTranslate(params);
       set({ translateJobId: job.id });
       useSessionJobs.getState().register(sessionId, job.id);
-      closeTranslateEvents = openJobEvents(job.id, (frame: JobEventFrame) => {
-        get().handleTranslationFrame(frame, sessionId);
-      });
+      // The SAME plumbing an ordinary run uses, deliberately — a raw
+      // `openJobEvents` here left a manual seed with neither of the two
+      // guarantees W5M now depends on:
+      //  * the session record never learned its `translateJobId`, so
+      //    reopening the session later found no job and showed the
+      //    "nothing to translate" panel instead of the queue;
+      //  * a dropped event stream was never re-established, so a missed
+      //    terminal frame pinned `runState` at "running" forever.
+      useSessions.getState().patch(sessionId, { translateJobId: job.id });
+      lastSessionProgressPersistedAt = 0;
+      attachTranslationEvents(job.id, sessionId);
       return "started";
     } catch (error) {
+      get().appendLog("error", String(error));
       set({ runState: "failed", runError: String(error) });
       useSessions.getState().patch(sessionId, {
         status: "failed",
         finishedAt: Date.now(),
         error: String(error),
       });
-      return "busy";
+      return "requestFailed";
     }
   },
 

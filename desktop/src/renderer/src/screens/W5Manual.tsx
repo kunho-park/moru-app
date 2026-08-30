@@ -24,6 +24,7 @@ import {
   tokensOf,
   useTokenPatterns,
 } from "@/components/EntryText";
+import { formatInt } from "@/lib/format";
 import { useRouter } from "@/stores/router";
 import { refId, useManual, visibleQueue } from "@/stores/manual";
 import { useWizard } from "@/stores/wizard";
@@ -37,8 +38,12 @@ export function W5Manual(): ReactNode {
   useTokenPatterns();
   const go = useRouter((s) => s.go);
   const translateJobId = useWizard((s) => s.translateJobId);
+  const runState = useWizard((s) => s.runState);
+  const runError = useWizard((s) => s.runError);
   const sourceLocale = useWizard((s) => s.sourceLocale);
   const targetLocale = useWizard((s) => s.targetLocale);
+  const scanTotals = useWizard((s) => s.scanTotals);
+  const doneEntries = useWizard((s) => s.doneEntries);
 
   const jobId = useManual((s) => s.jobId);
   const refs = useManual((s) => s.refs);
@@ -48,6 +53,8 @@ export function W5Manual(): ReactNode {
   const flaggedOnly = useManual((s) => s.flaggedOnly);
   const cursor = useManual((s) => s.cursor);
   const error = useManual((s) => s.error);
+  const loading = useManual((s) => s.loading);
+  const refresh = useManual((s) => s.refresh);
   const open = useManual((s) => s.open);
   const move = useManual((s) => s.move);
   const commit = useManual((s) => s.commit);
@@ -67,9 +74,24 @@ export function W5Manual(): ReactNode {
   const jobDrafts = jobId === null ? {} : (drafts[jobId] ?? {});
   const jobFlags = jobId === null ? [] : (flags[jobId] ?? []);
 
+  /**
+   * The seed run has to FINISH before there is anything to page through:
+   * `GET /translate/{id}/entries` answers 409 while the job is still running
+   * ("no result available"), and the W3 entry point routes here the instant
+   * the job is accepted. Fetching then produced an empty queue that never
+   * refilled — the reported "clicking hand-translate shows nothing".
+   *
+   * `running` is the only state with no result to ask for; `failed` has no
+   * queue to show either. Everything else asks, and a refusal is now visible
+   * and retryable rather than silent.
+   */
+  const seedPreparing = runState === "running";
+  const seedFailed = runState === "failed";
+  const queueReady = translateJobId !== null && !seedPreparing && !seedFailed;
+
   useEffect(() => {
-    if (translateJobId !== null) void open(translateJobId);
-  }, [translateJobId, open]);
+    if (queueReady && translateJobId !== null) void open(translateJobId);
+  }, [queueReady, translateJobId, open]);
 
   // Load the focused entry's text into the editor: the stored draft if one
   // survived, otherwise whatever the entry already carries.
@@ -184,6 +206,63 @@ export function W5Manual(): ReactNode {
     );
   }
 
+  /**
+   * The seed run is still building the queue. Shown instead of an empty
+   * queue, which is what this screen used to render for the entire duration
+   * of the run — and kept rendering afterwards, because the one fetch it
+   * made had already failed.
+   */
+  if (seedPreparing) {
+    const total = scanTotals?.entries ?? 0;
+    return (
+      <div className="animate-fade-in-up px-10 py-[28px]">
+        {stepHeader}
+        <div className="flex flex-col items-center justify-center gap-2 border border-line2 bg-raised py-20">
+          <span className="mb-1 inline-block h-4 w-4 animate-pxspin border-2 border-accent border-t-transparent" />
+          <h2 className="m-0 text-[18px] font-bold text-text">{t("w5m.preparing.title")}</h2>
+          <p className="m-0 max-w-[460px] text-center text-[13px] text-text2">
+            {t("w5m.preparing.desc")}
+          </p>
+          <p className="m-0 font-mono text-[11px] text-text3">
+            {total > 0
+              ? t("w5m.preparing.progress", {
+                  done: formatInt(doneEntries),
+                  total: formatInt(total),
+                })
+              : t("w5m.preparing.working")}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  /** The seed run failed outright: there is no queue, and saying so beats a
+   *  blank list the user cannot act on. */
+  if (seedFailed) {
+    return (
+      <div className="animate-fade-in-up px-10 py-[28px]">
+        {stepHeader}
+        <div className="flex flex-col items-center justify-center gap-2 border border-red/30 bg-red/5 py-20">
+          <h2 className="m-0 text-[18px] font-bold text-text">{t("w5m.failed.title")}</h2>
+          <p className="m-0 max-w-[460px] text-center text-[13px] text-text2">
+            {t("w5m.failed.desc")}
+          </p>
+          {runError !== null && (
+            <p className="m-0 max-w-[560px] px-6 text-center font-mono text-[11px] break-words text-red">
+              {runError}
+            </p>
+          )}
+          <button
+            onClick={() => go("w3")}
+            className="mt-3 bg-accent px-5 py-[10px] text-[13px] font-bold text-[#0A100D] hover:bg-accent-hi"
+          >
+            {t("w5m.failed.cta")}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const isDirty = entry !== undefined && text !== entry.translated_text;
   const colors =
     entry === undefined ? new Map<string, number>() : tokenColorMap(entry.source_text, text);
@@ -210,6 +289,26 @@ export function W5Manual(): ReactNode {
           {t("w5m.colorPreview")}
         </button>
       </div>
+
+      {/* A failed snapshot must be visible even with nothing focused: this
+          error used to render only inside the focus pane's entry branch, so
+          the one case that matters — the queue could not be loaded at all —
+          was the one case that showed nothing. */}
+      {error !== null && (
+        <div className="mb-3 flex items-center gap-3 border border-red/30 bg-red/5 px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[12px] font-bold text-red">{t("w5m.loadError.title")}</div>
+            <div className="font-mono text-[11px] break-words text-text2">{error}</div>
+          </div>
+          <button
+            onClick={() => void refresh()}
+            disabled={loading}
+            className="shrink-0 cursor-pointer border border-edge bg-card px-3 py-[6px] text-[11px] font-semibold text-text2 hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {loading ? t("w5m.queue.loading") : t("common.action.retry")}
+          </button>
+        </div>
+      )}
 
       <div className="grid min-h-0 flex-1 grid-cols-[260px_1fr_300px] border border-line2 bg-raised">
         <ManualQueue />
@@ -307,10 +406,6 @@ export function W5Manual(): ReactNode {
                   {t("w5m.focus.flagNext")}
                 </button>
               </div>
-
-              {error !== null && (
-                <div className="mt-3 font-mono text-[11px] break-words text-red">{error}</div>
-              )}
             </>
           )}
         </div>

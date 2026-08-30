@@ -15,7 +15,12 @@ from pathlib import Path
 import moru_engine
 import pytest
 from moru_engine.glossary.vanilla_builder import VanillaGlossaryBuilder
-from moru_engine.models.glossary import UNSCOPED_RANK, Glossary, TermRule
+from moru_engine.models.glossary import (
+    UNSCOPED_RANK,
+    Glossary,
+    TermRule,
+    is_key_scope_pattern,
+)
 from moru_engine.models.glossary_filter import GlossaryFilter
 
 
@@ -553,3 +558,44 @@ def test_web_copy_of_the_dataset_has_not_drifted() -> None:
     assert len(rows) == _TOTAL_RULES
     assert _digest(rows) == _SEQUENCE_SHA
     assert _digest([row for row in rows if row[3]]) == _SCOPED_SHA
+
+
+# -- pattern grammar ----------------------------------------------------------
+
+
+def test_well_formed_patterns_are_accepted() -> None:
+    for pattern in (
+        "effect.*",
+        "effect.minecraft.wither",
+        "subtitles.*.wither",
+        "*",
+        "itemGroup.coloredBlocks",
+        "some-mod.thing_two.*",
+    ):
+        assert is_key_scope_pattern(pattern), pattern
+
+
+def test_a_pattern_that_could_never_fire_is_rejected() -> None:
+    """The separator-mismatch shape is the one that matters.
+
+    ``scope_rank`` returns None for these on every key, which is exactly what
+    an honest non-match returns, so nothing downstream can flag them. Without
+    a grammar check they are stored, displayed and edited as real rules while
+    applying to nothing.
+    """
+    dead = "effect.*;status_effect.*"
+    assert is_key_scope_pattern(dead) is False
+    # Confirm the trap: indistinguishable from a legitimate miss.
+    assert _term("시듦", "Wither", [dead]).scope_rank("effect.minecraft.wither") is None
+    for pattern in ("effect.*, entity.*", "effect..wither", ".effect", "effect.", ""):
+        assert is_key_scope_pattern(pattern) is False, pattern
+
+
+def test_the_grammar_accepts_every_shipped_scope_pattern() -> None:
+    """Whatever the builder derives must survive the boundary it is sent
+    through — a rule the engine emits but its own validator would reject
+    would make the vanilla dataset unsavable.
+    """
+    for _s, _t, _c, scope in _built_rows():
+        for pattern in scope:
+            assert is_key_scope_pattern(pattern), pattern

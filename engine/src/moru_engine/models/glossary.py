@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Literal
@@ -12,6 +13,29 @@ from pydantic import BaseModel, Field, field_validator
 #: Rank of a rule that carries no ``key_scope``: it applies to every key,
 #: and any scoped rule covering that key outranks it.
 UNSCOPED_RANK = (0, 0)
+
+#: One dotted-glob segment: ``*``, or a literal. Literals allow the characters
+#: lang keys actually use — modded keys are not all lowercase
+#: (``itemGroup.coloredBlocks``) and some use dashes. Deliberately identical to
+#: moru-web's ``glossaryKeyScope.ts`` PATTERN_RE: a scope crosses between the
+#: two through CSV and published snapshots, so one end accepting what the other
+#: rejects is how a rule ends up stored but dead.
+_KEY_SCOPE_PATTERN_RE = re.compile(
+    r"^(?:\*|[A-Za-z0-9_-]+)(?:\.(?:\*|[A-Za-z0-9_-]+))*$"
+)
+
+
+def is_key_scope_pattern(value: str) -> bool:
+    """Whether ``value`` is a well-formed ``key_scope`` glob.
+
+    :func:`_pattern_rank` answers "does this pattern cover that key" and
+    returns ``None`` both for a pattern that legitimately does not match and
+    for one that could never match anything — ``effect.*;status_effect.*``,
+    the shape a mismatched CSV separator produces, is indistinguishable from
+    an honest miss. This is the grammar check that separates the two, so a
+    scope that can never fire is refused at the boundary instead of stored.
+    """
+    return bool(_KEY_SCOPE_PATTERN_RE.match(value))
 
 
 def _pattern_rank(pattern: str, segments: list[str]) -> tuple[int, int] | None:

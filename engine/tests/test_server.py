@@ -1764,6 +1764,64 @@ def test_glossary_rejects_bad_locale(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_glossary_put_refuses_a_scope_that_could_never_fire(
+    client: TestClient,
+) -> None:
+    """A scope is only ever a narrowing, so an unparseable pattern narrows the
+    rule to nothing: stored, listed and editable while applying to no key.
+    The real source is a separator mismatch across the CSV boundary — the
+    desktop joins patterns one way and moru-web splits them another, so
+    ``effect.*;status_effect.*`` arrives as a single pattern. Refuse it here,
+    naming the pattern, rather than accepting a rule that silently does
+    nothing.
+    """
+    params = {"source_lang": "en_us", "target_lang": "ko_kr"}
+    response = client.put(
+        "/glossary",
+        json={
+            **params,
+            "terms": [
+                {
+                    "source": "Wither",
+                    "target": "시듦",
+                    "origin": "manual",
+                    "key_scope": ["effect.*;status_effect.*"],
+                }
+            ],
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 422
+    assert "effect.*;status_effect.*" in response.json()["detail"]
+
+
+def test_glossary_put_accepts_a_well_formed_scope(client: TestClient) -> None:
+    """The companion to the rejection: the shape the desktop actually sends
+    for a scoped rule must still round-trip untouched.
+    """
+    params = {"source_lang": "en_us", "target_lang": "ko_kr"}
+    response = client.put(
+        "/glossary",
+        json={
+            **params,
+            "terms": [
+                {
+                    "source": "Wither",
+                    "target": "시듦",
+                    "origin": "manual",
+                    "key_scope": ["effect.*", "subtitles.*.wither"],
+                }
+            ],
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 200
+    assert response.json()["terms"][0]["key_scope"] == [
+        "effect.*",
+        "subtitles.*.wither",
+    ]
+
+
 def test_glossary_recovers_a_legacy_or_damaged_store(
     tmp_path_factory: pytest.TempPathFactory, shutdown_flag: threading.Event
 ) -> None:
@@ -1806,7 +1864,9 @@ def test_glossary_recovers_a_legacy_or_damaged_store(
     assert read({**params, "terms": {"bogus": 1}})["terms"] == []
 
     # One unusable row must not cost the rows around it.
-    body = read({**params, "terms": [term, {"nope": True}, {"source": "Gold", "target": "금"}]})
+    body = read(
+        {**params, "terms": [term, {"nope": True}, {"source": "Gold", "target": "금"}]}
+    )
     assert [entry["source"] for entry in body["terms"]] == ["Diamond", "Gold"]
 
 
@@ -2271,9 +2331,7 @@ def test_community_translation_measures_coverage_against_the_real_scan(
     assert match["download_url"].endswith("/download")
 
     # The local side really came from the scan, not an empty placeholder.
-    scan_payload = client.get(
-        f"/scan/{scan_job['id']}/result", headers=AUTH
-    ).json()
+    scan_payload = client.get(f"/scan/{scan_job['id']}/result", headers=AUTH).json()
     assert captured["local_categories"] == {
         c["name"]: c["entry_count"] for c in scan_payload["categories"]
     }

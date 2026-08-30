@@ -52,7 +52,7 @@ from ..pipeline import (
     RetranslateError,
     TranslationPipeline,
 )
-from ..models.glossary import Glossary
+from ..models.glossary import Glossary, is_key_scope_pattern
 from ..scanner.pack_identity import PackIdentity
 from ..tm import MANUAL_ORIGIN, SHARED_GLOSSARY_VERSION, LocalTM
 from ..validator import TranslationValidator
@@ -322,6 +322,7 @@ def _entry_payload(entry: EntryResult) -> dict[str, Any]:
         "status": entry.status.value,
         "errors": list(entry.errors),
     }
+
 
 def _find_entry(
     result: PipelineResult, key: str, file: str | None = None
@@ -971,6 +972,33 @@ def create_app(
 
     @api.put("/glossary")
     async def put_glossary(body: GlossaryDoc) -> dict[str, Any]:
+        """Persist the glossary, refusing a scope that could never fire.
+
+        A ``key_scope`` is only ever a narrowing, and an unparseable pattern
+        narrows a rule to nothing: it matches no key, so the rule is stored,
+        listed and edited like any other while never applying to anything.
+        The way that happens in practice is a separator mismatch across the
+        CSV boundary — ``effect.*;status_effect.*`` arriving as one pattern —
+        and neither the model's sort/dedup validator nor ``scope_rank`` can
+        tell it apart from an honest miss. So reject it here, loudly, where
+        the client can still show the user which pattern was wrong.
+        """
+        bad = sorted(
+            {
+                pattern
+                for term in body.terms
+                for pattern in term.key_scope
+                if not is_key_scope_pattern(pattern)
+            }
+        )
+        if bad:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "invalid key_scope pattern(s): "
+                    + ", ".join(repr(pattern) for pattern in bad)
+                ),
+            )
         path = _glossary_path(body.source_lang, body.target_lang)
         data = body.model_dump()
         _atomic_write_json(path, data)

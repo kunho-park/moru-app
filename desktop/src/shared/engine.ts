@@ -438,6 +438,24 @@ export interface PipelineStats {
   undeliverable_jar_mods?: string[];
 }
 
+/**
+ * Target speech level (말투) forced into the run's style directives.
+ * `auto` keeps whatever per-surface register the compiled prompt already
+ * prescribes; the others hold ONE register across the whole pack.
+ *
+ * Korean-only by construction: the engine renders this block solely for a
+ * target locale starting `ko`, so on any other target the value is inert.
+ */
+export type SpeechLevel = "auto" | "polite" | "banmal" | "hage";
+
+/**
+ * Preference for terms with no established target-language name, where a
+ * meaning translation and a transliteration (음차) both read acceptably.
+ * `auto` keeps today's split. Applies to EVERY target language — the engine
+ * renders this block ungated, phrased against "the target language".
+ */
+export type TermStyle = "auto" | "translate" | "transliterate";
+
 /** Params for POST /jobs {type: "translate"} - engine PipelineConfig surface. */
 export interface TranslateParams {
   session_id?: string;
@@ -458,6 +476,18 @@ export interface TranslateParams {
   max_refine?: number;
   /** litellm reasoning_effort: thinking effort for reasoning-capable models */
   reasoning_effort?: "low" | "medium" | "high";
+  /** Forced speech level (말투). Korean targets only; see `SpeechLevel`. */
+  speech_level?: SpeechLevel;
+  /** Rendering preference for un-named terms; every target language. */
+  term_style?: TermStyle;
+  /**
+   * Also emit the bilingual display-name variant: a SECOND output tree whose
+   * short display names carry the original in parentheses ("철 곡괭이 (Iron
+   * Pickaxe)"). The ordinary output is unchanged and both come out of the one
+   * translation run, so this costs no extra model calls. Tooltips, quest
+   * prose and numbered sibling lines never get it.
+   */
+  bilingual_names?: boolean;
   use_tm?: boolean;
   use_vanilla_glossary?: boolean;
   extract_glossary?: boolean;

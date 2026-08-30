@@ -12,6 +12,28 @@
     "zh_cn": "중국어 간체",
     "zh_tw": "중국어 번체"
   },
+  "style": {
+    "label": "번역 말투와 용어",
+    "hint": "— 잘 모르겠다면 둘 다 자동으로 두세요",
+    "speechLevel": "말투 (말끝)",
+    "koreanOnlyBadge": "한국어 전용",
+    "speechKoreanOnly": "말끝을 고르는 건 한국어에만 있는 선택이라 {{lang}} 번역에서는 쓰이지 않습니다. 번역 대상 언어를 한국어로 바꾸면 다시 고를 수 있어요.",
+    "speech_auto": "자동",
+    "speech_polite": "존댓말",
+    "speech_banmal": "반말",
+    "speech_hage": "하게체",
+    "speechHint_auto": "문장이 놓인 자리에 맞춰 알아서 정합니다 — UI는 존댓말, NPC 대사는 상황에 맞게. 한 인물의 말투가 섞이는 일은 어느 쪽을 골라도 막아줘요.",
+    "speechHint_polite": "팩 전체를 존댓말로 통일합니다 — \"…합니다\", \"…하세요\". NPC 잡담이나 분위기 문장도 예외 없이 존댓말이에요.",
+    "speechHint_banmal": "팩 전체를 반말로 통일합니다 — \"…해\", \"…야\", \"…지\". 친구 같은 말투가 어울리는 캐주얼한 팩에 맞아요.",
+    "speechHint_hage": "팩 전체를 하게체로 통일합니다 — \"…하네\", \"…인가?\", \"자네\". Prominence처럼 중세·판타지 분위기인 팩이 훨씬 그럴듯해집니다.",
+    "termStyle": "새 용어 표기",
+    "term_auto": "자동",
+    "term_translate": "뜻 번역",
+    "term_transliterate": "음차",
+    "termHint_auto": "정해진 한국어 이름이 없는 용어를 지금까지처럼 처리합니다 — 뜻이 분명하면 번역, 만들어낸 말이면 소리대로.",
+    "termHint_translate": "정해진 이름이 없으면 뜻을 우리말로 풀어 씁니다 — Sunfire Blade → 태양불꽃 검. 용어사전과 공식 명칭은 그대로 우선해요.",
+    "termHint_transliterate": "정해진 이름이 없으면 소리 나는 대로 적습니다 — Sunfire Blade → 선파이어 블레이드. 용어사전과 공식 명칭은 그대로 우선해요."
+  },
   "provider": {
     "label": "AI 제공자",
     "connected": "연결됨",
@@ -95,6 +117,8 @@
     "tmError": "번역 메모리 정보를 불러오지 못했어요",
     "placeholderTitle": "색코드(§)·플레이스홀더 보존",
     "placeholderSub": "%s, {player}, §e §r 등 원본 유지",
+    "bilingualTitle": "원문 병기 팩도 함께 만들기",
+    "bilingualSub": "철 곡괭이 (Iron Pickaxe) — 아이템·블록·엔티티 이름에만 붙고, 툴팁·퀘스트 문장·번호로 나뉜 줄에는 붙지 않아요. 기존 팩은 그대로 두고 추가로 하나 더 나옵니다 · 같은 번역을 재활용하니 추가 비용 없음",
     "shareTitle": "완료 후 자동으로 커뮤니티에 공유",
     "shareSub": "Discord 로그인 필요 · 준비 중"
   },

@@ -279,6 +279,21 @@ export function buildTranslateParams(
     max_concurrent: settings.maxConcurrent,
     max_refine: settings.maxRefine,
     reasoning_effort: settings.thinkingEnabled ? settings.thinkingEffort : undefined,
+    // Translation style. Every one of these is omitted at its default so an
+    // untouched run posts byte-identical params to before they existed —
+    // same idiom as `reasoning_effort` above.
+    //
+    // `speech_level` is additionally gated on a Korean target because the
+    // engine renders that block only for `target_lang.startswith("ko")`
+    // (`dspy_modules/signatures.py`). Mirroring the gate here means a value
+    // the user picked for Korean can never ride along into a Japanese run
+    // and misreport what was asked for.
+    speech_level:
+      state.targetLocale.startsWith("ko") && settings.speechLevel !== "auto"
+        ? settings.speechLevel
+        : undefined,
+    term_style: settings.termStyle !== "auto" ? settings.termStyle : undefined,
+    bilingual_names: settings.bilingualNames ? true : undefined,
     use_tm: settings.useTm,
     use_vanilla_glossary: settings.useVanillaGlossary,
     extract_glossary: settings.extractGlossary,

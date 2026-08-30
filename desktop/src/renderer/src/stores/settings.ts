@@ -3,6 +3,8 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import type { SpeechLevel, TermStyle } from "../../../shared/engine";
+
 /**
  * Mods excluded from translation out of the box: libraries, optimization
  * mods and author tooling, whose strings only the modpack author ever
@@ -47,6 +49,14 @@ export interface TranslationRunSettings {
   glossaryMaxTerms: number | null;
   ollamaBaseUrl: string;
   openaiCompatBaseUrl: string;
+  /**
+   * Translation style, frozen with the rest for the same reason
+   * `modBlacklist` is: a queued pack must run with the style that was in
+   * force when the queue started, not whatever it is edited to mid-drain.
+   */
+  speechLevel: SpeechLevel;
+  termStyle: TermStyle;
+  bilingualNames: boolean;
   targetLocale: string;
   /** Frozen with the rest: a queued run must use the blacklist that was
    *  in force when the queue started, not whatever it is edited to later. */
@@ -78,6 +88,16 @@ interface SettingsStore {
   ollamaBaseUrl: string;
   /** OpenAI-compatible server (LM Studio, llama.cpp, vLLM) base URL incl. /v1 */
   openaiCompatBaseUrl: string;
+  /**
+   * Forced Korean speech level (말투). "auto" keeps the compiled prompt's own
+   * per-surface register, which is today's behaviour. Inert on a non-Korean
+   * target, so W3 disables the control there rather than pretending.
+   */
+  speechLevel: SpeechLevel;
+  /** Meaning-translate vs transliterate for terms with no established name. */
+  termStyle: TermStyle;
+  /** Also emit the bilingual display-name variant, from the same run. */
+  bilingualNames: boolean;
   targetLocale: string;
   recentFolders: string[];
   /** Mod ids never translated; seeded from DEFAULT_MOD_BLACKLIST. */
@@ -108,6 +128,11 @@ export const useSettings = create<SettingsStore>()(
       glossaryMaxTerms: 3000,
       ollamaBaseUrl: "http://localhost:11434",
       openaiCompatBaseUrl: "http://localhost:1234/v1",
+      // Today's behaviour, exactly: nothing extra reaches the prompt and no
+      // second output tree is written unless the user asks.
+      speechLevel: "auto",
+      termStyle: "auto",
+      bilingualNames: false,
       targetLocale: "ko_kr",
       recentFolders: [],
       modBlacklist: [...DEFAULT_MOD_BLACKLIST],
@@ -140,6 +165,9 @@ export function snapshotTranslationSettings(): TranslationRunSettings {
     glossaryMaxTerms: state.glossaryMaxTerms,
     ollamaBaseUrl: state.ollamaBaseUrl,
     openaiCompatBaseUrl: state.openaiCompatBaseUrl,
+    speechLevel: state.speechLevel,
+    termStyle: state.termStyle,
+    bilingualNames: state.bilingualNames,
     targetLocale: state.targetLocale,
     modBlacklist: [...state.modBlacklist],
   };

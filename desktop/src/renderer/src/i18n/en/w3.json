@@ -12,6 +12,28 @@
     "zh_cn": "Simplified Chinese",
     "zh_tw": "Traditional Chinese"
   },
+  "style": {
+    "label": "Tone and terminology",
+    "hint": "— not sure? leave both on Auto",
+    "speechLevel": "Speech level (말투)",
+    "koreanOnlyBadge": "Korean only",
+    "speechKoreanOnly": "Choosing sentence endings is a Korean-specific decision, so it is not used for {{lang}}. Switch the target language back to Korean to pick one.",
+    "speech_auto": "Auto",
+    "speech_polite": "존댓말",
+    "speech_banmal": "반말",
+    "speech_hage": "하게체",
+    "speechHint_auto": "Decided per surface: polite for UI, whatever fits for NPC lines. One character's register never drifts mid-conversation, whichever option you pick.",
+    "speechHint_polite": "One polite register across the whole pack — \"…합니다\", \"…하세요\". NPC chatter and flavour text included, no exceptions.",
+    "speechHint_banmal": "One casual register across the whole pack — \"…해\", \"…야\", \"…지\". Suits packs with a friendly, informal voice.",
+    "speechHint_hage": "The archaic familiar register throughout — \"…하네\", \"…인가?\", \"자네\". Makes medieval and high-fantasy packs like Prominence read far more in character.",
+    "termStyle": "New terms",
+    "term_auto": "Auto",
+    "term_translate": "Translate",
+    "term_transliterate": "Transliterate",
+    "termHint_auto": "Terms with no established Korean name are handled as they are today — translated when the meaning is clear, sounded out when the word is invented.",
+    "termHint_translate": "With no established name, render the meaning: Sunfire Blade → 태양불꽃 검. Glossary rules and official names still win.",
+    "termHint_transliterate": "With no established name, sound it out: Sunfire Blade → 선파이어 블레이드. Glossary rules and official names still win."
+  },
   "provider": {
     "label": "AI provider",
     "connected": "Connected",
@@ -95,6 +117,8 @@
     "tmError": "Could not load translation memory info",
     "placeholderTitle": "Preserve color codes (§) & placeholders",
     "placeholderSub": "%s, {player}, §e §r etc. kept as-is",
+    "bilingualTitle": "Also build a bilingual-names pack",
+    "bilingualSub": "철 곡괭이 (Iron Pickaxe) — item, block and entity names only; tooltips, quest prose and numbered lines never get it. An extra pack alongside the normal one, which is left untouched · reuses the same translation, so it costs nothing more",
     "shareTitle": "Auto-share with the community when done",
     "shareSub": "Discord sign-in required · coming soon"
   },

@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { SpeechLevel, TermStyle } from "../../../shared/engine";
 import { ModelSelect } from "@/components/ModelSelect";
 import { api } from "@/lib/api";
 import { moru } from "@/lib/bridge";
@@ -89,6 +90,10 @@ function maskKey(key: string): string {
   if (key.length <= 12) return `${key.slice(0, 3)}...`;
   return `${key.slice(0, 7)}...${key.slice(-4)}`;
 }
+
+/** Selectable style axes, in the engine's own literal order. */
+const SPEECH_LEVELS: readonly SpeechLevel[] = ["auto", "polite", "banmal", "hage"];
+const TERM_STYLES: readonly TermStyle[] = ["auto", "translate", "transliterate"];
 
 /* ---- screen-local pieces ---- */
 
@@ -174,6 +179,12 @@ export function W3Settings() {
   const isCompat = providerId === "openai-compatible";
   const isLocal = LOCAL_PROVIDERS.has(providerId);
   const tiers = PROVIDER_TIERS[providerId];
+
+  /* The engine renders its speech-level directive only for a `ko*` target
+     (`dspy_modules/signatures.py`), so on any other target that control is
+     inert and is disabled with the reason rather than left to do nothing.
+     `term_style` is ungated engine-side and stays live for every target. */
+  const koreanTarget = wizard.targetLocale.startsWith("ko");
 
   const totals = selectedScanTotals(wizard);
   const usage = estimateUsage({
@@ -471,6 +482,79 @@ export function W3Settings() {
           <div className="flex items-center gap-[6px] border border-edge bg-card px-[10px] py-1">
             <div className="h-3 w-[18px]" style={SOURCE_FLAG} />
             <span className="font-mono text-[11px] text-text">{wizard.sourceLocale}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Translation style. Sits next to the target-language picker because
+          both dimensions read off it: the speech level is a Korean-only
+          directive engine-side, so on another target the control is disabled
+          with the reason rather than silently doing nothing. */}
+      <div className="mb-5 border border-line2 bg-raised p-4">
+        <div className="mb-3 flex items-baseline gap-2">
+          <span className="text-[12px] font-semibold text-text3">{t("w3.style.label")}</span>
+          <span className="font-mono text-[11px] text-text4">{t("w3.style.hint")}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <span className="mb-[6px] flex items-baseline gap-2 font-mono text-[11px] text-text3">
+              {t("w3.style.speechLevel")}
+              {!koreanTarget && (
+                <span className="text-[10px] text-amber">
+                  {t("w3.style.koreanOnlyBadge")}
+                </span>
+              )}
+            </span>
+            <div className="flex gap-[6px]">
+              {SPEECH_LEVELS.map((level) => (
+                <button
+                  key={level}
+                  type="button"
+                  aria-pressed={koreanTarget && settings.speechLevel === level}
+                  disabled={!koreanTarget}
+                  onClick={() => settings.set({ speechLevel: level })}
+                  className={
+                    koreanTarget && settings.speechLevel === level
+                      ? "flex-1 cursor-pointer border border-accent bg-accent/10 px-2 py-[7px] font-mono text-[11px] text-accent"
+                      : "flex-1 cursor-pointer border border-edge bg-ink px-2 py-[7px] font-mono text-[11px] text-text3 hover:border-edge2 hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
+                  }
+                >
+                  {t(`w3.style.speech_${level}`)}
+                </button>
+              ))}
+            </div>
+            <span className="mt-[6px] block font-mono text-[10px] leading-[1.5] text-text3">
+              {koreanTarget
+                ? t(`w3.style.speechHint_${settings.speechLevel}`)
+                : t("w3.style.speechKoreanOnly", {
+                    lang: t(`w3.lang.${wizard.targetLocale}`),
+                  })}
+            </span>
+          </div>
+          <div>
+            <span className="mb-[6px] block font-mono text-[11px] text-text3">
+              {t("w3.style.termStyle")}
+            </span>
+            <div className="flex gap-[6px]">
+              {TERM_STYLES.map((style) => (
+                <button
+                  key={style}
+                  type="button"
+                  aria-pressed={settings.termStyle === style}
+                  onClick={() => settings.set({ termStyle: style })}
+                  className={
+                    settings.termStyle === style
+                      ? "flex-1 cursor-pointer border border-accent bg-accent/10 px-2 py-[7px] font-mono text-[11px] text-accent"
+                      : "flex-1 cursor-pointer border border-edge bg-ink px-2 py-[7px] font-mono text-[11px] text-text3 hover:border-edge2 hover:text-text"
+                  }
+                >
+                  {t(`w3.style.term_${style}`)}
+                </button>
+              ))}
+            </div>
+            <span className="mt-[6px] block font-mono text-[10px] leading-[1.5] text-text3">
+              {t(`w3.style.termHint_${settings.termStyle}`)}
+            </span>
           </div>
         </div>
       </div>
@@ -1069,6 +1153,12 @@ export function W3Settings() {
           checked
           title={t("w3.options.placeholderTitle")}
           sub={t("w3.options.placeholderSub")}
+        />
+        <OptionCheck
+          checked={settings.bilingualNames}
+          onToggle={() => settings.set({ bilingualNames: !settings.bilingualNames })}
+          title={t("w3.options.bilingualTitle")}
+          sub={t("w3.options.bilingualSub")}
         />
         <OptionCheck
           checked={false}

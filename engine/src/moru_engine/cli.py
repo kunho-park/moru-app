@@ -178,6 +178,19 @@ async def _cmd_translate(args: argparse.Namespace) -> int:
     return 0 if stats.failed_entries == 0 else 2
 
 
+async def _cmd_verify_agy(args: argparse.Namespace) -> int:
+    """Print a raw `agy` translation envelope and a plain verdict."""
+    from .cli_providers.antigravity import AgyError, verify_report
+
+    try:
+        ok, report = await asyncio.to_thread(verify_report, args.model)
+    except AgyError as exc:
+        print(f"VERDICT: FAIL — {exc}")
+        return 1
+    print(report)
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="moru-engine", description="Moru engine CLI")
     parser.add_argument("--verbose", action="store_true", help="debug logging")
@@ -226,6 +239,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="sampling temperature (also busts the DSPy response cache)",
     )
     translate.set_defaults(func=_cmd_translate)
+
+    verify_agy = sub.add_parser(
+        "verify-agy",
+        help="prove Antigravity CLI (agy) returns usable translations",
+        description=(
+            "Runs ONE real translation through `agy` headless mode and prints "
+            "the raw JSON envelope. Requires an installed, signed-in agy "
+            "(run `agy` once to sign in). Answers the one question that "
+            "cannot be checked without a Google account: is the response the "
+            "bare translation with protected tokens intact, or does the agent "
+            "wrap it in commentary?"
+        ),
+    )
+    verify_agy.add_argument(
+        "--model",
+        default=None,
+        help="agy model slug (default: the transport's own default; "
+        "list them with `agy models`)",
+    )
+    verify_agy.set_defaults(func=_cmd_verify_agy)
 
     return parser
 

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
+from litellm.types.utils import ModelResponse
 
 from moru_engine.cli_providers import (
     antigravity,
@@ -1267,3 +1269,227 @@ def test_every_catalogued_cli_model_survives_the_wire_round_trip() -> None:
             bare = to_wire_model(public).split("/", 1)[1]
             assert bare not in litellm.open_ai_chat_completion_models, public
             assert resolvers[entry["id"]](bare) == public.split("/", 1)[1]
+
+
+# --------------------------------------------------------------------------
+# Antigravity translation transport — `agy -p` headless mode
+# --------------------------------------------------------------------------
+
+
+def _envelope(**fields) -> subprocess.CompletedProcess[str]:
+    body = {
+        "conversation_id": "c1",
+        "status": "SUCCESS",
+        "response": "",
+        "duration_seconds": 1.0,
+        "num_turns": 1,
+        "usage": {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14},
+    }
+    body.update(fields)
+    return subprocess.CompletedProcess(
+        args=["agy"], returncode=0, stdout=json.dumps(body) + "\n", stderr=""
+    )
+
+
+def _capture(monkeypatch, proc):
+    """Run complete() against a canned envelope, returning the argv used."""
+    seen: dict[str, list[str]] = {}
+
+    def fake(args, *, timeout, cwd=None):
+        seen["args"] = list(args)
+        seen["cwd"] = str(cwd)
+        return proc
+
+    monkeypatch.setattr(antigravity, "run_agy", fake)
+    antigravity._clear_auth_failure()
+    return seen
+
+
+def test_agy_completion_reads_structured_output_not_free_text(monkeypatch) -> None:
+    """The forced schema is what keeps agent narration out of a translation.
+
+    `response` here holds prose an agent might volunteer; the trustworthy
+    value is the schema-validated field, and that is what must be used.
+    """
+    proc = _envelope(
+        response="Sure! Here is the translation you asked for.",
+        structured_output={"text": "고대 잔해"},
+    )
+    _capture(monkeypatch, proc)
+    text, usage = antigravity.complete("gemini-3.7-flash-medium", [
+        {"role": "user", "content": "Ancient Debris"}
+    ])
+    assert text == "고대 잔해"
+    assert "Sure!" not in text
+    assert usage == {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+
+
+def test_agy_completion_refuses_an_unschematized_answer(monkeypatch) -> None:
+    """No structured_output means the answer is unvalidated free text.
+
+    Returning it would risk pasting agent commentary into a modpack as a
+    translation. A failed request gets retried; a corrupted one ships.
+    """
+    proc = _envelope(response="I translated it for you: 고대 잔해")
+    _capture(monkeypatch, proc)
+    with pytest.raises(antigravity.AgyError):
+        antigravity.complete("gemini-3.7-flash-medium", [
+            {"role": "user", "content": "Ancient Debris"}
+        ])
+
+
+def test_agy_completion_fails_when_protected_tokens_are_dropped(monkeypatch) -> None:
+    """A dropped {{TOKEN}} corrupts the pack, so it must fail loudly."""
+    proc = _envelope(structured_output={"text": "고대 잔해 y=15"})
+    _capture(monkeypatch, proc)
+    with pytest.raises(antigravity.AgyError) as excinfo:
+        antigravity.complete("gemini-3.7-flash-medium", [
+            {"role": "user", "content": "{{COLOR}}Ancient Debris{{PH1}} y=15"}
+        ])
+    assert "{{COLOR}}" in str(excinfo.value)
+
+
+def test_agy_completion_passes_tokens_through_untouched(monkeypatch) -> None:
+    proc = _envelope(structured_output={"text": "{{COLOR}}고대 잔해{{PH1}} y=15"})
+    _capture(monkeypatch, proc)
+    text, _ = antigravity.complete("gemini-3.7-flash-medium", [
+        {"role": "user", "content": "{{COLOR}}Ancient Debris{{PH1}} y=15"}
+    ])
+    assert "{{COLOR}}" in text and "{{PH1}}" in text
+
+
+def test_agy_status_error_beats_a_zero_exit_code(monkeypatch) -> None:
+    """Verified on the real binary: rc=0 alongside status ERROR.
+
+    So the envelope's status is authoritative, not the exit code.
+    """
+    proc = subprocess.CompletedProcess(
+        args=["agy"],
+        returncode=0,
+        stdout=json.dumps(
+            {"status": "ERROR", "response": "", "error": "authentication failed or timed out"}
+        ),
+        stderr="Authentication required. Please visit the URL to log in:\n",
+    )
+    _capture(monkeypatch, proc)
+    with pytest.raises(antigravity.AgyError) as excinfo:
+        antigravity.complete("gemini-3.7-flash-medium", [{"role": "user", "content": "x"}])
+    # Translated into something the user can act on, not the raw error.
+    assert "agy" in str(excinfo.value)
+    antigravity._clear_auth_failure()
+
+
+def test_agy_invocation_carries_every_mitigation(monkeypatch) -> None:
+    """The flags are the safety argument; a silent drop would undo it.
+
+    All four were accepted by the real v1.1.22 binary — an unknown flag
+    fails with "flags provided but not defined", which is how we know
+    `agy models --output-format` does not exist.
+    """
+    proc = _envelope(structured_output={"text": "ok"})
+    seen = _capture(monkeypatch, proc)
+    antigravity.complete("gemini-3.1-pro-high", [{"role": "user", "content": "x"}])
+    args = seen["args"]
+    assert "-p" in args
+    assert args[args.index("--output-format") + 1] == "json"
+    assert "--json-schema" in args
+    assert "--disable-slash-commands" in args
+    assert args[args.index("--print-timeout") + 1].endswith("s")
+    assert args[args.index("--model") + 1] == "gemini-3.1-pro-high"
+    # stream-json is deliberately absent: one shared conversation would
+    # accumulate context and usage across independent batches.
+    assert "--input-format" not in args
+    # An agent run must not be pointed at the user's own project.
+    assert seen["cwd"] and seen["cwd"] != str(Path.cwd())
+
+
+def test_agy_prompt_folds_the_system_message_with_visible_delimiters() -> None:
+    """agy has no --system flag, so separation must be expressed in text."""
+    prompt = antigravity.build_prompt(
+        [
+            {"role": "system", "content": "Translate to Korean."},
+            {"role": "user", "content": "Ancient Debris"},
+        ]
+    )
+    assert "Translate to Korean." in prompt
+    assert "Ancient Debris" in prompt
+    assert prompt.index("Translate to Korean.") < prompt.index("Ancient Debris")
+    assert antigravity._SYSTEM_DELIM in prompt
+    assert antigravity._INPUT_DELIM in prompt
+
+
+def test_agy_process_cap_is_bounded_and_overridable(monkeypatch) -> None:
+    """A considered limit, because 145MB x 15 is not free on every machine."""
+    monkeypatch.setenv(antigravity.MAX_PROCESSES_ENV, "3")
+    assert antigravity.process_cap() == 3
+    # Never above the pipeline's own concurrency, never below one.
+    monkeypatch.setenv(antigravity.MAX_PROCESSES_ENV, "999")
+    assert antigravity.process_cap() == antigravity._MAX_PROCESSES
+    monkeypatch.setenv(antigravity.MAX_PROCESSES_ENV, "0")
+    assert antigravity.process_cap() == 1
+    monkeypatch.setenv(antigravity.MAX_PROCESSES_ENV, "not-a-number")
+    assert 1 <= antigravity.process_cap() <= antigravity._MAX_PROCESSES
+
+
+def test_agy_auth_failure_short_circuits_the_next_call(monkeypatch) -> None:
+    """A signed-out agy waits 60s per process; the batch must not pay it N times."""
+    calls = {"n": 0}
+
+    def fake(args, *, timeout, cwd=None):
+        calls["n"] += 1
+        return subprocess.CompletedProcess(
+            args=["agy"],
+            returncode=0,
+            stdout=json.dumps({"status": "ERROR", "error": "authentication failed"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(antigravity, "run_agy", fake)
+    antigravity._clear_auth_failure()
+    for _ in range(3):
+        with pytest.raises(antigravity.AgyError):
+            antigravity.complete("gemini-3.7-flash-medium", [{"role": "user", "content": "x"}])
+    assert calls["n"] == 1, "only the first attempt should reach the subprocess"
+    antigravity._clear_auth_failure()
+
+
+def test_gemini_handler_routes_to_agy_when_that_is_the_transport(
+    gemini_home, monkeypatch
+) -> None:
+    """The dispatch itself: no oauth_creds.json, agy installed -> subprocess.
+
+    Proves an Antigravity user can translate without any API key and
+    without the legacy HTTP path being touched.
+    """
+    monkeypatch.setattr(credentials, "_agy_installed", lambda: True)
+    monkeypatch.setattr(
+        antigravity, "run_agy",
+        lambda args, *, timeout, cwd=None: _envelope(structured_output={"text": "고대 잔해"}),
+    )
+    antigravity._clear_auth_failure()
+
+    def _no_http(*_a, **_k):
+        raise AssertionError("agy transport must not call cloudcode-pa")
+
+    monkeypatch.setattr(credentials.GEMINI_CLI_STORE, "_send", _no_http)
+    response = gemini_cli.GeminiCliLLM().completion(
+        model="@/gemini-3.7-flash-medium",
+        messages=[{"role": "user", "content": "Ancient Debris"}],
+        model_response=ModelResponse(),
+    )
+    assert response.choices[0].message.content == "고대 잔해"
+    assert response.model == "gemini-cli/gemini-3.7-flash-medium"
+
+
+def test_saved_legacy_model_on_the_agy_path_names_its_replacement() -> None:
+    """A retired id must produce a clear message, not a confusing failure.
+
+    agy exits non-zero on an unknown --model and names no alternative, so
+    passing it through would leave the user guessing. Silently substituting
+    would bill a model other than the one displayed.
+    """
+    with pytest.raises(antigravity.AgyError) as excinfo:
+        antigravity.resolve_model_for_agy("gemini-cli/gemini-3.5-flash")
+    message = str(excinfo.value)
+    assert "gemini-3.5-flash" in message
+    assert "gemini-3.5-flash-medium" in message

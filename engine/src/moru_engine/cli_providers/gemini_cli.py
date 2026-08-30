@@ -11,6 +11,7 @@ Assist entitlement translates modpacks without an API key.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Iterable
@@ -19,8 +20,15 @@ import httpx
 from litellm import CustomLLM
 from litellm.types.utils import Choices, Message, ModelResponse, PromptTokensDetails, Usage
 
+from . import antigravity
 from .wire import strip_wire_marker
-from .credentials import CODE_ASSIST_ENDPOINT, GEMINI_CLI_STORE, CliAuthError, gemini_cli_headers
+from .credentials import (
+    CODE_ASSIST_ENDPOINT,
+    GEMINI_CLI_STORE,
+    TRANSPORT_AGY_CLI,
+    CliAuthError,
+    gemini_cli_headers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,18 +202,56 @@ def _check_status(status: int, body: str) -> None:
     raise RuntimeError(f"Gemini CLI request failed ({status}): {body[:400]}")
 
 
+def _agy_response(
+    model_response: ModelResponse, model: str, messages: list[dict[str, Any]]
+) -> ModelResponse:
+    """Fill a LiteLLM response from an `agy` headless run."""
+    slug = antigravity.resolve_model_for_agy(model)
+    text, usage = antigravity.complete(slug, messages)
+    model_response.choices = [
+        Choices(
+            finish_reason="stop",
+            index=0,
+            message=Message(content=text, role="assistant"),
+        )
+    ]
+    model_response.model = f"gemini-cli/{slug}"
+    setattr(
+        model_response,
+        "usage",
+        Usage(
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
+            total_tokens=usage["total_tokens"],
+        ),
+    )
+    return model_response
+
+
 class GeminiCliLLM(CustomLLM):
-    """LiteLLM provider for ``gemini-cli/<model>``."""
+    """LiteLLM provider for ``gemini-cli/<model>``.
+
+    One provider id, two transports. Which one runs is decided by
+    ``GeminiCliStore.transport`` on a stated precedence, not per call site:
+    a readable ``oauth_creds.json`` means the legacy CLI wrote it and its
+    token is borrowed over HTTP; otherwise an installed ``agy`` is driven
+    as a subprocess, because Antigravity keeps its session in the OS
+    keyring where no amount of file reading will find it.
+    """
 
     def completion(self, *args: Any, **kwargs: Any) -> ModelResponse:
         model = kwargs["model"]
-        token = GEMINI_CLI_STORE.token()
+        if GEMINI_CLI_STORE.transport == TRANSPORT_AGY_CLI:
+            return _agy_response(
+                kwargs["model_response"], model, kwargs["messages"]
+            )
+        token_str = GEMINI_CLI_STORE.token()
         project = GEMINI_CLI_STORE.project()
         payload = build_payload(
             model, kwargs["messages"], kwargs.get("optional_params") or {}, project
         )
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {token_str}",
             "Content-Type": "application/json",
             **gemini_cli_headers(resolve_model(model)),
         }
@@ -220,6 +266,12 @@ class GeminiCliLLM(CustomLLM):
 
     async def acompletion(self, *args: Any, **kwargs: Any) -> ModelResponse:
         model = kwargs["model"]
+        if GEMINI_CLI_STORE.transport == TRANSPORT_AGY_CLI:
+            # Blocking subprocess: off the event loop, or one translation
+            # stalls every other concurrent request in the pack.
+            return await asyncio.to_thread(
+                _agy_response, kwargs["model_response"], model, kwargs["messages"]
+            )
         token = GEMINI_CLI_STORE.token()
         project = GEMINI_CLI_STORE.project()
         payload = build_payload(
